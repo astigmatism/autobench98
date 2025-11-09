@@ -1,0 +1,22 @@
+{
+    "name": "autobench98",
+    "private": true,
+    "version": "0.1.0",
+    "workspaces": [
+        "services/*",
+        "packages/*",
+        "apps/*"
+    ],
+    "devDependencies": {
+        "@types/node": "^24.10.0",
+        "pino-pretty": "^13.1.2"
+    },
+    "scripts": {
+        "install:all": "npm install --workspaces",
+        "dev:orchestrator": "npm run dev --workspace services/orchestrator",
+        "dev:sidecar": "npm run dev --workspace services/sidecar-ffmpeg",
+        "build:orchestrator": "npm run build --workspace services/orchestrator",
+        "build:logging": "npm run build --workspace packages/logging",
+        "clean": "find . -type d -name node_modules -prune -exec rm -rf '{}' +"
+    }
+}

@@ -1,0 +1,16 @@
+FROM node:20-alpine
+
+ENV NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false
+
+WORKDIR /app
+COPY . .
+
+RUN npm install -g npm@11 \
+    && npm --version \
+    && npm install --workspaces
+
+RUN npm -w packages/logging run build
+
+WORKDIR /app/services/sidecar-ffmpeg
+CMD ["npm", "run", "dev"]

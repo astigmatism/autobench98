@@ -1,0 +1,18 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile.dev
+    env_file: .env
+    ports:
+      - "3000:3000"
+    container_name: autobench98_orchestrator
+
+  sidecar-ffmpeg:
+    build:
+      context: .
+      dockerfile: services/sidecar-ffmpeg/Dockerfile.dev
+    env_file: .env
+    ports:
+      - "3100:3100"
+    container_name: autobench98_sidecar
