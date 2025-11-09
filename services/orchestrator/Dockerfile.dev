@@ -16,6 +16,9 @@ RUN npm install -g npm@11 \
 # Build the shared logging lib (TS → dist)
 RUN npm -w packages/logging run build
 
-# Run orchestrator in dev
+# ⬅️ NEW: Build the frontend once so /app/ can be served by Fastify in dev
+RUN npm -w apps/web run build
+
+# Run orchestrator in dev (tsx watch)
 WORKDIR /app/services/orchestrator
 CMD ["npm", "run", "dev"]

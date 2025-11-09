@@ -4,9 +4,15 @@ import Fastify, {
     type FastifyRequest,
     type FastifyReply
 } from 'fastify'
-import websocket from '@fastify/websocket'
 import cors from '@fastify/cors'
-import type { WebSocket } from 'ws'
+import { WebSocketServer } from 'ws'
+import type { WebSocket, RawData } from 'ws'
+
+// ✨ static hosting imports
+import fastifyStatic from '@fastify/static'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import {
     createLogger,
     makeClientBuffer,
@@ -29,11 +35,29 @@ const clientBuf: ClientLogBuffer = makeClientBuffer()
 
 let reqCounter = 0
 
+// ✨ resolve path to built SPA (works from dist at runtime)
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+// When compiled, this file lives in services/orchestrator/dist/
+// We want ../../../apps/web/dist relative to that.
+const WEB_DIST = path.resolve(__dirname, '../../../apps/web/dist')
+
+// ---- Minimal in-memory app state for snapshot/patch demo ----
+type AppState = {
+    layout: { rows: number; cols: number }
+    message: string
+}
+let stateVersion = 1
+let appState: AppState = {
+    layout: { rows: 1, cols: 1 },
+    message: 'Hello from orchestrator'
+}
+
 export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const { channel } = createLogger('orchestrator', clientBuf)
-    const logApp  = channel(LogChannel.app)
-    const logWs   = channel(LogChannel.websocket)
-    const logReq  = channel(LogChannel.request)
+    const logApp = channel(LogChannel.app)
+    const logWs = channel(LogChannel.websocket)
+    const logReq = channel(LogChannel.request)
 
     // Track request start times by Fastify request id
     const startedAt = new Map<string, number>()
@@ -44,12 +68,11 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const app = Fastify({ logger: false, ...opts })
 
     void app.register(cors, { origin: true })
-    void app.register(websocket)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
         // sampling gate
-        const shouldLog = ((++reqCounter % REQUEST_SAMPLE) === 0)
+        const shouldLog = (++reqCounter % REQUEST_SAMPLE) === 0
         if (!shouldLog) return
 
         sampledIds.add(req.id)
@@ -106,16 +129,90 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     app.get('/', async () => ({ ok: true, service: 'autobench98-orchestrator' }))
     app.get('/version', async () => ({ name: 'autobench98-orchestrator', version: '0.1.0' }))
 
-    app.get('/ws', { websocket: true }, (socket: WebSocket, _req: FastifyRequest) => {
-        socket.send(JSON.stringify({ hello: 'autobench98' }))
-        logWs.info('client connected')
+    // 🚧 Avoid confusing 404 on plain HTTP GET /ws (not an upgrade)
+    app.get('/ws', async (_req, reply) => {
+        reply.code(426).send({ error: 'Upgrade Required: websocket' })
     })
 
-    app.get('/logs', async (req) => {
-        const q = req.query as LogsQuery
-        const n = Number(q?.n ?? 200)
-        const items: ClientLog[] = clientBuf.getLatest(Number.isFinite(n) && n > 0 ? n : 200)
-        return items
+    // ---- WebSocket server: handle upgrade at /ws using 'ws' directly ----
+    const wss = new WebSocketServer({ noServer: true })
+
+    wss.on('connection', (socket: WebSocket) => {
+        try {
+            socket.send(JSON.stringify({
+                type: 'welcome',
+                serverTime: new Date().toISOString()
+            }))
+            logWs.info('client connected')
+        } catch (e) {
+            logWs.error('failed to send welcome', { err: (e as Error).message })
+        }
+
+        socket.on('message', (data: RawData) => {
+            try {
+                const text = typeof data === 'string' ? data : data.toString()
+                const msg = JSON.parse(text)
+
+                if (msg?.type === 'hello') {
+                    socket.send(JSON.stringify({ type: 'ack', ok: true }))
+                    return
+                }
+
+                if (msg?.type === 'subscribe') {
+                    const includeSnapshot = !!msg?.payload?.includeSnapshot
+                    if (includeSnapshot) {
+                        socket.send(JSON.stringify({
+                            type: 'state.snapshot',
+                            stateVersion,
+                            data: appState
+                        }))
+                    }
+                    return
+                }
+
+                // TODO: other message types (patch, layout.save, etc.)
+            } catch {
+                // ignore malformed payloads
+            }
+        })
+    })
+
+    // Only accept proper websocket upgrades to /ws
+    app.server.on('upgrade', (req, socket, head) => {
+        const upgrade = (req.headers.upgrade || '').toLowerCase()
+        if (upgrade !== 'websocket') return
+
+        // Node gives us a path with optional query — keep it simple
+        const url = req.url || '/'
+        const pathOnly = url.split('?', 1)[0]
+        if (pathOnly !== '/ws') return
+
+        wss.handleUpgrade(req, socket as any, head, (ws) => {
+            wss.emit('connection', ws, req)
+        })
+    })
+    // -----------------------------------------------------------------------
+
+    // Serve SPA from /studio/
+    void app.register(fastifyStatic, {
+        root: WEB_DIST,
+        prefix: '/studio/',
+        index: ['index.html']
+    })
+
+    // Redirect /studio → /studio/
+    app.get('/studio', async (_req, reply) => {
+        reply.status(301)
+        reply.redirect('/studio/')
+    })
+
+    // History API fallback for client-side routing under /studio/*
+    app.setNotFoundHandler((req, reply) => {
+        const url = req.raw.url ?? ''
+        if (url.startsWith('/studio/')) {
+            return reply.sendFile('index.html')
+        }
+        reply.status(404).send({ error: 'Not found' })
     })
 
     logApp.info('orchestrator app built')
