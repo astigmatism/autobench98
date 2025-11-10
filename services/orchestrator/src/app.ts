@@ -1,3 +1,4 @@
+// apps/orchestrator/src/app.ts
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
@@ -5,8 +6,6 @@ import Fastify, {
     type FastifyReply
 } from 'fastify'
 import cors from '@fastify/cors'
-import { WebSocketServer } from 'ws'
-import type { WebSocket, RawData } from 'ws'
 
 // ✨ static hosting imports
 import fastifyStatic from '@fastify/static'
@@ -18,21 +17,42 @@ import {
     makeClientBuffer,
     LogChannel,
     type ClientLogBuffer,
-    type ClientLog
+    type ClientLog,
+    type ClientLogLevel,
+    type ChannelColor
 } from '@autobench98/logging'
 
-interface LogsQuery { n?: string }
+// our state helpers
+import wsPlugin from './plugins/ws.js'
+import { setMessage, setLayout } from './core/state.js'
+
+/** Augment Fastify instance with our shared client log buffer */
+declare module 'fastify' {
+    interface FastifyInstance {
+        clientBuf: ClientLogBuffer
+    }
+}
+
+interface LogsQuery {
+    n?: string
+}
 
 // ---- Request logging config (env) ----
-const REQUEST_VERBOSE =
-    String(process.env.REQUEST_VERBOSE ?? 'false').toLowerCase() === 'true'
+const REQUEST_VERBOSE = String(process.env.REQUEST_VERBOSE ?? 'false').toLowerCase() === 'true'
 const REQUEST_LOG_HEADERS =
     String(process.env.REQUEST_LOG_HEADERS ?? 'false').toLowerCase() === 'true'
 const REQUEST_SAMPLE = Math.max(1, Number(process.env.REQUEST_SAMPLE ?? '1')) // 1 = log every request
 // --------------------------------------
 
-const clientBuf: ClientLogBuffer = makeClientBuffer()
+// ---- Log ingest config (env) ----
+const INGEST_TOKEN = (process.env.LOG_INGEST_TOKEN ?? '').trim() // empty => no auth required
+const INGEST_ALLOWED = String(process.env.LOG_INGEST_ALLOWED_CHANNELS ?? 'sidecar,ffmpeg,device,ocr,stream,benchmark')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+// ---------------------------------
 
+const clientBuf: ClientLogBuffer = makeClientBuffer()
 let reqCounter = 0
 
 // ✨ resolve path to built SPA (works from dist at runtime)
@@ -42,21 +62,9 @@ const __dirname = path.dirname(__filename)
 // We want ../../../apps/web/dist relative to that.
 const WEB_DIST = path.resolve(__dirname, '../../../apps/web/dist')
 
-// ---- Minimal in-memory app state for snapshot/patch demo ----
-type AppState = {
-    layout: { rows: number; cols: number }
-    message: string
-}
-let stateVersion = 1
-let appState: AppState = {
-    layout: { rows: 1, cols: 1 },
-    message: 'Hello from orchestrator'
-}
-
 export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const { channel } = createLogger('orchestrator', clientBuf)
     const logApp = channel(LogChannel.app)
-    const logWs = channel(LogChannel.websocket)
     const logReq = channel(LogChannel.request)
 
     // Track request start times by Fastify request id
@@ -67,12 +75,16 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     // disable Fastify's own logger to avoid INFO/USERLVL lines
     const app = Fastify({ logger: false, ...opts })
 
+    // 👇 expose the shared client log buffer so plugins (e.g., ws) can reuse it
+    app.decorate('clientBuf', clientBuf)
+
     void app.register(cors, { origin: true })
+    void app.register(wsPlugin) // ← ws plugin will reuse app.clientBuf
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
         // sampling gate
-        const shouldLog = (++reqCounter % REQUEST_SAMPLE) === 0
+        const shouldLog = ++reqCounter % REQUEST_SAMPLE === 0
         if (!shouldLog) return
 
         sampledIds.add(req.id)
@@ -89,8 +101,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
             }
             if (REQUEST_LOG_HEADERS) {
                 // minimal, safe subset (avoid cookies/auth)
-                const { host, 'user-agent': ua, accept, referer } =
-                    req.headers as Record<string, unknown>
+                const { host, 'user-agent': ua, accept, referer } = req.headers as Record<string, unknown>
                 detail.headers = { host, 'user-agent': ua, accept, referer }
             }
             logReq.debug('request detail', detail)
@@ -104,12 +115,10 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
 
         const start = startedAt.get(req.id)
         if (start !== undefined) startedAt.delete(req.id)
-        const ms = start !== undefined ? (Date.now() - start) : undefined
+        const ms = start !== undefined ? Date.now() - start : undefined
 
         // compact summary
-        logReq.info(
-            `${req.method} ${req.url} → ${reply.statusCode}${ms !== undefined ? ` (${ms} ms)` : ''}`
-        )
+        logReq.info(`${req.method} ${req.url} → ${reply.statusCode}${ms !== undefined ? ` (${ms} ms)` : ''}`)
 
         // optional detail
         if (REQUEST_VERBOSE) {
@@ -123,75 +132,110 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     })
     // ---------------------------------------------------
 
+    // -----------------------------
+    // Log ingestion (PNO/sidecar)  |
+    // -----------------------------
+    const LEVEL_STYLE: Record<ClientLogLevel, { emoji: string; color: ChannelColor }> = {
+        debug: { emoji: '🐛', color: 'green' },
+        info:  { emoji: 'ℹ️', color: 'cyan' },
+        warn:  { emoji: '⚠️', color: 'yellow' },
+        error: { emoji: '❌', color: 'red' },
+        fatal: { emoji: '💥', color: 'purple' }
+    }
+
+    function normalizeEntry(input: any): ClientLog | null {
+        if (!input || typeof input.message !== 'string' || input.message.length === 0) return null
+
+        // ts
+        const ts = typeof input.ts === 'number' ? input.ts : Date.now()
+
+        // level
+        const level = (String(input.level ?? 'info').toLowerCase() as ClientLogLevel)
+        const style = LEVEL_STYLE[level] ?? LEVEL_STYLE.info
+
+        // channel: allowlist gate for ingestion (independent of WS allowlist)
+        const rawChannel = String(input.channel ?? 'sidecar')
+        const channel = INGEST_ALLOWED.includes(rawChannel) ? rawChannel : 'sidecar'
+
+        // emoji/color: allow override but fall back to style
+        const emoji = typeof input.emoji === 'string' && input.emoji.length ? input.emoji : style.emoji
+        const color = (typeof input.color === 'string' ? input.color : style.color) as ChannelColor
+
+        const message = input.message
+
+        // Construct ClientLog
+        return { ts, channel: channel as LogChannel, emoji, color, level, message }
+    }
+
+    app.post('/api/logs/ingest', async (req, reply) => {
+        // Optional bearer token (LOG_INGEST_TOKEN). If set, require it.
+        if (INGEST_TOKEN) {
+            const auth = String((req.headers?.authorization ?? '')).trim()
+            const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+            if (token !== INGEST_TOKEN) {
+                reply.code(401)
+                return { ok: false, error: 'unauthorized' }
+            }
+        }
+
+        try {
+            const body = (req.body ?? {}) as any
+            const rawEntries = Array.isArray(body) ? body
+                : Array.isArray(body.entries) ? body.entries
+                : [body]
+
+            let accepted = 0
+            for (const raw of rawEntries) {
+                const e = normalizeEntry(raw)
+                if (!e) continue
+                clientBuf.push(e)
+                accepted++
+            }
+
+            return { ok: true, accepted }
+        } catch (err) {
+            reply.code(400)
+            return { ok: false, error: (err as Error).message }
+        }
+    })
+    // -----------------------------
+
+    // Health / basic
     app.get('/health', async () => ({ status: 'ok' }))
     app.get('/ready', async () => ({ ready: true }))
-
     app.get('/', async () => ({ ok: true, service: 'autobench98-orchestrator' }))
     app.get('/version', async () => ({ name: 'autobench98-orchestrator', version: '0.1.0' }))
 
-    // 🚧 Avoid confusing 404 on plain HTTP GET /ws (not an upgrade)
-    app.get('/ws', async (_req, reply) => {
-        reply.code(426).send({ error: 'Upgrade Required: websocket' })
-    })
-
-    // ---- WebSocket server: handle upgrade at /ws using 'ws' directly ----
-    const wss = new WebSocketServer({ noServer: true })
-
-    wss.on('connection', (socket: WebSocket) => {
+    // Small demo routes to mutate state (handy while wiring the frontend)
+    app.post('/api/state/message', async (req, reply) => {
         try {
-            socket.send(JSON.stringify({
-                type: 'welcome',
-                serverTime: new Date().toISOString()
-            }))
-            logWs.info('client connected')
-        } catch (e) {
-            logWs.error('failed to send welcome', { err: (e as Error).message })
-        }
-
-        socket.on('message', (data: RawData) => {
-            try {
-                const text = typeof data === 'string' ? data : data.toString()
-                const msg = JSON.parse(text)
-
-                if (msg?.type === 'hello') {
-                    socket.send(JSON.stringify({ type: 'ack', ok: true }))
-                    return
-                }
-
-                if (msg?.type === 'subscribe') {
-                    const includeSnapshot = !!msg?.payload?.includeSnapshot
-                    if (includeSnapshot) {
-                        socket.send(JSON.stringify({
-                            type: 'state.snapshot',
-                            stateVersion,
-                            data: appState
-                        }))
-                    }
-                    return
-                }
-
-                // TODO: other message types (patch, layout.save, etc.)
-            } catch {
-                // ignore malformed payloads
+            const body = (req.body ?? {}) as { message?: string }
+            if (typeof body.message === 'string') {
+                setMessage(body.message)
+                return { ok: true }
             }
-        })
+            reply.code(400)
+            return { ok: false, error: 'message (string) required' }
+        } catch (err) {
+            reply.code(500)
+            return { ok: false, error: (err as Error).message }
+        }
     })
 
-    // Only accept proper websocket upgrades to /ws
-    app.server.on('upgrade', (req, socket, head) => {
-        const upgrade = (req.headers.upgrade || '').toLowerCase()
-        if (upgrade !== 'websocket') return
-
-        // Node gives us a path with optional query — keep it simple
-        const url = req.url || '/'
-        const pathOnly = url.split('?', 1)[0]
-        if (pathOnly !== '/ws') return
-
-        wss.handleUpgrade(req, socket as any, head, (ws) => {
-            wss.emit('connection', ws, req)
-        })
+    app.post('/api/state/layout', async (req, reply) => {
+        try {
+            const b = (req.body ?? {}) as { rows?: number; cols?: number }
+            if (typeof b.rows === 'number' && typeof b.cols === 'number') {
+                setLayout(b.rows, b.cols)
+                return { ok: true }
+            }
+            reply.code(400)
+            return { ok: false, error: 'rows (number) and cols (number) required' }
+        } catch (err) {
+            reply.code(500)
+            return { ok: false, error: (err as Error).message }
+        }
     })
-    // -----------------------------------------------------------------------
 
     // Serve SPA from /studio/
     void app.register(fastifyStatic, {

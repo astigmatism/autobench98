@@ -8,6 +8,7 @@
         "apps/*"
     ],
     "devDependencies": {
+        "@types/dotenv": "^8.2.3",
         "@types/node": "^24.10.0",
         "pino-pretty": "^13.1.2"
     },
@@ -18,5 +19,8 @@
         "build:orchestrator": "npm run build --workspace services/orchestrator",
         "build:logging": "npm run build --workspace packages/logging",
         "clean": "find . -type d -name node_modules -prune -exec rm -rf '{}' +"
+    },
+    "dependencies": {
+        "dotenv": "^17.2.3"
     }
 }
