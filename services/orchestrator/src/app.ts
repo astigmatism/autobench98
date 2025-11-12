@@ -1,4 +1,3 @@
-// apps/orchestrator/src/app.ts
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
@@ -22,11 +21,12 @@ import {
     type ChannelColor
 } from '@autobench98/logging'
 
-// our state helpers
+// our state/helpers
 import wsPlugin from './plugins/ws.js'
 import { setMessage, setLayout } from './core/state.js'
+import layoutsRoutes from './routes/layouts.js'
+import serialPlugin from './plugins/serial.js'
 
-/** Augment Fastify instance with our shared client log buffer */
 declare module 'fastify' {
     interface FastifyInstance {
         clientBuf: ClientLogBuffer
@@ -41,14 +41,16 @@ interface LogsQuery {
 const REQUEST_VERBOSE = String(process.env.REQUEST_VERBOSE ?? 'false').toLowerCase() === 'true'
 const REQUEST_LOG_HEADERS =
     String(process.env.REQUEST_LOG_HEADERS ?? 'false').toLowerCase() === 'true'
-const REQUEST_SAMPLE = Math.max(1, Number(process.env.REQUEST_SAMPLE ?? '1')) // 1 = log every request
+const REQUEST_SAMPLE = Math.max(1, Number(process.env.REQUEST_SAMPLE ?? '1'))
 // --------------------------------------
 
 // ---- Log ingest config (env) ----
-const INGEST_TOKEN = (process.env.LOG_INGEST_TOKEN ?? '').trim() // empty => no auth required
-const INGEST_ALLOWED = String(process.env.LOG_INGEST_ALLOWED_CHANNELS ?? 'sidecar,ffmpeg,device,ocr,stream,benchmark')
+const INGEST_TOKEN = (process.env.LOG_INGEST_TOKEN ?? '').trim()
+const INGEST_ALLOWED = String(
+    process.env.LOG_INGEST_ALLOWED_CHANNELS ?? 'sidecar,ffmpeg,device,ocr,stream,benchmark'
+)
     .split(',')
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean)
 // ---------------------------------
 
@@ -58,8 +60,6 @@ let reqCounter = 0
 // ✨ resolve path to built SPA (works from dist at runtime)
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-// When compiled, this file lives in services/orchestrator/dist/
-// We want ../../../apps/web/dist relative to that.
 const WEB_DIST = path.resolve(__dirname, '../../../apps/web/dist')
 
 export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
@@ -67,40 +67,38 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const logApp = channel(LogChannel.app)
     const logReq = channel(LogChannel.request)
 
-    // Track request start times by Fastify request id
     const startedAt = new Map<string, number>()
-    // Track which requests we decided to log (to keep response logging consistent with sampling)
     const sampledIds = new Set<string>()
 
-    // disable Fastify's own logger to avoid INFO/USERLVL lines
+    // Keep Fastify defaults; plugin will fail fast if devices missing.
     const app = Fastify({ logger: false, ...opts })
 
-    // 👇 expose the shared client log buffer so plugins (e.g., ws) can reuse it
     app.decorate('clientBuf', clientBuf)
 
     void app.register(cors, { origin: true })
-    void app.register(wsPlugin) // ← ws plugin will reuse app.clientBuf
+    void app.register(wsPlugin)
+    void app.register(layoutsRoutes)
+
+    // Serial plugin: single-pass gating happens inside it.
+    void app.register(serialPlugin, {
+        matchers: [
+            { kind: 'arduino.ps2.keyboard', identificationString: 'KB', baudRate: 9600 }
+        ],
+        logPrefix: 'serial'
+    })
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
-        // sampling gate
         const shouldLog = ++reqCounter % REQUEST_SAMPLE === 0
         if (!shouldLog) return
 
         sampledIds.add(req.id)
         startedAt.set(req.id, Date.now())
-
-        // compact one-liner
         logReq.info(`${req.method} ${req.url}`)
 
-        // optional detail block
         if (REQUEST_VERBOSE) {
-            const detail: Record<string, unknown> = {
-                id: req.id,
-                ip: req.ip
-            }
+            const detail: Record<string, unknown> = { id: req.id, ip: req.ip }
             if (REQUEST_LOG_HEADERS) {
-                // minimal, safe subset (avoid cookies/auth)
                 const { host, 'user-agent': ua, accept, referer } = req.headers as Record<string, unknown>
                 detail.headers = { host, 'user-agent': ua, accept, referer }
             }
@@ -109,7 +107,6 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     })
 
     app.addHook('onResponse', async (req: FastifyRequest, reply: FastifyReply) => {
-        // only log responses that were sampled on request
         if (!sampledIds.has(req.id)) return
         sampledIds.delete(req.id)
 
@@ -117,17 +114,11 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
         if (start !== undefined) startedAt.delete(req.id)
         const ms = start !== undefined ? Date.now() - start : undefined
 
-        // compact summary
         logReq.info(`${req.method} ${req.url} → ${reply.statusCode}${ms !== undefined ? ` (${ms} ms)` : ''}`)
 
-        // optional detail
         if (REQUEST_VERBOSE) {
             const outLen = reply.getHeader('content-length') ?? null
-            logReq.debug('response detail', {
-                id: req.id,
-                bytesOut: outLen,
-                ms
-            })
+            logReq.debug('response detail', { id: req.id, bytesOut: outLen, ms })
         }
     })
     // ---------------------------------------------------
@@ -146,29 +137,21 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     function normalizeEntry(input: any): ClientLog | null {
         if (!input || typeof input.message !== 'string' || input.message.length === 0) return null
 
-        // ts
         const ts = typeof input.ts === 'number' ? input.ts : Date.now()
+        const level = String(input.level ?? 'info').toLowerCase() as any
+        const style = LEVEL_STYLE[level as ClientLogLevel] ?? LEVEL_STYLE.info
 
-        // level
-        const level = (String(input.level ?? 'info').toLowerCase() as ClientLogLevel)
-        const style = LEVEL_STYLE[level] ?? LEVEL_STYLE.info
-
-        // channel: allowlist gate for ingestion (independent of WS allowlist)
         const rawChannel = String(input.channel ?? 'sidecar')
         const channel = INGEST_ALLOWED.includes(rawChannel) ? rawChannel : 'sidecar'
 
-        // emoji/color: allow override but fall back to style
         const emoji = typeof input.emoji === 'string' && input.emoji.length ? input.emoji : style.emoji
         const color = (typeof input.color === 'string' ? input.color : style.color) as ChannelColor
-
         const message = input.message
 
-        // Construct ClientLog
-        return { ts, channel: channel as LogChannel, emoji, color, level, message }
+        return { ts, channel: channel as any, emoji, color, level, message } as ClientLog
     }
 
     app.post('/api/logs/ingest', async (req, reply) => {
-        // Optional bearer token (LOG_INGEST_TOKEN). If set, require it.
         if (INGEST_TOKEN) {
             const auth = String((req.headers?.authorization ?? '')).trim()
             const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
@@ -191,7 +174,6 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
                 clientBuf.push(e)
                 accepted++
             }
-
             return { ok: true, accepted }
         } catch (err) {
             reply.code(400)
@@ -203,59 +185,34 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     // Health / basic
     app.get('/health', async () => ({ status: 'ok' }))
     app.get('/ready', async () => ({ ready: true }))
-    app.get('/', async () => ({ ok: true, service: 'autobench98-orchestrator' }))
+    app.get('/', async (_req, reply) => { reply.status(301); reply.redirect('/studio/') })
     app.get('/version', async () => ({ name: 'autobench98-orchestrator', version: '0.1.0' }))
 
-    // Small demo routes to mutate state (handy while wiring the frontend)
     app.post('/api/state/message', async (req, reply) => {
         try {
             const body = (req.body ?? {}) as { message?: string }
-            if (typeof body.message === 'string') {
-                setMessage(body.message)
-                return { ok: true }
-            }
-            reply.code(400)
-            return { ok: false, error: 'message (string) required' }
+            if (typeof body.message === 'string') { setMessage(body.message); return { ok: true } }
+            reply.code(400); return { ok: false, error: 'message (string) required' }
         } catch (err) {
-            reply.code(500)
-            return { ok: false, error: (err as Error).message }
+            reply.code(500); return { ok: false, error: (err as Error).message }
         }
     })
 
     app.post('/api/state/layout', async (req, reply) => {
         try {
             const b = (req.body ?? {}) as { rows?: number; cols?: number }
-            if (typeof b.rows === 'number' && typeof b.cols === 'number') {
-                setLayout(b.rows, b.cols)
-                return { ok: true }
-            }
-            reply.code(400)
-            return { ok: false, error: 'rows (number) and cols (number) required' }
+            if (typeof b.rows === 'number' && typeof b.cols === 'number') { setLayout(b.rows, b.cols); return { ok: true } }
+            reply.code(400); return { ok: false, error: 'rows (number) and cols (number) required' }
         } catch (err) {
-            reply.code(500)
-            return { ok: false, error: (err as Error).message }
+            reply.code(500); return { ok: false, error: (err as Error).message }
         }
     })
 
-    // Serve SPA from /studio/
-    void app.register(fastifyStatic, {
-        root: WEB_DIST,
-        prefix: '/studio/',
-        index: ['index.html']
-    })
-
-    // Redirect /studio → /studio/
-    app.get('/studio', async (_req, reply) => {
-        reply.status(301)
-        reply.redirect('/studio/')
-    })
-
-    // History API fallback for client-side routing under /studio/*
+    void app.register(fastifyStatic, { root: WEB_DIST, prefix: '/studio/', index: ['index.html'] })
+    app.get('/studio', async (_req, reply) => { reply.status(301); reply.redirect('/studio/') })
     app.setNotFoundHandler((req, reply) => {
         const url = req.raw.url ?? ''
-        if (url.startsWith('/studio/')) {
-            return reply.sendFile('index.html')
-        }
+        if (url.startsWith('/studio/')) return reply.sendFile('index.html')
         reply.status(404).send({ error: 'Not found' })
     })
 

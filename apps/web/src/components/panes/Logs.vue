@@ -1,86 +1,106 @@
 <template>
     <div class="logs-pane">
-        <!-- Toolbar -->
-        <div class="toolbar">
-            <div class="left">
-                <strong>Logs</strong>
-                <span class="meta">({{ size }} / cap {{ capacity }})</span>
-            </div>
-            <div class="right">
-                <div class="controls">
-                    <!-- Search -->
-                    <label class="search">
-                        <input
-                            type="text"
-                            placeholder="Search…"
-                            v-model="search"
-                            @input="onSearchChange"
-                        />
-                    </label>
+        <!-- Hover gear button -->
+        <button
+            class="gear-btn"
+            :aria-expanded="showControls ? 'true' : 'false'"
+            aria-controls="logs-controls-panel"
+            title="Show filters & sorting"
+            @click="showControls = !showControls"
+        >
+            ⚙️
+        </button>
 
-                    <!-- Sort -->
-                    <label class="select">
-                        <span>Sort</span>
-                        <select v-model="sortDir" @change="onSortChange">
-                            <option value="desc">Newest first</option>
-                            <option value="asc">Oldest first</option>
-                        </select>
-                    </label>
+        <!-- Settings panel (toolbar + legend), hidden by default -->
+        <transition name="slide-fade">
+            <div v-show="showControls" id="logs-controls-panel" class="controls-panel">
+                <!-- Toolbar (left-aligned; no "Logs" title, keep counter) -->
+                <div class="toolbar">
+                    <div class="left">
+                        <span class="meta">({{ size }} / cap {{ capacity }})</span>
 
-                    <!-- Level filter -->
-                    <label class="select">
-                        <span>Min level</span>
-                        <select v-model="minLevel" @change="onLevelChange">
-                            <option value="debug">debug</option>
-                            <option value="info">info</option>
-                            <option value="warn">warn</option>
-                            <option value="error">error</option>
-                            <option value="fatal">fatal</option>
-                        </select>
-                    </label>
+                        <div class="controls">
+                            <!-- Search -->
+                            <label class="search">
+                                <input
+                                    type="text"
+                                    placeholder="Search…"
+                                    v-model="search"
+                                    @input="onSearchChange"
+                                />
+                            </label>
 
-                    <!-- Autoscroll -->
-                    <label class="checkbox">
-                        <input type="checkbox" v-model="autoscroll" @change="onAutoscrollChange" />
-                        <span>Auto-scroll</span>
-                    </label>
+                            <!-- Sort -->
+                            <label class="select">
+                                <span>Sort</span>
+                                <select v-model="sortDir" @change="onSortChange">
+                                    <option value="desc">Newest first</option>
+                                    <option value="asc">Oldest first</option>
+                                </select>
+                            </label>
 
-                    <!-- Pause -->
-                    <button class="btn" :data-active="paused" @click="togglePause">
-                        {{ paused ? 'Resume' : 'Pause' }}
-                    </button>
+                            <!-- Level filter -->
+                            <label class="select">
+                                <span>Min level</span>
+                                <select v-model="minLevel" @change="onLevelChange">
+                                    <option value="debug">debug</option>
+                                    <option value="info">info</option>
+                                    <option value="warn">warn</option>
+                                    <option value="error">error</option>
+                                    <option value="fatal">fatal</option>
+                                </select>
+                            </label>
 
-                    <!-- Export (JSON only) -->
-                    <div class="export">
-                        <button class="btn mini" @click="exportJson">Export .json</button>
+                            <!-- Autoscroll -->
+                            <label class="checkbox">
+                                <input
+                                    type="checkbox"
+                                    v-model="autoscroll"
+                                    @change="onAutoscrollChange"
+                                />
+                                <span>Auto-scroll</span>
+                            </label>
+
+                            <!-- Pause -->
+                            <button class="btn" :data-active="paused" @click="togglePause">
+                                {{ paused ? 'Resume' : 'Pause' }}
+                            </button>
+
+                            <!-- Export (JSON only) -->
+                            <div class="export">
+                                <button class="btn mini" @click="exportJson">Export .json</button>
+                            </div>
+
+                            <!-- Clear -->
+                            <button class="btn" @click="clear()">Clear</button>
+                        </div>
                     </div>
+                    <!-- (right side intentionally empty so gear icon never overlaps a control) -->
+                    <div class="right"></div>
+                </div>
 
-                    <!-- Clear -->
-                    <button class="btn" @click="clear()">Clear</button>
+                <!-- Channel legend / filters (dynamic) -->
+                <div class="legend" v-if="channels.length">
+                    <div class="legend-left">Channels:</div>
+                    <div class="legend-channels">
+                        <label
+                            v-for="ch in channels"
+                            :key="ch"
+                            class="legend-item"
+                            :data-checked="selected.has(ch)"
+                            @click.prevent="onChipClick(ch)"
+                        >
+                            <span class="dot" :style="{ backgroundColor: colorFor(ch) }"></span>
+                            <span class="name">{{ ch }}</span>
+                        </label>
+                    </div>
+                    <div class="legend-actions">
+                        <button class="btn mini" @click="selectAll">All</button>
+                        <button class="btn mini" @click="selectNone">None</button>
+                    </div>
                 </div>
             </div>
-        </div>
-
-        <!-- Channel legend / filters (dynamic) -->
-        <div class="legend" v-if="channels.length">
-            <div class="legend-left">Channels:</div>
-            <div class="legend-channels">
-                <label
-                    v-for="ch in channels"
-                    :key="ch"
-                    class="legend-item"
-                    :data-checked="selected.has(ch)"
-                    @click.prevent="onChipClick(ch)"
-                >
-                    <span class="dot" :style="{ backgroundColor: colorFor(ch) }"></span>
-                    <span class="name">{{ ch }}</span>
-                </label>
-            </div>
-            <div class="legend-actions">
-                <button class="btn mini" @click="selectAll">All</button>
-                <button class="btn mini" @click="selectNone">None</button>
-            </div>
-        </div>
+        </transition>
 
         <!-- Paused hint -->
         <div class="paused-banner" v-if="paused">
@@ -110,6 +130,9 @@ const logs = useLogs()
 onMounted(() => {
     logs.hydrate()
 })
+
+// Settings panel visibility (hidden by default)
+const showControls = ref(false)
 
 // --- derived data / bindings ---
 const items = computed(() => logs.filteredItems)
@@ -274,33 +297,86 @@ watch(
 
 <style scoped>
 .logs-pane {
+    position: relative; /* allow gear positioning */
     display: flex;
     flex-direction: column;
     gap: 8px;
     height: 100%;
+    width: 100%; /* fill available width */
+}
+
+/* Gear button (appears on hover/focus) */
+.gear-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    height: 28px;
+    min-width: 28px;
+    padding: 0 8px;
+    border-radius: 6px;
+    border: 1px solid #333;
+    background: #111;
+    color: #eee;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease,
+        transform 60ms ease;
+    z-index: 2;
+}
+.logs-pane:hover .gear-btn,
+.gear-btn:focus,
+.gear-btn:focus-visible {
+    opacity: 1;
+}
+.gear-btn:hover {
+    background: #1a1a1a;
+    transform: translateY(-1px);
+}
+
+/* Slide-fade transition */
+.slide-fade-enter-active,
+.slide-fade-leave-active {
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+.slide-fade-enter-from,
+.slide-fade-leave-to {
+    opacity: 0;
+    transform: translateY(-6px);
+}
+
+/* Settings panel wraps toolbar + legend */
+.controls-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 /* Top toolbar */
 .toolbar {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr auto; /* left area grows; right stays empty */
     align-items: center;
     gap: 8px;
     font-size: 14px;
 }
 .toolbar .left {
     display: flex;
-    align-items: baseline;
-    gap: 8px;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+.toolbar .right {
+    /* intentionally empty to keep layout from pushing controls under gear */
 }
 .toolbar .meta {
     color: #808080;
 }
-.toolbar .right .controls {
+.toolbar .controls {
     --control-h: 30px; /* unified control height */
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap; /* allow wrapping on narrow widths */
 }
 
 /* Search */

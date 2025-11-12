@@ -1,3 +1,4 @@
+# services/orchestrator/Dockerfile.dev
 FROM node:20-alpine
 
 ENV NPM_CONFIG_FUND=false \
@@ -8,6 +9,9 @@ WORKDIR /app
 # Bring in the whole monorepo so npm can resolve workspaces
 COPY . .
 
+# ✅ Required for serialport enumeration on Alpine (provides `udevadm`)
+RUN apk add --no-cache eudev
+
 # Upgrade npm and install all workspaces at repo root
 RUN npm install -g npm@11 \
     && npm --version \
@@ -16,7 +20,7 @@ RUN npm install -g npm@11 \
 # Build the shared logging lib (TS → dist)
 RUN npm -w packages/logging run build
 
-# ⬅️ NEW: Build the frontend once so /app/ can be served by Fastify in dev
+# Build the frontend once so /app/ can be served by Fastify in dev
 RUN npm -w apps/web run build
 
 # Run orchestrator in dev (tsx watch)

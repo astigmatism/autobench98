@@ -24,14 +24,22 @@ const LEVEL_ORDER: Record<string, number> = {
     debug: 10, info: 20, warn: 30, error: 40, fatal: 50
 }
 
+// Build allowlist once from env (single source of truth)
 const envAllow = String(process.env.LOG_CHANNEL_ALLOWLIST ?? '').trim()
 const CHANNEL_ALLOWLIST = envAllow
-    ? new Set(envAllow.split(',').map(s => s.trim()).filter(Boolean))
-    : null // null means "no channel filter"
+    ? new Set(
+        envAllow
+          .split(',')
+          .map(s => s.trim().toLowerCase())
+          .filter(Boolean)
+          .map(s => s.split(':')[0]) // allow "device:serial" by matching top-level token
+      )
+    : null // null => no channel filter (allow all channels, subject to level)
 
 const MIN_LEVEL = (process.env.LOG_LEVEL_MIN ?? 'debug').toLowerCase()
 const MIN_LEVEL_NUM = LEVEL_ORDER[MIN_LEVEL] ?? LEVEL_ORDER.debug
 
+// Optional redaction
 const REDACT_PATTERN = process.env.LOG_REDACT_REGEX
 let redacter: ((s: string) => string) | null = null
 if (REDACT_PATTERN) {
@@ -46,17 +54,39 @@ if (REDACT_PATTERN) {
 // 💓 heartbeat logging toggle
 const HB_LOG = String(process.env.WS_HEARTBEAT_LOG ?? 'false').toLowerCase() === 'true'
 
+// Normalize any incoming channel (enum number or string) to a lowercased name.
+// For numeric enums, rely on TypeScript's reverse mapping emitted in JS.
+function normalizeChannelName(ch: unknown): string {
+    if (typeof ch === 'number' && Number.isFinite(ch)) {
+        const name = (LogChannel as any)?.[ch]
+        if (typeof name === 'string' && name.length > 0) {
+            return name.trim().toLowerCase()
+        }
+        return String(ch) // fallback, unlikely to match allowlist but safe
+    }
+    if (typeof ch === 'string') {
+        const s = ch.trim().toLowerCase()
+        return s.split(':')[0] // top-level before any colon
+    }
+    return String(ch ?? '').trim().toLowerCase()
+}
+
 function allowLog(e: ClientLog): boolean {
-    if (CHANNEL_ALLOWLIST && !CHANNEL_ALLOWLIST.has(String(e.channel))) return false
+    if (CHANNEL_ALLOWLIST) {
+        const norm = normalizeChannelName((e as any).channel)
+        if (!CHANNEL_ALLOWLIST.has(norm)) return false
+    }
     const lvl = LEVEL_ORDER[e.level] ?? LEVEL_ORDER.debug
     if (lvl < MIN_LEVEL_NUM) return false
     return true
 }
 
 function transformLog(e: ClientLog): ClientLog {
-    if (!redacter) return e
-    if (!e.message) return e
-    return { ...e, message: redacter(e.message) }
+    // Always emit the normalized channel name so the client consistently receives strings
+    const normalizedChannel = normalizeChannelName((e as any).channel) as any
+    const base: ClientLog = { ...e, channel: normalizedChannel }
+    if (!redacter || !base.message) return base
+    return { ...base, message: redacter(base.message) }
 }
 
 function filterAndTransform(entries: ClientLog[]): ClientLog[] {
@@ -92,7 +122,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
     const sockets = new Set<WSSocket>()
 
-    // Single subscription to live logs; broadcast filtered entries to all clients.
+    // Live logs -> filter/transform -> broadcast
     const unsubscribeLogs = onLogSubscribe((entry: ClientLog) => {
         const filtered = filterAndTransform([entry])
         if (filtered.length === 0) return
@@ -128,7 +158,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }))
 
             // Send bounded, filtered log history snapshot
-            // 🔄 NOW server-driven: prefer state.serverConfig.logs.snapshot, fall back to env/default
+            // Prefer server-driven count; fall back to env/default
             const snapshotCount = Math.max(
                 0,
                 Number(
@@ -218,7 +248,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
     // --- Broadcast state changes ---
 
-    // Full snapshots (existing behavior)
+    // Full snapshots
     const onSnapshot = (snap: any) => {
         const payload = JSON.stringify({
             type: 'state.snapshot',
@@ -236,7 +266,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
         }
     }
 
-    // Incremental patches (new behavior)
+    // Incremental patches
     const onPatch = (evt: { from: number; to: number; patch: unknown[] }) => {
         const payload = JSON.stringify({
             type: 'state.patch',
@@ -267,7 +297,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             } catch {}
         }
         sockets.clear()
-        // Remove log subscription
         try { unsubscribeLogs() } catch {}
         done()
     })

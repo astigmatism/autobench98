@@ -8,7 +8,7 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     [LogChannel.ffmpeg]:       { emoji: '🎬', color: 'magenta' },
     [LogChannel.stream]:       { emoji: '📺', color: 'cyan' },
     [LogChannel.ocr]:          { emoji: '🔎', color: 'green' },
-    [LogChannel.device]:       { emoji: '🔌', color: 'white' },
+    [LogChannel.device]:       { emoji: '🔌', color: 'red' },
     [LogChannel.benchmark]:    { emoji: '⏱️', color: 'green' },
     [LogChannel.websocket]:    { emoji: '🔗', color: 'cyan' },
     [LogChannel.app]:          { emoji: '📦', color: 'blue' },
