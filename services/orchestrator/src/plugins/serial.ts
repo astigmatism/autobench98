@@ -32,7 +32,9 @@ export interface DevicesStateAdapter {
 }
 
 export interface SerialPluginOptions {
-  matchers?: SerialMatcher[]
+  /** No env-driven matchers. If you pass matchers here, they will be ignored.
+   *  The only source of truth is SERIAL_REQUIRED_DEVICES_JSON. */
+  matchers?: never
   identify?: Partial<IdentifyConfig>
   defaultBaudRate?: number
   rescanIntervalMs?: number
@@ -44,8 +46,8 @@ export interface SerialPluginOptions {
 
 /** Required-device spec (from env JSON) */
 type RequiredSpec = {
-  id: string              // e.g. "KB"
-  kind?: string           // e.g. "arduino.ps2.keyboard"
+  id?: string             // e.g. "KB" | "MS" | "FP"; if omitted => static device (no identify)
+  kind?: string           // e.g. "arduino.ps2.keyboard" (recommended)
   vendorId?: string
   productId?: string
   pathRegex?: string
@@ -82,33 +84,6 @@ function parseStringEnv(name: string, def?: string): string | undefined {
   return raw
 }
 
-function parseMatchersFromEnv(): SerialMatcher[] | undefined {
-  const raw = process.env.SERIAL_MATCHERS_JSON
-  if (!raw) return undefined
-  try {
-    const arr = JSON.parse(raw)
-    if (!Array.isArray(arr)) return undefined
-    return arr.map((m: any) => {
-      const out: SerialMatcher = {
-        kind: String(m.kind),
-        identificationString: String(m.identificationString),
-      }
-      if (m.vendorId != null) out.vendorId = String(m.vendorId)
-      if (m.productId != null) out.productId = String(m.productId)
-      if (m.pathRegex) {
-        try { out.pathRegex = new RegExp(String(m.pathRegex)) } catch { /* ignore bad regex */ }
-      }
-      if (m.baudRate != null) {
-        const br = Number(m.baudRate)
-        if (Number.isFinite(br)) out.baudRate = br
-      }
-      return out
-    })
-  } catch {
-    return undefined
-  }
-}
-
 function parseRequiredFromEnv(): { specs: Array<RequiredSpec & { _pathRe?: RegExp }>, error?: string } {
   const raw = process.env.SERIAL_REQUIRED_DEVICES_JSON
   if (!raw) return { specs: [] }
@@ -117,9 +92,8 @@ function parseRequiredFromEnv(): { specs: Array<RequiredSpec & { _pathRe?: RegEx
     if (!Array.isArray(arr)) return { specs: [] }
     const specs: Array<RequiredSpec & { _pathRe?: RegExp }> = []
     for (const item of arr) {
-      if (!item?.id) continue
       const spec: RequiredSpec & { _pathRe?: RegExp } = {
-        id: String(item.id),
+        id: item.id != null ? String(item.id) : undefined,
         kind: item.kind ? String(item.kind) : undefined,
         vendorId: item.vendorId ? String(item.vendorId).toLowerCase().replace(/^0x/, '') : undefined,
         productId: item.productId ? String(item.productId).toLowerCase().replace(/^0x/, '') : undefined,
@@ -141,12 +115,29 @@ function parseRequiredFromEnv(): { specs: Array<RequiredSpec & { _pathRe?: RegEx
 
 /** Keep rescanIntervalMs optional to match the service contract */
 type EffectiveOptions = {
-  matchers: SerialMatcher[]
   identify: Partial<IdentifyConfig>
   defaultBaudRate: number
   rescanIntervalMs?: number
   summaryIntervalMs: number
   logPrefix: string
+}
+
+/** Build runtime matchers *only* from required specs. */
+function buildMatchersFromRequired(specs: Array<RequiredSpec & { _pathRe?: RegExp }>): SerialMatcher[] {
+  // Token-present => active (identifyRequired true). No token => static (identifyRequired false).
+  return specs.map((s) => {
+    const m: SerialMatcher = {
+      kind: s.kind ?? 'unknown',
+      vendorId: s.vendorId,
+      productId: s.productId,
+      pathRegex: s._pathRe,
+      baudRate: s.baudRate,
+      identifyRequired: s.id ? true : false,
+      keepOpenOnStatic: false, // default off; can revisit per device later
+    }
+    if (s.id) m.identificationString = s.id
+    return m
+  })
 }
 
 export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyInstance, opts) {
@@ -175,12 +166,12 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     retries: parseIntEnv('SERIAL_RETRIES', 3),
   }
 
-  const envMatchers = parseMatchersFromEnv()
   const { specs: requiredSpecs, error: requiredParseErr } = parseRequiredFromEnv()
   const failOnMissing = parseBoolEnv('SERIAL_FAIL_ON_MISSING', true)
+  const startupSettleMs = parseIntEnv('SERIAL_STARTUP_SETTLE_MS', 1500) ?? 1500
+  const quietWindowMs = 200 // no changes for this long => consider settled
 
   const effective: EffectiveOptions = {
-    matchers: opts.matchers ?? envMatchers ?? [],
     identify: { ...envIdentify, ...(opts.identify ?? {}) },
     defaultBaudRate: opts.defaultBaudRate ?? envDefaultBaud ?? 9600,
     rescanIntervalMs: opts.rescanIntervalMs ?? envRescanMs, // optional by design
@@ -193,19 +184,18 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
   if (requiredParseErr) {
     log.warn(`SERIAL_REQUIRED_DEVICES_JSON parse error err="${requiredParseErr}"`)
   } else if (requiredSpecs.length > 0) {
-    const list = requiredSpecs.map(s => s.id).join(',')
+    const list = requiredSpecs.map(s => s.id ?? '(static)').join(',')
     log.info(`required devices configured ids=[${list}]`)
+  } else {
+    log.warn('no required devices configured; discovery will still scan, but startup gating will pass trivially')
   }
 
-  const matchersCount = effective.matchers.length
-  if (matchersCount === 0) {
-    log.warn('serial plugin loaded with no matchers; discovery disabled')
-    return
-  }
+  // Build runtime matchers strictly from required specs
+  const runtimeMatchers: SerialMatcher[] = buildMatchersFromRequired(requiredSpecs)
 
-  // Map kind -> idToken (from matchers) so we can record idToken on DeviceRecord
+  // Map kind -> idToken (from runtime matchers) so we can record idToken on DeviceRecord
   const kindToIdToken = new Map<string, string>()
-  for (const m of effective.matchers) {
+  for (const m of runtimeMatchers) {
     if (m.kind && m.identificationString) kindToIdToken.set(m.kind, m.identificationString)
   }
 
@@ -216,6 +206,13 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
   let deltaErrors = 0
   let deltaLost = 0
   let summaryTimer: NodeJS.Timeout | null = null
+
+  // 🔇 Deduplicate “identifying …” spam: one line per (idToken, kind) per boot.
+  const announcedIdentifying = new Set<string>()
+
+  // Track last time devices map changed to implement a short settle period
+  let lastChangeAt = Date.now()
+  const bumpChange = () => { lastChangeAt = Date.now() }
 
   const tallyStatus = () => {
     const byStatus: Record<DeviceStatus, number> = { identifying: 0, ready: 0, error: 0, lost: 0 }
@@ -234,6 +231,7 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
 
   const upsert = (rec: DeviceRecord) => {
     devices.set(rec.id, rec)
+    bumpChange()
     try { opts?.stateAdapter?.upsert?.(rec) } catch (err) {
       log.error(`stateAdapter.upsert failed err="${(err as Error).message}"`)
     }
@@ -241,14 +239,12 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
 
   const remove = (id: string) => {
     const existed = devices.delete(id)
+    if (existed) bumpChange()
     try { opts?.stateAdapter?.remove?.(id) } catch (err) {
       log.error(`stateAdapter.remove failed err="${(err as Error).message}"`)
     }
     if (existed) deltaLost++
   }
-
-  // 🔇 Deduplicate “identifying …” spam: one line per (idToken, kind) per boot.
-  const announcedIdentifying = new Set<string>()
 
   // Service → plugin log translation (concise)
   discovery.on('device:identifying', ({ id, path, vid, pid, kind }) => {
@@ -256,7 +252,7 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     const idToken = kindToIdToken.get(kind)
     upsert({ id, kind, path, vid, pid, idToken, status: 'identifying', lastSeen: now })
 
-    // Only announce once per token+kind combo. Skip if no idToken (we don’t care about generic USB noise).
+    // Only announce once per token+kind combo (noise reduction). Static devices have no token.
     if (idToken) {
       const key = `${idToken}:${kind}`
       if (!announcedIdentifying.has(key)) {
@@ -299,23 +295,62 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     }
 
     const options: SerialDiscoveryOptions = {
-      matchers: effective.matchers,
+      matchers: runtimeMatchers,                 // <-- only from required specs
       identify: { ...identifyDefaults, ...(effective.identify ?? {}) },
       defaultBaudRate: effective.defaultBaudRate,
       rescanIntervalMs: effective.rescanIntervalMs,
       logPrefix: effective.logPrefix,
+      settleWindowMs: startupSettleMs,
     }
+
+    // Preface: what we’re about to scan for
+    log.info(
+      `startup scan begin matchers=${runtimeMatchers.length} required=${requiredSpecs.length} ` +
+      `ids=[${requiredSpecs.map(s => s.id ?? '(static)').join(',')}] rescanMs=${effective.rescanIntervalMs ?? 0} ` +
+      `settleMs=${startupSettleMs}`
+    )
 
     // Start service (it should enumerate/emit immediately).
     await discovery.start(options)
 
-    // ---- Single evaluation of required devices (no countdown, no wait) ----
+    // Allow a short settle window so all initial ports can emit at least once.
+    const start = Date.now()
+    let waited = 0
+    const minWait = Math.min(200, startupSettleMs)
+    while (true) {
+      const now = Date.now()
+      waited = now - start
+      const quietFor = now - lastChangeAt
+      if (waited >= startupSettleMs || (waited >= minWait && quietFor >= quietWindowMs)) break
+      await sleep(50)
+    }
+
+    // Settle summary before gating
+    const byStatus = tallyStatus()
+    log.info(
+      `startup scan settled after ${waited}ms devices=${devices.size} ` +
+      `byStatus=${JSON.stringify(byStatus)}`
+    )
+
+    // ---- Single evaluation of required devices (no countdown) ----
     if (requiredSpecs.length > 0) {
       const missing = computeMissingSinglePass(requiredSpecs, devices)
       if (missing.length === 0) {
-        const list = requiredSpecs.map(s => s.id).join(',')
+        const list = requiredSpecs.map(s => s.id ?? '(static)').join(',')
         log.info(`required devices present at startup ids=[${list}]`)
       } else {
+        // Helpful debug dump of current candidates so we can see what's there
+        const candidates = Array.from(devices.values())
+          .filter(d => d.status === 'identifying' || d.status === 'ready')
+          .map(d => ({
+            idToken: d.idToken ?? '(none)',
+            kind: d.kind,
+            status: d.status,
+            path: d.path,
+            vid: d.vid, pid: d.pid, baud: d.baudRate
+          }))
+        log.warn(`startup candidates: ${JSON.stringify(candidates)}`)
+
         const ids = missing.map(m => m.id).join(',')
         const msg = `startup requirement not met; missing ids=[${ids}]`
         if (failOnMissing) {
@@ -362,12 +397,15 @@ function specMatchesRecord(spec: RequiredSpec & { _pathRe?: RegExp }, rec: Devic
   const acceptable = rec.status === 'identifying' || rec.status === 'ready'
   if (!acceptable) return false
 
-  // Must match ID token if provided
-  if (spec.id && rec.idToken && spec.id !== rec.idToken) return false
-  if (spec.id && !rec.idToken) {
-    // If we don't yet have idToken (very early), require kind to match to avoid false positives
-    if (!spec.kind) return false
+  // Tokened (active) requirement: must match token if provided
+  if (spec.id) {
+    if (rec.idToken && spec.id !== rec.idToken) return false
+    if (!rec.idToken) {
+      // If no token yet, require kind to match to avoid false positives
+      if (!spec.kind) return false
+    }
   }
+
   if (spec.kind && spec.kind !== rec.kind) return false
   if (spec.vendorId) {
     const recVid = normalizeHex(rec.vid)
@@ -395,7 +433,9 @@ function computeMissingSinglePass(
   const missing: Array<{ id: string; kind?: string }> = []
   for (const spec of specs) {
     const ok = candidates.some(rec => specMatchesRecord(spec, rec))
-    if (!ok) missing.push({ id: spec.id, kind: spec.kind })
+    if (!ok) missing.push({ id: spec.id ?? '(static)', kind: spec.kind })
   }
   return missing
 }
+
+function sleep(ms: number) { return new Promise<void>((r) => setTimeout(r, ms)) }

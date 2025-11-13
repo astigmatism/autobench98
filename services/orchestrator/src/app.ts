@@ -79,11 +79,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
 
-    // Serial plugin: single-pass gating happens inside it.
+    // Serial plugin: honor env-driven matchers (KB, MS, FP). Do NOT override here.
     void app.register(serialPlugin, {
-        matchers: [
-            { kind: 'arduino.ps2.keyboard', identificationString: 'KB', baudRate: 9600 }
-        ],
+        // matchers intentionally omitted -> serialPlugin will read SERIAL_MATCHERS_JSON
         logPrefix: 'serial'
     })
 

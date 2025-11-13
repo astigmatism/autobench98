@@ -95,13 +95,15 @@ async function start() {
         const env = process.env.NODE_ENV ?? 'development'
         logOrch.info(`listening host=${HOST} port=${PORT} env=${env}`)
 
-        // Serial env summary (so we can confirm what will be used at runtime)
+        // Serial env summary (concise, single line)
         const serial = summarizeSerialEnv()
-        const serialLog: Record<string, unknown> = { ...serial }
         if (serial.matchersError) {
-            logOrch.warn('SERIAL_MATCHERS_JSON parse error', { error: serial.matchersError })
+            logOrch.warn(`SERIAL_MATCHERS_JSON parse error err="${serial.matchersError}"`)
         }
-        // logOrch.info('serial config (env-derived)', serialLog)
+        logOrch.info(
+            `serial env source=${serial.matchersSource} matchers=${serial.matchersCount ?? 0} ` +
+            `rescanMs=${serial.rescanMs ?? 0} summaryMs=${serial.summaryMs ?? 0} defaultBaud=${serial.defaultBaud}`
+        )
 
         // Graceful shutdown
         const shutdown = async (signal: NodeJS.Signals) => {
