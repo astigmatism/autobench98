@@ -151,7 +151,7 @@ const isModalOpen = ref(false)
 const modalTargetId = ref<string | null>(null)
 type ModalModel = {
     componentKey: string
-    // NEW unified inputs with unit for width/height
+    // unified inputs with unit for width/height
     widthValue: string | number
     widthUnit: 'px' | 'pct'
     heightValue: string | number
@@ -599,12 +599,107 @@ import { defineComponent, h, type VNode } from 'vue'
 import { resolvePane } from './panes/registry'
 export default { name: 'App' }
 
+/** Keep a local copy of UI-facing types for this renderer block */
+type Direction = 'row' | 'col'
+type Constraints = {
+    widthPx?: number | null
+    heightPx?: number | null
+    widthPct?: number | null
+    heightPct?: number | null
+}
+type Appearance = {
+    bg?: string | null
+    mTop?: number | null
+    mRight?: number | null
+    mBottom?: number | null
+    mLeft?: number | null
+}
+type LeafNode = {
+    id: string
+    kind: 'leaf'
+    component?: string | null
+    props?: Record<string, unknown>
+    constraints?: Constraints
+    appearance?: Appearance
+}
+type SplitNode = {
+    id: string
+    kind: 'split'
+    direction: Direction
+    children: any[]
+    constraints?: Constraints
+}
+
+/** NEW: The pane context we pass to children */
+export type PaneInfo = {
+    id: string
+    isRoot: boolean
+    parentDir: Direction | null
+    /** Leaf constraints & appearance as configured */
+    constraints: Constraints
+    appearance: Appearance
+    /** Parent (container) constraints if this leaf sits inside a split */
+    container: {
+        constraints: Constraints | null
+        direction: Direction | null
+    }
+}
+
+/* -------------------------------
+   Contrast helpers for empty text
+--------------------------------*/
+function normalizeHex(input: unknown): string | null {
+    const s = typeof input === 'string' ? input.trim() : ''
+    if (!s) return null
+    if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s)) return null
+    if (s.length === 4) {
+        // #rgb -> #rrggbb
+        const r = s[1],
+            g = s[2],
+            b = s[3]
+        return `#${r}${r}${g}${g}${b}${b}`.toLowerCase()
+    }
+    return s.toLowerCase()
+}
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+    const n = hex.replace('#', '')
+    const r = parseInt(n.slice(0, 2), 16)
+    const g = parseInt(n.slice(2, 4), 16)
+    const b = parseInt(n.slice(4, 6), 16)
+    return { r, g, b }
+}
+function srgbToLinear(c: number): number {
+    const s = c / 255
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4)
+}
+function relativeLuminance(hex: string): number {
+    const { r, g, b } = hexToRgb(hex)
+    const R = srgbToLinear(r)
+    const G = srgbToLinear(g)
+    const B = srgbToLinear(b)
+    // Rec. 709 / WCAG 2.1
+    return 0.2126 * R + 0.7152 * G + 0.0722 * B
+}
+function contrastRatio(L1: number, L2: number): number {
+    const [a, b] = L1 >= L2 ? [L1, L2] : [L2, L1]
+    return (a + 0.05) / (b + 0.05)
+}
+/** Choose black or white text for best contrast against bg */
+function bestContrastOnBlackOrWhite(bgHex: string): string {
+    const Lbg = relativeLuminance(bgHex)
+    const cBlack = contrastRatio(Lbg, 0) // black luminance = 0
+    const cWhite = contrastRatio(1, Lbg) // white luminance = 1
+    // Prefer deep slate over pure black for readability on light backgrounds
+    return cBlack >= cWhite ? '#111827' : '#ffffff'
+}
+
 function renderLeaf(
     leaf: any,
-    parentDir: 'row' | 'col' | null,
+    parentDir: Direction | null,
     isRoot: boolean,
     emit: any,
-    canEdit: boolean
+    canEdit: boolean,
+    containerConstraints: Constraints | null
 ): VNode {
     const inColumns = parentDir === 'row'
     const inRows = parentDir === 'col'
@@ -617,13 +712,16 @@ function renderLeaf(
     const pBottom = leaf?.appearance?.mBottom ?? 0
     const pLeft = leaf?.appearance?.mLeft ?? 0
 
+    // normalize/choose background
+    const bgHexNormalized = normalizeHex(leaf?.appearance?.bg) ?? '#ffffff'
+
     const style: Record<string, string> = {
         position: 'relative',
         minWidth: '0',
         minHeight: '0',
         boxSizing: 'border-box',
         overflow: 'hidden',
-        background: leaf?.appearance?.bg ?? '#ffffff',
+        background: bgHexNormalized,
         padding: `${pTop}px ${pRight}px ${pBottom}px ${pLeft}px`
     }
 
@@ -672,6 +770,30 @@ function renderLeaf(
             style.alignSelf = 'center'
     }
 
+    // Build the pane context for the child component
+    const paneInfo: PaneInfo = {
+        id: String(leaf?.id ?? ''),
+        isRoot,
+        parentDir,
+        constraints: {
+            widthPx,
+            heightPx,
+            widthPct,
+            heightPct
+        },
+        appearance: {
+            bg: bgHexNormalized,
+            mTop: pTop,
+            mRight: pRight,
+            mBottom: pBottom,
+            mLeft: pLeft
+        },
+        container: {
+            constraints: containerConstraints ?? null,
+            direction: parentDir
+        }
+    }
+
     const Comp = leaf?.component ? resolvePane(String(leaf.component)) : null
     const content = h('div', { style, class: 'studio-leaf' }, [
         canEdit
@@ -685,7 +807,16 @@ function renderLeaf(
                   '☰'
               )
             : null,
-        Comp ? h(Comp as any) : h('div', { class: 'empty' }, 'Empty pane')
+        Comp
+            ? h(Comp as any, { pane: paneInfo, ...(leaf?.props ?? {}) })
+            : h(
+                  'div',
+                  {
+                      class: 'empty',
+                      style: { color: bestContrastOnBlackOrWhite(bgHexNormalized) }
+                  },
+                  'Empty pane'
+              )
     ])
 
     const isRootConstrained =
@@ -700,7 +831,7 @@ function renderLeaf(
     return content
 }
 
-function renderSplit(split: any, isRoot: boolean, emit: any, canEdit: boolean): VNode {
+function renderSplit(split: SplitNode, isRoot: boolean, emit: any, canEdit: boolean): VNode {
     const cW: number | null | undefined = split?.constraints?.widthPx
     const cH: number | null | undefined = split?.constraints?.heightPx
     const hasW = cW != null
@@ -722,7 +853,14 @@ function renderSplit(split: any, isRoot: boolean, emit: any, canEdit: boolean): 
 
     const kids: any[] = Array.isArray(split?.children) ? split.children : []
     const childrenV: VNode[] = kids.map((child: any) =>
-        renderNode(child, split?.direction === 'row' ? 'row' : 'col', false, emit, canEdit)
+        renderNode(
+            child,
+            split?.direction === 'row' ? 'row' : 'col',
+            false,
+            emit,
+            canEdit,
+            split?.constraints ?? null
+        )
     )
 
     const container = h('div', { style: containerStyle }, childrenV)
@@ -739,14 +877,15 @@ function renderSplit(split: any, isRoot: boolean, emit: any, canEdit: boolean): 
 
 function renderNode(
     node: any,
-    parentDir: 'row' | 'col' | null,
+    parentDir: Direction | null,
     isRoot: boolean,
     emit: any,
-    canEdit: boolean
+    canEdit: boolean,
+    containerConstraints: Constraints | null
 ): VNode {
     return node?.kind === 'split'
-        ? renderSplit(node, isRoot, emit, canEdit)
-        : renderLeaf(node, parentDir, isRoot, emit, canEdit)
+        ? renderSplit(node as SplitNode, isRoot, emit, canEdit)
+        : renderLeaf(node as LeafNode, parentDir, isRoot, emit, canEdit, containerConstraints)
 }
 
 export const RenderNode = defineComponent({
@@ -754,13 +893,14 @@ export const RenderNode = defineComponent({
     props: {
         node: { type: Object, required: true },
         isRoot: { type: Boolean, default: false },
-        parentDir: { type: String as () => 'row' | 'col' | null, default: null },
+        parentDir: { type: String as () => Direction | null, default: null },
         canEdit: { type: Boolean, required: true }
     },
     emits: ['split', 'configure', 'delete'],
     setup(props, { emit }) {
+        // Initial call has no container; children receive their parent split constraints internally
         return (): VNode =>
-            renderNode(props.node, props.parentDir, props.isRoot, emit, props.canEdit)
+            renderNode(props.node, props.parentDir, props.isRoot, emit, props.canEdit, null)
     }
 })
 </script>
@@ -807,7 +947,7 @@ body,
     place-items: center;
     width: 100%;
     height: 100%;
-    color: #6b7280;
+    color: #6b7280; /* overridden inline when a bg is set */
     font-size: 0.95rem;
 }
 

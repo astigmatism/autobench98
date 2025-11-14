@@ -1,5 +1,5 @@
 <template>
-    <div class="logs-pane">
+    <div class="logs-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
         <!-- Hover gear button -->
         <button
             class="gear-btn"
@@ -17,10 +17,11 @@
                 <!-- Toolbar (left-aligned; no "Logs" title, keep counter) -->
                 <div class="toolbar">
                     <div class="left">
-                        <span class="meta">({{ size }} / cap {{ capacity }})</span>
+                        <!-- Plain text (outside panels) uses pane foreground -->
+                        <span class="meta plain-text">({{ size }} / cap {{ capacity }})</span>
 
                         <div class="controls">
-                            <!-- Search -->
+                            <!-- Search (panel-styled) -->
                             <label class="search">
                                 <input
                                     type="text"
@@ -30,8 +31,8 @@
                                 />
                             </label>
 
-                            <!-- Sort -->
-                            <label class="select">
+                            <!-- Sort (panel-styled) -->
+                            <label class="select panel-text">
                                 <span>Sort</span>
                                 <select v-model="sortDir" @change="onSortChange">
                                     <option value="desc">Newest first</option>
@@ -39,8 +40,8 @@
                                 </select>
                             </label>
 
-                            <!-- Level filter -->
-                            <label class="select">
+                            <!-- Level filter (panel-styled) -->
+                            <label class="select panel-text">
                                 <span>Min level</span>
                                 <select v-model="minLevel" @change="onLevelChange">
                                     <option value="debug">debug</option>
@@ -51,8 +52,8 @@
                                 </select>
                             </label>
 
-                            <!-- Autoscroll -->
-                            <label class="checkbox">
+                            <!-- Autoscroll (NOW panel-styled like the selects) -->
+                            <label class="checkbox panel panel-text">
                                 <input
                                     type="checkbox"
                                     v-model="autoscroll"
@@ -75,12 +76,11 @@
                             <button class="btn" @click="clear()">Clear</button>
                         </div>
                     </div>
-                    <!-- (right side intentionally empty so gear icon never overlaps a control) -->
                     <div class="right"></div>
                 </div>
 
-                <!-- Channel legend / filters (dynamic) -->
-                <div class="legend" v-if="channels.length">
+                <!-- Channel legend / filters (panel-styled) -->
+                <div class="legend">
                     <div class="legend-left">Channels:</div>
                     <div class="legend-channels">
                         <label
@@ -102,12 +102,12 @@
             </div>
         </transition>
 
-        <!-- Paused hint -->
+        <!-- Paused hint (panel-styled) -->
         <div class="paused-banner" v-if="paused">
             <span>⏸️ Paused — new entries are being buffered</span>
         </div>
 
-        <!-- Log list -->
+        <!-- Log list (panel-styled) -->
         <div ref="scroller" class="scroller">
             <div v-for="(item, idx) in items" :key="idx" class="row" :data-level="item.level">
                 <span class="ts">{{ fmtTs(item.ts) }}</span>
@@ -124,22 +124,82 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useLogs, type ClientLogLevel, type LogChannel } from '@/stores/logs'
 
+/** Accept pane context (optional). */
+type Direction = 'row' | 'col'
+type Constraints = {
+    widthPx?: number | null
+    heightPx?: number | null
+    widthPct?: number | null
+    heightPct?: number | null
+}
+type Appearance = {
+    bg?: string | null
+    mTop?: number | null
+    mRight?: number | null
+    mBottom?: number | null
+    mLeft?: number | null
+}
+type PaneInfo = {
+    id: string
+    isRoot: boolean
+    parentDir: Direction | null
+    constraints: Constraints
+    appearance: Appearance
+    container: {
+        constraints: Constraints | null
+        direction: Direction | null
+    }
+}
+const props = defineProps<{ pane?: PaneInfo }>()
+
+/** Contrast-aware plain-text color from pane background (for non-panel text) */
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+    if (!hex) return null
+    const s = hex.trim().replace(/^#/, '')
+    if (!/^[0-9a-fA-F]{6}$/.test(s)) return null
+    const int = parseInt(s, 16)
+    return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 }
+}
+function srgbToLinear(c: number): number {
+    const x = c / 255
+    return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4)
+}
+function relLuminance(hex: string): number {
+    const rgb = hexToRgb(hex)
+    if (!rgb) return 1
+    const r = srgbToLinear(rgb.r)
+    const g = srgbToLinear(rgb.g)
+    const b = srgbToLinear(rgb.b)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+function contrastRatio(l1: number, l2: number): number {
+    const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, l1]
+    return (L1 + 0.05) / (L2 + 0.05)
+}
+const paneFg = computed(() => {
+    const bg = (props.pane?.appearance?.bg ?? '#ffffff') as string
+    const Lbg = relLuminance(bg)
+    const contrastWithWhite = contrastRatio(relLuminance('#ffffff'), Lbg)
+    const contrastWithBlack = contrastRatio(relLuminance('#000000'), Lbg)
+    return contrastWithWhite >= contrastWithBlack ? '#ffffff' : '#111111'
+})
+
+/** Fixed readable text for panel-wrapped areas (dark backgrounds) */
+const panelFg = '#e6e6e6'
+
+/* ------------ store + behavior (unchanged) ------------ */
 const logs = useLogs()
 
-// Hydrate persisted UI prefs on first mount
 onMounted(() => {
     logs.hydrate()
 })
 
-// Settings panel visibility (hidden by default)
 const showControls = ref(false)
 
-// --- derived data / bindings ---
 const items = computed(() => logs.filteredItems)
 const size = computed(() => logs.size)
 const capacity = computed(() => logs.capacity)
 
-// filters & controls
 const channels = computed<LogChannel[]>(() => logs.availableChannels)
 const selected = computed<Set<LogChannel>>(() => new Set(logs.selectedChannels))
 const minLevel = ref<ClientLogLevel>(logs.minLevel)
@@ -148,7 +208,6 @@ const autoscroll = ref<boolean>(logs.autoscroll)
 const search = ref<string>(logs.searchText ?? '')
 const sortDir = ref<'asc' | 'desc'>(logs.sortDir)
 
-// colors
 const colorMap = computed<Record<string, string>>(() => logs.channelColors)
 function colorFor(ch: string): string {
     const c = colorMap.value?.[ch as string]
@@ -174,22 +233,20 @@ function colorFor(ch: string): string {
     }
 }
 
-// --- controls handlers ---
 function clear() {
     logs.clear()
 }
 function onChipClick(ch: LogChannel) {
     logs.toggleChannel(ch)
-    // Implicit filter behavior: touching chips enables filtering
     logs.setUseChannelFilter(true)
 }
 function selectAll() {
     logs.setChannels(channels.value.slice())
-    logs.setUseChannelFilter(true) // enable include-only filter over all channels
+    logs.setUseChannelFilter(true)
 }
 function selectNone() {
     logs.clearChannels()
-    logs.setUseChannelFilter(true) // include-only with empty -> show none (explicit)
+    logs.setUseChannelFilter(true)
 }
 function onLevelChange() {
     logs.setMinLevel(minLevel.value)
@@ -207,7 +264,6 @@ function onSortChange() {
     logs.setSortDir(sortDir.value)
 }
 
-// --- Export JSON ---
 function downloadBlob(blob: Blob, filename: string) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -218,7 +274,6 @@ function downloadBlob(blob: Blob, filename: string) {
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
 }
-
 function exportJson() {
     const data = items.value
     const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -228,7 +283,6 @@ function exportJson() {
     downloadBlob(blob, `autobench98-logs-${ts}.json`)
 }
 
-// --- time formatter ---
 function fmtTs(ts: number): string {
     try {
         const d = new Date(ts)
@@ -242,33 +296,20 @@ function fmtTs(ts: number): string {
     }
 }
 
-// --- scrolling behavior (smooth; depends on sort) ---
 const scroller = ref<HTMLDivElement | null>(null)
-
 function scrollSmoothToEnd() {
     const el = scroller.value
     if (!el) return
-    if (sortDir.value === 'desc') {
-        // newest first at top -> keep view anchored to top
-        el.scrollTo({ top: 0, behavior: 'smooth' })
-    } else {
-        // oldest first -> keep anchored to bottom
-        el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    }
+    if (sortDir.value === 'desc') el.scrollTo({ top: 0, behavior: 'smooth' })
+    else el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
 }
-
 onMounted(() => {
-    if (scroller.value && autoscroll.value && !paused.value) {
-        scrollSmoothToEnd()
-    }
+    if (scroller.value && autoscroll.value && !paused.value) scrollSmoothToEnd()
 })
-
 watch(items, () => {
     if (!autoscroll.value || paused.value || !scroller.value) return
     queueMicrotask(scrollSmoothToEnd)
 })
-
-// keep local refs in sync if store changes elsewhere
 watch(
     () => logs.autoscroll,
     (v) => {
@@ -297,15 +338,20 @@ watch(
 
 <style scoped>
 .logs-pane {
-    position: relative; /* allow gear positioning */
+    /* --pane-fg: readable for plain text on the pane background
+       --panel-fg: readable for text inside dark panels (fixed light color) */
+    --pane-fg: #111;
+    --panel-fg: #e6e6e6;
+
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 8px;
     height: 100%;
-    width: 100%; /* fill available width */
+    width: 100%;
 }
 
-/* Gear button (appears on hover/focus) */
+/* Gear button */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -344,21 +390,33 @@ watch(
     transform: translateY(-6px);
 }
 
-/* Settings panel wraps toolbar + legend */
+/* Panel container */
 .controls-panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
 }
 
-/* Top toolbar */
+/* Toolbar */
 .toolbar {
     display: grid;
-    grid-template-columns: 1fr auto; /* left area grows; right stays empty */
+    grid-template-columns: 1fr auto;
     align-items: center;
     gap: 8px;
     font-size: 14px;
 }
+
+/* plain text bits should use pane foreground */
+.plain-text {
+    color: var(--pane-fg);
+}
+
+/* Panel-styled controls keep panel foreground for readability */
+.panel-text span {
+    color: var(--panel-fg);
+}
+
+/* Left/right areas */
 .toolbar .left {
     display: flex;
     align-items: center;
@@ -366,23 +424,21 @@ watch(
     min-width: 0;
 }
 .toolbar .right {
-    /* intentionally empty to keep layout from pushing controls under gear */
 }
-.toolbar .meta {
-    color: #808080;
-}
+
+/* Controls block */
 .toolbar .controls {
-    --control-h: 30px; /* unified control height */
+    --control-h: 30px;
     display: flex;
     align-items: center;
     gap: 12px;
-    flex-wrap: wrap; /* allow wrapping on narrow widths */
+    flex-wrap: wrap;
 }
 
 /* Search */
 .search input {
     background: #0b0b0b;
-    color: #e6e6e6;
+    color: var(--panel-fg);
     border: 1px solid #333;
     border-radius: 6px;
     padding: 0 8px;
@@ -391,7 +447,48 @@ watch(
     line-height: var(--control-h);
 }
 
-/* Legend row */
+/* Select + labels (panel) */
+.select {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--control-h);
+    padding: 0 8px;
+    background: #0b0b0b;
+    border: 1px solid #333;
+    border-radius: 6px;
+}
+.select select {
+    background: #0b0b0b;
+    color: var(--panel-fg);
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 0 8px;
+    height: var(--control-h);
+    line-height: var(--control-h);
+}
+
+/* Checkbox — upgraded to panel style to match selects */
+.checkbox.panel {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--control-h);
+    padding: 0 8px;
+    background: #0b0b0b;
+    border: 1px solid #333;
+    border-radius: 6px;
+}
+.checkbox input {
+    width: 16px;
+    height: 16px;
+}
+.checkbox span {
+    line-height: var(--control-h);
+    color: var(--panel-fg);
+}
+
+/* Legend (panel) */
 .legend {
     display: grid;
     grid-template-columns: auto 1fr auto;
@@ -402,6 +499,7 @@ watch(
     border: 1px solid #1f1f1f;
     border-radius: 8px;
     font-size: 12px;
+    color: var(--panel-fg);
 }
 .legend-left {
     color: #a0a0a0;
@@ -428,8 +526,8 @@ watch(
     background: #151515;
 }
 .legend-item[data-checked='true'] {
-    border-color: #6ee7b7; /* brighter mint border when active */
-    background: #07361f; /* deeper greenish bg for strong contrast on black */
+    border-color: #6ee7b7;
+    background: #07361f;
     color: #e8fff4;
     transform: translateY(-1px);
 }
@@ -448,50 +546,35 @@ watch(
     height: var(--control-h);
 }
 
-/* Controls */
-.checkbox {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    user-select: none;
-    height: var(--control-h);
-}
-.checkbox input {
-    width: 16px;
-    height: 16px;
-}
-.checkbox span {
-    line-height: var(--control-h);
-}
-.select {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: var(--control-h);
-}
-.select select {
-    background: #0b0b0b;
-    color: #e6e6e6;
-    border: 1px solid #333;
-    border-radius: 6px;
-    padding: 0 8px;
-    height: var(--control-h);
-    line-height: var(--control-h);
-}
-
-/* Buttons */
+/* Buttons (panel) */
 .btn {
-    padding: 0 10px;
+    padding: 0 12px;
     border-radius: 6px;
     border: 1px solid #333;
     background: #111;
-    color: #eee;
+    color: var(--panel-fg);
     cursor: pointer;
     height: var(--control-h);
     line-height: var(--control-h);
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    white-space: nowrap;
 }
+
+/* Make toolbar buttons a touch wider & consistent */
+.toolbar .btn {
+    min-width: 104px;
+}
+.toolbar .btn.mini {
+    min-width: 104px;
+}
+
+/* (legend action buttons remain compact) */
+.legend-actions .btn.mini {
+    min-width: auto;
+}
+
 .btn:hover {
     background: #1a1a1a;
 }
@@ -500,23 +583,23 @@ watch(
     background: #1f1f1f;
 }
 .btn.mini {
-    padding: 0 8px;
+    padding: 0 10px;
     font-size: 12px;
     height: var(--control-h);
     line-height: var(--control-h);
 }
 
-/* Paused banner */
+/* Paused banner (panel) */
 .paused-banner {
     background: #141414;
     border: 1px dashed #333;
     border-radius: 8px;
-    color: #d0d0d0;
+    color: var(--panel-fg);
     padding: 6px 10px;
     font-size: 12px;
 }
 
-/* Log list */
+/* Log list (panel) */
 .scroller {
     flex: 1;
     overflow: auto;
@@ -527,9 +610,8 @@ watch(
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 12px;
     line-height: 1.35;
-    color: #e6e6e6;
+    color: var(--panel-fg);
 }
-
 .row {
     display: grid;
     grid-template-columns: 88px 22px 120px 1fr;
@@ -537,8 +619,6 @@ watch(
     padding: 3px 0;
     align-items: baseline;
 }
-
-/* per-level coloring */
 .ts {
     color: #a0a0a0;
 }
@@ -562,7 +642,6 @@ watch(
 .row[data-level='fatal'] .msg {
     color: #ff4d4d;
 }
-
 .empty {
     padding: 12px;
     color: #909090;
