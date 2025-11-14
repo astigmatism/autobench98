@@ -10,7 +10,7 @@ type Direction = 'row' | 'col'
 type Constraints = {
     widthPx?: number | null
     heightPx?: number | null
-    /** NEW: percentage sizing relative to split container’s axis (0–100) */
+    /** percentage sizing relative to split container’s axis (0–100) */
     widthPct?: number | null
     heightPct?: number | null
 }
@@ -596,7 +596,7 @@ onMounted(async () => {
 
 <script lang="ts">
 import { defineComponent, h, type VNode } from 'vue'
-import { resolvePane } from './panes/registry'
+import { resolvePane, getPaneLabel } from './panes/registry'
 export default { name: 'App' }
 
 /** Keep a local copy of UI-facing types for this renderer block */
@@ -630,15 +630,13 @@ type SplitNode = {
     constraints?: Constraints
 }
 
-/** NEW: The pane context we pass to children */
+/** Pane context passed to children */
 export type PaneInfo = {
     id: string
     isRoot: boolean
     parentDir: Direction | null
-    /** Leaf constraints & appearance as configured */
     constraints: Constraints
     appearance: Appearance
-    /** Parent (container) constraints if this leaf sits inside a split */
     container: {
         constraints: Constraints | null
         direction: Direction | null
@@ -646,14 +644,13 @@ export type PaneInfo = {
 }
 
 /* -------------------------------
-   Contrast helpers for empty text
+   Contrast helpers (also for HUD)
 --------------------------------*/
 function normalizeHex(input: unknown): string | null {
     const s = typeof input === 'string' ? input.trim() : ''
     if (!s) return null
     if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s)) return null
     if (s.length === 4) {
-        // #rgb -> #rrggbb
         const r = s[1],
             g = s[2],
             b = s[3]
@@ -663,10 +660,11 @@ function normalizeHex(input: unknown): string | null {
 }
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
     const n = hex.replace('#', '')
-    const r = parseInt(n.slice(0, 2), 16)
-    const g = parseInt(n.slice(2, 4), 16)
-    const b = parseInt(n.slice(4, 6), 16)
-    return { r, g, b }
+    return {
+        r: parseInt(n.slice(0, 2), 16),
+        g: parseInt(n.slice(2, 4), 16),
+        b: parseInt(n.slice(4, 6), 16)
+    }
 }
 function srgbToLinear(c: number): number {
     const s = c / 255
@@ -674,10 +672,9 @@ function srgbToLinear(c: number): number {
 }
 function relativeLuminance(hex: string): number {
     const { r, g, b } = hexToRgb(hex)
-    const R = srgbToLinear(r)
-    const G = srgbToLinear(g)
-    const B = srgbToLinear(b)
-    // Rec. 709 / WCAG 2.1
+    const R = srgbToLinear(r),
+        G = srgbToLinear(g),
+        B = srgbToLinear(b)
     return 0.2126 * R + 0.7152 * G + 0.0722 * B
 }
 function contrastRatio(L1: number, L2: number): number {
@@ -687,10 +684,54 @@ function contrastRatio(L1: number, L2: number): number {
 /** Choose black or white text for best contrast against bg */
 function bestContrastOnBlackOrWhite(bgHex: string): string {
     const Lbg = relativeLuminance(bgHex)
-    const cBlack = contrastRatio(Lbg, 0) // black luminance = 0
-    const cWhite = contrastRatio(1, Lbg) // white luminance = 1
-    // Prefer deep slate over pure black for readability on light backgrounds
+    const cBlack = contrastRatio(Lbg, 0)
+    const cWhite = contrastRatio(1, Lbg)
     return cBlack >= cWhite ? '#111827' : '#ffffff'
+}
+
+/* -------------------------------
+   HUD helpers
+--------------------------------*/
+type DimKind = 'px' | 'pct' | 'auto'
+function fmtDim(
+    px: number | null | undefined,
+    pct: number | null | undefined
+): { text: string; kind: DimKind } {
+    if (px != null) return { text: `${px}px`, kind: 'px' }
+    if (pct != null) return { text: `${pct}%`, kind: 'pct' }
+    return { text: 'auto', kind: 'auto' }
+}
+
+function ariaDescribePane(name: string, w: { text: string }, h: { text: string }) {
+    return `${name}. Width ${w.text}. Height ${h.text}.`
+}
+
+function renderBadge(label: string, kind: DimKind, fg: string): VNode {
+    const base: Record<string, string> = {
+        display: 'inline-block',
+        padding: '2px 6px',
+        borderRadius: '6px',
+        fontSize: '11px',
+        lineHeight: '1',
+        border: '1px solid',
+        marginLeft: '6px'
+    }
+    if (kind === 'px') {
+        base.background = 'rgba(0,0,0,0.25)'
+        base.borderColor = 'rgba(0,0,0,0.35)'
+        base.fontWeight = '600'
+    } else if (kind === 'pct') {
+        base.background = 'transparent'
+        base.borderStyle = 'dashed'
+        base.borderColor = 'currentColor'
+    } else {
+        base.background = 'transparent'
+        base.borderColor = 'transparent'
+        base.opacity = '0.9'
+        base.fontStyle = 'italic'
+    }
+    base.color = fg
+    return h('span', { style: base, 'data-kind': kind }, label)
 }
 
 function renderLeaf(
@@ -712,8 +753,8 @@ function renderLeaf(
     const pBottom = leaf?.appearance?.mBottom ?? 0
     const pLeft = leaf?.appearance?.mLeft ?? 0
 
-    // normalize/choose background
     const bgHexNormalized = normalizeHex(leaf?.appearance?.bg) ?? '#ffffff'
+    const textColor = bestContrastOnBlackOrWhite(bgHexNormalized)
 
     const style: Record<string, string> = {
         position: 'relative',
@@ -725,7 +766,6 @@ function renderLeaf(
         padding: `${pTop}px ${pRight}px ${pBottom}px ${pLeft}px`
     }
 
-    // Helper to apply main-axis sizing precedence: px > % > auto
     function applyWidth() {
         if (widthPx != null) {
             style.flex = '0 0 auto'
@@ -758,7 +798,6 @@ function renderLeaf(
         style.width = '100%'
         applyHeight()
     } else {
-        // root without parent split; allow both axes
         style.width = widthPx != null ? `${widthPx}px` : widthPct != null ? `${widthPct}%` : '100%'
         style.height =
             heightPx != null ? `${heightPx}px` : heightPct != null ? `${heightPct}%` : '100%'
@@ -770,17 +809,11 @@ function renderLeaf(
             style.alignSelf = 'center'
     }
 
-    // Build the pane context for the child component
     const paneInfo: PaneInfo = {
         id: String(leaf?.id ?? ''),
         isRoot,
         parentDir,
-        constraints: {
-            widthPx,
-            heightPx,
-            widthPct,
-            heightPct
-        },
+        constraints: { widthPx, heightPx, widthPct, heightPct },
         appearance: {
             bg: bgHexNormalized,
             mTop: pTop,
@@ -788,13 +821,37 @@ function renderLeaf(
             mBottom: pBottom,
             mLeft: pLeft
         },
-        container: {
-            constraints: containerConstraints ?? null,
-            direction: parentDir
-        }
+        container: { constraints: containerConstraints ?? null, direction: parentDir }
     }
 
     const Comp = leaf?.component ? resolvePane(String(leaf.component)) : null
+
+    // HUD content (name + size badges)
+    const paneName = getPaneLabel(leaf?.component ?? null)
+    const wBadge = fmtDim(widthPx, widthPct)
+    const hBadge = fmtDim(heightPx, heightPct)
+    const ariaText = ariaDescribePane(paneName, wBadge, hBadge)
+
+    const hud = h(
+        'div',
+        {
+            class: 'pane-hud',
+            style: {
+                color: textColor,
+                background: 'rgba(0,0,0,0.08)',
+                border: '1px solid rgba(0,0,0,0.15)',
+                backdropFilter: 'blur(2px)'
+            },
+            role: 'note',
+            'aria-hidden': 'true'
+        },
+        [
+            h('span', { class: 'pane-hud__name', style: { fontWeight: '600' } }, paneName),
+            renderBadge(`W: ${wBadge.text}`, wBadge.kind, textColor),
+            renderBadge(`H: ${hBadge.text}`, hBadge.kind, textColor)
+        ]
+    )
+
     const content = h('div', { style, class: 'studio-leaf' }, [
         canEdit
             ? h(
@@ -802,21 +859,19 @@ function renderLeaf(
                   {
                       title: 'Pane menu',
                       onClick: () => emit('configure', leaf),
-                      class: 'cell-gear tl'
+                      class: 'cell-gear tl',
+                      'aria-label': ariaText
                   },
                   '☰'
               )
             : null,
+        // HUD next to the gear (only visible on hover via CSS)
+        canEdit ? hud : null,
+        // SR-only live text so screen readers hear updates when constraints or component change
+        h('span', { class: 'sr-only', 'aria-live': 'polite' }, ariaText),
         Comp
             ? h(Comp as any, { pane: paneInfo, ...(leaf?.props ?? {}) })
-            : h(
-                  'div',
-                  {
-                      class: 'empty',
-                      style: { color: bestContrastOnBlackOrWhite(bgHexNormalized) }
-                  },
-                  'Empty pane'
-              )
+            : h('div', { class: 'empty', style: { color: textColor } }, 'Empty pane')
     ])
 
     const isRootConstrained =
@@ -898,7 +953,6 @@ export const RenderNode = defineComponent({
     },
     emits: ['split', 'configure', 'delete'],
     setup(props, { emit }) {
-        // Initial call has no container; children receive their parent split constraints internally
         return (): VNode =>
             renderNode(props.node, props.parentDir, props.isRoot, emit, props.canEdit, null)
     }
@@ -963,7 +1017,7 @@ body,
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transition: opacity 0.15s ease;
+    transition: opacity 0.15s ease, transform 0.1s ease;
     z-index: 10;
     font-size: 0.95rem;
     line-height: 1;
@@ -972,10 +1026,39 @@ body,
     top: 0.5rem;
     left: 0.5rem;
 }
-.studio-leaf:hover .cell-gear {
+.studio-leaf:hover .cell-gear,
+.cell-gear:focus,
+.cell-gear:focus-visible {
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
+}
+.cell-gear:hover {
+    transform: translateY(-1px);
+}
+
+/* NEW: Pane HUD, displayed next to the gear on hover/focus */
+.pane-hud {
+    position: absolute;
+    top: 0.5rem;
+    left: 2.4rem; /* just to the right of the gear */
+    padding: 0.2rem 0.5rem;
+    border-radius: 8px;
+    font-size: 12px;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+    z-index: 9; /* just beneath the gear so the gear stays clickable */
+}
+.studio-leaf:hover .pane-hud,
+.cell-gear:focus + .pane-hud {
+    opacity: 1;
+    visibility: visible;
+}
+
+.pane-hud__name {
+    margin-right: 2px;
 }
 
 .inputs .input.sm {
@@ -1012,5 +1095,18 @@ body,
 .btn.danger {
     border-color: #ef4444;
     color: #ef4444;
+}
+
+/* screen-reader only helper */
+.sr-only {
+    position: absolute !important;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 </style>
