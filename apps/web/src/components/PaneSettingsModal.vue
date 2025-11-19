@@ -65,6 +65,16 @@
                         >
                             Overwrite
                         </button>
+
+                        <!-- Export BEFORE Delete (Option A) -->
+                        <button
+                            class="btn"
+                            :disabled="!selectedProfileId"
+                            @click="exportSelectedProfile"
+                            title="Download the selected profile JSON"
+                        >
+                            Export
+                        </button>
                         <button
                             class="btn danger"
                             :disabled="!selectedProfileId || !canEdit"
@@ -90,10 +100,31 @@
                         >
                             Save
                         </button>
+
+                        <span class="sep" aria-hidden="true">|</span>
+
+                        <!-- Import profile JSON (file picker + POST) -->
+                        <input
+                            ref="importFile"
+                            type="file"
+                            accept="application/json"
+                            style="display: none"
+                            @change="onPickImport"
+                        />
+                        <button
+                            class="btn"
+                            title="Import a profile JSON and save to server"
+                            @click="triggerImport"
+                        >
+                            Import JSON
+                        </button>
                     </div>
 
                     <p class="hint tight">
                         Profiles are saved on the server and available to any client.
+                    </p>
+                    <p class="hint" v-if="importHint">
+                        {{ importHint }}
                     </p>
                 </section>
 
@@ -395,6 +426,7 @@ const emit = defineEmits<{
     (e: 'deleteSelected'): void
     (e: 'saveCurrentAs', name: string): void
     (e: 'update:selectedProfileId', id: string): void
+    (e: 'refreshLayouts'): void
 }>()
 
 // Local form state (copied from parent initialModel whenever modal opens or model changes)
@@ -411,6 +443,10 @@ watch(
 // "Save current as…" input
 const newProfileNameLocal = ref('')
 
+// --- Import/Export helpers ---
+const importFile = ref<HTMLInputElement | null>(null)
+const importHint = ref('')
+
 function emitApply() {
     emit('apply', { ...(working as any) })
 }
@@ -420,6 +456,135 @@ function formatDate(iso?: unknown): string {
     if (typeof iso !== 'string' || !iso) return ''
     const d = new Date(iso)
     return Number.isNaN(d.getTime()) ? String(iso ?? '') : d.toLocaleString()
+}
+
+// Download a blob with a filename
+function downloadBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+}
+
+// Extract filename from Content-Disposition
+function filenameFromDisposition(dispo?: string | null, fallback = 'layout.json'): string {
+    if (!dispo) return fallback
+    const m = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(dispo)
+    if (m && m[1]) {
+        try {
+            return decodeURIComponent(m[1].replace(/["']/g, ''))
+        } catch {
+            return m[1].replace(/["']/g, '')
+        }
+    }
+    return fallback
+}
+
+// Export selected profile via server
+async function exportSelectedProfile() {
+    const id = props.selectedProfileId
+    if (!id) return
+    try {
+        const res = await fetch(`/api/layouts/${id}/export`, { method: 'GET' })
+        if (!res.ok) throw new Error(await res.text())
+        const dispo = res.headers.get('content-disposition')
+        const fname = filenameFromDisposition(dispo, `layout-${id}.json`)
+        const blob = await res.blob()
+        downloadBlob(blob, fname)
+        importHint.value = ''
+    } catch (err: any) {
+        console.error('Export failed:', err)
+        importHint.value = 'Export failed — check server logs.'
+    }
+}
+
+// Open file picker
+function triggerImport() {
+    importFile.value?.click()
+}
+
+// Normalize possible import payloads into { name, layout }
+function normalizeImportPayload(raw: any, fileName?: string): { name: string; layout: any } {
+    const now = new Date().toISOString()
+    const baseName =
+        (typeof raw?.name === 'string' && raw.name.trim()) ||
+        (fileName ? fileName.replace(/\.[^/.]+$/, '') : '') ||
+        `Imported ${now}`
+
+    // Accept full profile or just the layout object or a wrapper { layout }
+    let layout = null
+    if (raw && typeof raw === 'object') {
+        if (raw.layout && typeof raw.layout === 'object') {
+            layout = raw.layout
+        } else if ('kind' in raw || 'children' in raw || 'component' in raw) {
+            // looks like a layout root node
+            layout = raw
+        }
+    }
+    if (!layout) throw new Error('Invalid JSON: missing layout')
+    return { name: baseName, layout }
+}
+
+// Handle file selection → POST /api/layouts/import
+async function onPickImport(ev: Event) {
+    const input = ev.target as HTMLInputElement
+    const file = input.files?.[0]
+    // reset for next selection
+    if (input) input.value = ''
+    if (!file) return
+
+    try {
+        const text = await file.text()
+        const json = JSON.parse(text)
+        const payload = normalizeImportPayload(json, file.name)
+
+        const res = await fetch('/api/layouts/import', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        if (!res.ok) throw new Error(await res.text())
+        const data: any = await res.json()
+        if (!data?.ok) throw new Error('Import endpoint returned ok: false')
+
+        // Handle server’s actual response shape: { ok, mode, created: string[], defaultId }
+        if (Array.isArray(data.created) && data.created.length > 0) {
+            const createdIds: string[] = data.created
+            const preferred =
+                data.defaultId && createdIds.includes(data.defaultId)
+                    ? data.defaultId
+                    : createdIds[createdIds.length - 1]
+
+            // Refresh so dropdown contains the new entry, then select + load it
+            emit('refreshLayouts')
+            emit('update:selectedProfileId', preferred)
+            emit('loadProfile', preferred)
+
+            importHint.value =
+                createdIds.length > 1
+                    ? `Import completed — ${createdIds.length} profiles added.`
+                    : 'Import completed.'
+        } else if (data?.profile?.id) {
+            // Back-compat: if server ever returns { profile }
+            const id = data.profile.id as string
+            emit('refreshLayouts')
+            emit('update:selectedProfileId', id)
+            emit('loadProfile', id)
+            importHint.value = 'Import completed.'
+        } else {
+            emit('refreshLayouts')
+            importHint.value =
+                'Import completed — no created ids were returned. Check server logs if unexpected.'
+        }
+    } catch (err: any) {
+        console.error('Import failed:', err)
+        importHint.value =
+            'Import failed — the JSON should be a profile {name, layout} or a layout object.'
+    }
 }
 </script>
 
@@ -547,5 +712,9 @@ function formatDate(iso?: unknown): string {
 .btn.danger {
     border-color: #ef4444;
     color: #ef4444;
+}
+.sep {
+    opacity: 0.5;
+    user-select: none;
 }
 </style>

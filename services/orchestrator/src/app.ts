@@ -5,6 +5,7 @@ import Fastify, {
     type FastifyReply
 } from 'fastify'
 import cors from '@fastify/cors'
+import fastifyMultipart from '@fastify/multipart' // ✅ enable uploads for /api/layouts/import
 
 // ✨ static hosting imports
 import fastifyStatic from '@fastify/static'
@@ -75,7 +76,17 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
 
     app.decorate('clientBuf', clientBuf)
 
+    // CORS first
     void app.register(cors, { origin: true })
+
+    // ✅ Multipart: enables file uploads for /api/layouts/import in layoutsRoutes.
+    //    Keep config minimal here; the route can still accept raw JSON bodies if desired.
+    void app.register(fastifyMultipart, {
+        attachFieldsToBody: true,         // fields become available on req.body
+        limits: { files: 1, fileSize: 2 * 1024 * 1024 } // 1 file up to 2MB (tweak as needed)
+    })
+
+    // WebSocket + layouts routes
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
 
@@ -206,6 +217,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
         }
     })
 
+    // Static last so SPA handles /studio/* deep links
     void app.register(fastifyStatic, { root: WEB_DIST, prefix: '/studio/', index: ['index.html'] })
     app.get('/studio', async (_req, reply) => { reply.status(301); reply.redirect('/studio/') })
     app.setNotFoundHandler((req, reply) => {

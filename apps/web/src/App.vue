@@ -570,6 +570,7 @@ onMounted(async () => {
             />
         </div>
 
+        <!-- Modal (no custom @importedProfile; we use refreshLayouts + select + load) -->
         <PaneSettingsModal
             :is-open="isModalOpen"
             :can-edit="canEdit"
@@ -590,6 +591,7 @@ onMounted(async () => {
             @deleteSelected="deleteSelected"
             @saveCurrentAs="saveCurrentAs"
             @update:selectedProfileId="(val) => (selectedProfileId = val)"
+            @refreshLayouts="refreshLayouts"
         />
     </div>
 </template>
@@ -644,7 +646,7 @@ export type PaneInfo = {
 }
 
 /* -------------------------------
-   Contrast helpers (also for HUD)
+   Contrast + HUD helpers
 --------------------------------*/
 function normalizeHex(input: unknown): string | null {
     const s = typeof input === 'string' ? input.trim() : ''
@@ -681,17 +683,6 @@ function contrastRatio(L1: number, L2: number): number {
     const [a, b] = L1 >= L2 ? [L1, L2] : [L2, L1]
     return (a + 0.05) / (b + 0.05)
 }
-/** Choose black or white text for best contrast against bg */
-function bestContrastOnBlackOrWhite(bgHex: string): string {
-    const Lbg = relativeLuminance(bgHex)
-    const cBlack = contrastRatio(Lbg, 0)
-    const cWhite = contrastRatio(1, Lbg)
-    return cBlack >= cWhite ? '#111827' : '#ffffff'
-}
-
-/* -------------------------------
-   HUD helpers
---------------------------------*/
 type DimKind = 'px' | 'pct' | 'auto'
 function fmtDim(
     px: number | null | undefined,
@@ -702,36 +693,14 @@ function fmtDim(
     return { text: 'auto', kind: 'auto' }
 }
 
-function ariaDescribePane(name: string, w: { text: string }, h: { text: string }) {
-    return `${name}. Width ${w.text}. Height ${h.text}.`
-}
-
-function renderBadge(label: string, kind: DimKind, fg: string): VNode {
-    const base: Record<string, string> = {
-        display: 'inline-block',
-        padding: '2px 6px',
-        borderRadius: '6px',
-        fontSize: '11px',
-        lineHeight: '1',
-        border: '1px solid',
-        marginLeft: '6px'
-    }
-    if (kind === 'px') {
-        base.background = 'rgba(0,0,0,0.25)'
-        base.borderColor = 'rgba(0,0,0,0.35)'
-        base.fontWeight = '600'
-    } else if (kind === 'pct') {
-        base.background = 'transparent'
-        base.borderStyle = 'dashed'
-        base.borderColor = 'currentColor'
-    } else {
-        base.background = 'transparent'
-        base.borderColor = 'transparent'
-        base.opacity = '0.9'
-        base.fontStyle = 'italic'
-    }
-    base.color = fg
-    return h('span', { style: base, 'data-kind': kind }, label)
+/* -------------------------------
+   Renderers
+--------------------------------*/
+function bestContrastOnBlackOrWhite(bgHex: string): string {
+    const Lbg = relativeLuminance(bgHex)
+    const cBlack = contrastRatio(Lbg, 0)
+    const cWhite = contrastRatio(1, Lbg)
+    return cBlack >= cWhite ? '#111827' : '#ffffff'
 }
 
 function renderLeaf(
@@ -830,7 +799,7 @@ function renderLeaf(
     const paneName = getPaneLabel(leaf?.component ?? null)
     const wBadge = fmtDim(widthPx, widthPct)
     const hBadge = fmtDim(heightPx, heightPct)
-    const ariaText = ariaDescribePane(paneName, wBadge, hBadge)
+    const ariaText = `${paneName}. Width ${wBadge.text}. Height ${hBadge.text}.`
 
     const hud = h(
         'div',
@@ -847,8 +816,8 @@ function renderLeaf(
         },
         [
             h('span', { class: 'pane-hud__name', style: { fontWeight: '600' } }, paneName),
-            renderBadge(`W: ${wBadge.text}`, wBadge.kind, textColor),
-            renderBadge(`H: ${hBadge.text}`, hBadge.kind, textColor)
+            h('span', { style: { marginLeft: '6px' } }, `W: ${wBadge.text}`),
+            h('span', { style: { marginLeft: '6px' } }, `H: ${hBadge.text}`)
         ]
     )
 
@@ -865,9 +834,9 @@ function renderLeaf(
                   '☰'
               )
             : null,
-        // HUD next to the gear (only visible on hover via CSS)
+        // HUD next to the gear
         canEdit ? hud : null,
-        // SR-only live text so screen readers hear updates when constraints or component change
+        // SR-only live text
         h('span', { class: 'sr-only', 'aria-live': 'polite' }, ariaText),
         Comp
             ? h(Comp as any, { pane: paneInfo, ...(leaf?.props ?? {}) })
@@ -918,7 +887,7 @@ function renderSplit(split: SplitNode, isRoot: boolean, emit: any, canEdit: bool
         )
     )
 
-    const container = h('div', { style: containerStyle }, childrenV)
+    const container: VNode = h('div', { style: containerStyle }, childrenV)
 
     if (isRoot && (hasW || hasH)) {
         return h(
@@ -1037,7 +1006,7 @@ body,
     transform: translateY(-1px);
 }
 
-/* NEW: Pane HUD, displayed next to the gear on hover/focus */
+/* Pane HUD, displayed next to the gear on hover/focus */
 .pane-hud {
     position: absolute;
     top: 0.5rem;
@@ -1049,7 +1018,7 @@ body,
     visibility: hidden;
     pointer-events: none;
     transition: opacity 0.15s ease;
-    z-index: 9; /* just beneath the gear so the gear stays clickable */
+    z-index: 9; /* beneath the gear */
 }
 .studio-leaf:hover .pane-hud,
 .cell-gear:focus + .pane-hud {
