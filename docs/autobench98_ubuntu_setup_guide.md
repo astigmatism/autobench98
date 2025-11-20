@@ -317,6 +317,35 @@ curl -I http://localhost
 
 ---
 
+## 12.5 Ensure serial device permissions (dialout group)
+
+AutoBench98 talks to multiple Arduino-based controllers over USB serial.  
+On Ubuntu, access to `/dev/ttyACM*` and `/dev/ttyUSB*` is restricted to the `dialout` group.  
+If your user is not in this group, the orchestrator will log errors like:
+
+> Error: Permission denied, cannot open /dev/ttyACM0
+
+To permanently fix this:
+
+1. **Add your user to the `dialout` group:**
+
+    ```bash
+    sudo usermod -aG dialout "$USER"
+    ```
+
+2. **Log out and back in** (or reboot) so the new group membership is applied.
+
+3. **Verify membership:**
+    ```bash
+    groups
+    ```
+    You should see `dialout` in the list, for example:
+    ```text
+    youruser adm dialout cdrom sudo dip plugdev users lpadmin
+    ```
+
+Once this is done, the AutoBench98 orchestrator should be able to open the Arduino serial ports on startup without permission errors.
+
 ## 13. Optional Improvements
 
 -   **Byobu:** persistent sessions for monitoring.

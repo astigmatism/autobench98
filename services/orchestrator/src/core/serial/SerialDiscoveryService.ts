@@ -13,11 +13,12 @@ import { ReadlineParser } from '@serialport/parser-readline'
  *  - Static (no-probe): identifyRequired=false, match by VID/PID/pathRegex only.
  *    We do NOT send any commands. Optionally keep the port open.
  *
- * NOTE: Matchers are provided at runtime by the orchestrator plugin; there is no env-driven matcher parsing here.
+ * NOTE: Matchers are provided at runtime by the orchestrator plugin; there is no env-driven
+ * matcher parsing here.
  */
 export interface SerialMatcher {
   kind: string                     // e.g. 'arduino.ps2.keyboard', 'serial.printer'
-  identificationString?: string    // token device returns to 'identify' (active mode). If omitted and identifyRequired=false => static mode.
+  identificationString?: string    // token device returns to 'identify' (active mode)
   vendorId?: string                // optional coarse/static filters
   productId?: string
   pathRegex?: RegExp
@@ -107,6 +108,7 @@ export class SerialDiscoveryService extends TypedEmitter {
       settleWindowMs: opts.settleWindowMs ?? 1500,
     }
 
+    // Single concise startup line
     this.emitLog('info', `serial discovery start matchers=${this.options.matchers.length} rescanMs=${this.options.rescanIntervalMs ?? 0}`)
 
     await this.scanOnce()
@@ -143,10 +145,6 @@ export class SerialDiscoveryService extends TypedEmitter {
   // ----- core flow -----
   private async scanOnce(): Promise<void> {
     const ports = await SerialPort.list()
-
-    // NEW: log how many ports we see on each scan
-    this.emitLog('info', `scanOnce ports=${ports.length}`)
-
     const present = new Set<string>(ports.map(p => p.path).filter(Boolean) as string[])
 
     // Detect lost devices
@@ -177,9 +175,7 @@ export class SerialDiscoveryService extends TypedEmitter {
       const tempKind = 'unknown'
       const tempId = this.makeDeviceId(tempKind, path, vid, pid)
       this.emit('device:identifying', { id: tempId, path, vid, pid, kind: tempKind })
-      this.emitLog('info', `probe path=${path} vid=${vid ?? '-'} pid=${pid ?? '-'} eligible=${eligible.length}`)
 
-      // Prefer token-first matchers for this path; if none succeed, try static.
       try {
         // 1) Active/token-first: send 'identify' and map by token.
         const active = eligible.filter(m => m.identifyRequired !== false && !!m.identificationString)
@@ -191,7 +187,6 @@ export class SerialDiscoveryService extends TypedEmitter {
             await this.onRecognized(path, matched, id, vid, pid, baudUsed, /*fromActive=*/true)
             continue
           } else {
-            // We opened/closed during token read; fall through to static.
             this.emitLog('debug', `token "${token}" not in active set for path=${path}`)
           }
         }
@@ -199,7 +194,6 @@ export class SerialDiscoveryService extends TypedEmitter {
         // 2) Static: choose a matcher that fits VID/PID/pathRegex without probing.
         const statics = eligible.filter(m => m.identifyRequired === false)
         if (statics.length > 0) {
-          // If multiple static matchers apply, pick the one that has most constraints (VID+PID+path beats VID-only).
           const pick = this.pickBestStatic(statics, path, vid, pid)
           if (pick) {
             const id = this.makeDeviceId(pick.kind, path, vid, pid)
@@ -217,7 +211,8 @@ export class SerialDiscoveryService extends TypedEmitter {
           kind: tempKind,
           error: err instanceof Error ? err : new Error(String(err))
         })
-        this.emitLog('warn', `probe failed path=${path} err="${(err as Error)?.message}"`)
+        // Downgraded to debug so failures don't flood normal logs
+        this.emitLog('debug', `probe failed path=${path} err="${(err as Error)?.message}"`)
       } finally {
         // Close any unclaimed port
         if (!this.claimedPaths.has(path)) {
@@ -330,27 +325,25 @@ export class SerialDiscoveryService extends TypedEmitter {
   ): Promise<void> {
     // Open & optionally finalize handshake for active; for static, open if keeping open.
     if (fromActive) {
-      // Active path: we already verified token. Open and keep for future I/O.
       const { port, parser } = await this.openPort(path, matched.baudRate ?? baud, this.options.identify.parserDelimiter ?? '\r\n')
 
-      // Optional completion
       const completion = this.options.identify.completion
       if (completion) {
         try {
           await this.writeLine(port, `${completion}${this.options.identify.writeLineEnding ?? '\n'}`)
-        } catch { /* non-fatal */ }
+        } catch {
+          // non-fatal
+        }
       }
 
       this.openPorts.set(path, port)
       this.parsers.set(path, parser)
     } else {
-      // Static path: open only if requested to keep open
       if (matched.keepOpenOnStatic) {
         const { port, parser } = await this.openPort(path, matched.baudRate ?? baud, this.options.identify.parserDelimiter ?? '\r\n')
         this.openPorts.set(path, port)
         this.parsers.set(path, parser)
       } else {
-        // Ensure closed so we don't hold the handle
         await this.safeClose(path)
       }
     }

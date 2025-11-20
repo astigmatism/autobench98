@@ -201,18 +201,6 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
 
   const discovery = new SerialDiscoveryService()
 
-  // --- wire-through service logs so we can see probe errors ------------------
-  discovery.on('log', ({ level, msg }) => {
-    switch (level) {
-      case 'debug': log.debug(msg); break
-      case 'info':  log.info(msg); break
-      case 'warn':  log.warn(msg); break
-      case 'error': log.error(msg); break
-      default:      log.info(msg); break
-    }
-  })
-  // ---------------------------------------------------------------------------
-
   // --- delta counters (for optional summaries) --------------------------------
   let deltaIdentified = 0
   let deltaErrors = 0
@@ -351,7 +339,6 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
         const list = requiredSpecs.map(s => s.id ?? '(static)').join(',')
         log.info(`required devices present at startup ids=[${list}]`)
       } else {
-        // Helpful debug dump of current candidates so we can see what's there
         const candidates = Array.from(devices.values())
           .filter(d => d.status === 'identifying' || d.status === 'ready')
           .map(d => ({
@@ -367,7 +354,6 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
         const msg = `startup requirement not met; missing ids=[${ids}]`
         if (failOnMissing) {
           log.error(msg)
-          // Stop discovery so Node can exit cleanly
           try { await discovery.stop() } catch { /* ignore */ }
           throw new Error(msg)
         } else {
@@ -413,7 +399,6 @@ function specMatchesRecord(spec: RequiredSpec & { _pathRe?: RegExp }, rec: Devic
   if (spec.id) {
     if (rec.idToken && spec.id !== rec.idToken) return false
     if (!rec.idToken) {
-      // If no token yet, require kind to match to avoid false positives
       if (!spec.kind) return false
     }
   }
