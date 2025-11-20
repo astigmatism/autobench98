@@ -143,6 +143,10 @@ export class SerialDiscoveryService extends TypedEmitter {
   // ----- core flow -----
   private async scanOnce(): Promise<void> {
     const ports = await SerialPort.list()
+
+    // NEW: log how many ports we see on each scan
+    this.emitLog('info', `scanOnce ports=${ports.length}`)
+
     const present = new Set<string>(ports.map(p => p.path).filter(Boolean) as string[])
 
     // Detect lost devices

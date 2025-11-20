@@ -201,6 +201,18 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
 
   const discovery = new SerialDiscoveryService()
 
+  // --- wire-through service logs so we can see probe errors ------------------
+  discovery.on('log', ({ level, msg }) => {
+    switch (level) {
+      case 'debug': log.debug(msg); break
+      case 'info':  log.info(msg); break
+      case 'warn':  log.warn(msg); break
+      case 'error': log.error(msg); break
+      default:      log.info(msg); break
+    }
+  })
+  // ---------------------------------------------------------------------------
+
   // --- delta counters (for optional summaries) --------------------------------
   let deltaIdentified = 0
   let deltaErrors = 0

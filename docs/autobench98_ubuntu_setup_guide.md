@@ -55,8 +55,8 @@ After this step, you can disconnect the monitor, keyboard, and mouse and access 
 
 Open **Settings → Power** and set:
 
-- **Screen Blank:** Never  
-- **Power Mode:** Performance
+-   **Screen Blank:** Never
+-   **Power Mode:** Performance
 
 This ensures the workstation behaves like a server (no sleep or suspend).
 
@@ -107,8 +107,8 @@ cat ~/.ssh/id_ed25519.pub
 
 ### 4.3 Add the key to GitHub
 
-1. Log into [https://github.com](https://github.com).  
-2. Go to **Settings → SSH and GPG Keys → New SSH Key**.  
+1. Log into [https://github.com](https://github.com).
+2. Go to **Settings → SSH and GPG Keys → New SSH Key**.
 3. Paste your key, name it something like `AutoBench98-1`, and save.
 
 ### 4.4 Verify connection
@@ -118,6 +118,7 @@ ssh -T git@github.com
 ```
 
 Expected message:
+
 > Hi <username>! You've successfully authenticated.
 
 ---
@@ -165,6 +166,7 @@ nano .env
 ```
 
 Adjust as needed (for example):
+
 ```
 API_PORT=3000
 SIDECAR_PORT=3100
@@ -195,6 +197,7 @@ npm -w apps/web run build
 ```
 
 Expected output (example):
+
 ```
 [autobench98] DATA_DIR => ./data/orchestrator
 [autobench98] Orchestrator => http://localhost:3000
@@ -203,46 +206,77 @@ Press Ctrl-C to stop.
 ```
 
 ### Optional: Enable serial access
+
 If you see a dialout warning:
+
 ```bash
 sudo usermod -aG dialout "$(id -un)" && newgrp dialout
 ```
 
 ---
 
-## 10. Reverse Proxy (Expose Port 80)
+## 10. Reverse Proxy (Expose via Synology DSM 7)
 
-Keep the app running on port 3000 for safety and use nginx to expose it on port 80.
+If you are hosting AutoBench98 behind a Synology NAS running DSM 7, use DSM’s built‑in reverse proxy instead of NGINX. This correctly forwards WebSocket Upgrade headers required by the orchestrator.
 
-```bash
-sudo apt install -y nginx
-sudo tee /etc/nginx/sites-available/autobench >/dev/null <<'NGINX'
-server {
-    listen 80;
-    server_name autobench.local;
+### 1. Open DSM Reverse Proxy Settings
 
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-NGINX
+1. Log into DSM.
+2. Go to **Control Panel → Login Portal → Advanced → Reverse Proxy**.
+3. Click **Create** or edit your existing rule for AutoBench98.
 
-sudo ln -s /etc/nginx/sites-available/autobench /etc/nginx/sites-enabled/autobench
-sudo nginx -t && sudo systemctl reload nginx
+### 2. General Tab — Base Forwarding Rule
+
+Configure:
+
+-   **Source**
+
+    -   Protocol: `HTTPS`
+    -   Hostname: your domain (e.g. `autobench.local` or your public domain)
+    -   Port: `443`
+
+-   **Destination**
+    -   Protocol: `HTTP`
+    -   Hostname: IP address of your Ubuntu server
+    -   Port: `3000` (AutoBench98 orchestrator)
+
+Leave the path blank to forward all traffic.
+
+### 3. Custom Header — Required for WebSockets
+
+This is the critical part.
+
+Add **two custom request headers**:
+
+| Header Name    | Value                 |
+| -------------- | --------------------- |
+| **Upgrade**    | `$http_upgrade`       |
+| **Connection** | `$connection_upgrade` |
+
+These instruct DSM to forward WebSocket upgrade handshakes correctly.
+
+Without these, WS requests arrive as plain HTTP requests with  
+`connection: close` and **WebSockets will always fail**.
+
+### 4. Advanced Settings (Optional but Recommended)
+
+Under **Advanced Settings**, enable:
+
+-   **Enable WebSocket** (if your DSM version shows this option)
+-   **HTTP/2 enabled** (optional; DSM will still talk HTTP/1.1 to backend)
+
+### 5. Save and Apply
+
+Click **Save**, then refresh the DSM reverse proxy list to ensure the settings applied.
+
+After this, the orchestrator will receive correct WebSocket handshake headers:
+
+```
+Connection: Upgrade
+Upgrade: websocket
 ```
 
-You can now access AutoBench at:
-```
-http://autobench.local
-```
-
-(Optional: add `192.168.1.17 autobench.local` to `/etc/hosts` on your client system.)
+and your existing `/ws` Fastify route will successfully switch protocols.
 
 ---
 
@@ -264,16 +298,19 @@ npm install
 ## 12. Verification
 
 Check running ports:
+
 ```bash
 ss -tulpn | grep -E ':(80|3000|3100)'
 ```
 
 Check HTTP response:
+
 ```bash
 curl -I http://localhost:3000
 ```
 
 If using nginx:
+
 ```bash
 curl -I http://localhost
 ```
@@ -282,12 +319,12 @@ curl -I http://localhost
 
 ## 13. Optional Improvements
 
-- **Byobu:** persistent sessions for monitoring.
-  ```bash
-  byobu
-  ```
-- **Logs:** use `journalctl` or `tail -f ./logs/*.log` if available.
-- **System start automation:** later, add a systemd service if desired.
+-   **Byobu:** persistent sessions for monitoring.
+    ```bash
+    byobu
+    ```
+-   **Logs:** use `journalctl` or `tail -f ./logs/*.log` if available.
+-   **System start automation:** later, add a systemd service if desired.
 
 ---
 
