@@ -48,10 +48,9 @@ coverage/
 .env.local
 .env-*
 .env.development
-.env.production
+!.env.production
 .env.*.local
 !.env.example
-!.env.prod
 
 # ------------------------------------------------------------------------------
 # Docker and containers
