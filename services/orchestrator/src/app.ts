@@ -43,6 +43,10 @@ const REQUEST_VERBOSE = String(process.env.REQUEST_VERBOSE ?? 'false').toLowerCa
 const REQUEST_LOG_HEADERS =
     String(process.env.REQUEST_LOG_HEADERS ?? 'false').toLowerCase() === 'true'
 const REQUEST_SAMPLE = Math.max(1, Number(process.env.REQUEST_SAMPLE ?? '1'))
+
+// Extra: WebSocket-specific debug for /ws
+// Controlled via WS_DEBUG in .env (see env.example)
+const WS_DEBUG = String(process.env.WS_DEBUG ?? 'false').toLowerCase() === 'true'
 // --------------------------------------
 
 // ---- Log ingest config (env) ----
@@ -98,6 +102,15 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
+        // Always log WS-specific debug for /ws when enabled, independent of sampling.
+        if (WS_DEBUG && req.url === '/ws') {
+            const headers = req.headers as Record<string, unknown>
+            const upgrade = headers['upgrade']
+            const connection = headers['connection']
+            const ua = (headers['user-agent'] as string) ?? ''
+            logReq.info('WS debug /ws headers', { upgrade, connection, ua })
+        }
+
         const shouldLog = ++reqCounter % REQUEST_SAMPLE === 0
         if (!shouldLog) return
 
