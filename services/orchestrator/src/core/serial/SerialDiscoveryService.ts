@@ -196,11 +196,8 @@ export class SerialDiscoveryService extends TypedEmitter {
 
         // 1) Active/token-first: send 'identify' and map by token.
         //
-        // IMPORTANT FIX:
-        // If active identify fails (e.g., timeout on a non-Arduino like the power meter),
-        // we LOG and FALL THROUGH to static matching instead of treating it as a fatal
-        // error for this port. This allows a static matcher (e.g. serial.powermeter)
-        // to still claim the device.
+        // IMPORTANT: if active identify fails (timeout, etc.), we fall through
+        // to static matchers instead of treating it as a fatal error.
         if (active.length > 0) {
           try {
             const { token, baudUsed: tokenBaud } = await this.readIdentityToken(path)
@@ -228,13 +225,12 @@ export class SerialDiscoveryService extends TypedEmitter {
               continue
             } else {
               this.emitLog('debug', `token "${token}" not in active set for path=${path}`)
-              // fall through to static matchers below
+              // fall through to static matchers
             }
           } catch (err: any) {
-            // Active identify failed (timeout, etc.). Log and fall through to statics.
             const e = err instanceof Error ? err : new Error(String(err))
             this.emitLog('debug', `active identify failed path=${path} err="${e.message}"`)
-            // NOTE: we do NOT rethrow here; we still want to give static matchers a chance.
+            // fall through to static matchers
           }
         }
 
@@ -467,7 +463,9 @@ export class SerialDiscoveryService extends TypedEmitter {
 
   // ----- low-level -----
   private async openPort(path: string, baudRate: number, delimiter: string): Promise<{ port: SerialPort; parser: ReadlineParser }> {
-    const port = new SerialPort({ path, baudRate, autoOpen: false })
+    // IMPORTANT: lock=false so discovery never participates in user-space locks.
+    // This avoids contention with the power meter service (which uses lock:true).
+    const port = new SerialPort({ path, baudRate, autoOpen: false, lock: false })
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { cleanup(); reject(new Error(`Timeout opening ${path} @ ${baudRate}`)) }, 3000)
