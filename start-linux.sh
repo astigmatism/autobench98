@@ -52,6 +52,29 @@ else
   die "Missing 'lsof' or 'ss'. Install via your package manager (e.g., 'sudo apt install lsof')."
 fi
 
+# --- optional .env.production override prompt --------------------------------
+if [[ -f ".env.production" ]]; then
+  if [[ -f ".env" ]]; then
+    warn "A local .env file already exists."
+    read -rp "Do you want to overwrite .env with .env.production? [y/N] " yn
+    case "$yn" in
+      [Yy]* )
+        cp .env.production .env
+        log "Overwrote .env with .env.production"
+        ;;
+      * )
+        log "Keeping existing .env"
+        ;;
+    esac
+  else
+    # No .env exists — safe to copy without prompting
+    cp .env.production .env
+    log "No .env found. Copied .env.production → .env"
+  fi
+else
+  warn ".env.production not found — skipping production environment sync."
+fi
+
 # --- optional .env loader (safe) ---------------------------------------------
 if [[ -f .env ]]; then
   log "Loading .env"
