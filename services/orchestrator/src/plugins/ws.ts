@@ -1,4 +1,4 @@
-// apps/orchestrator/src/plugins/ws.ts
+// services/orchestrator/src/plugins/ws.ts
 import fp from 'fastify-plugin'
 import websocket from '@fastify/websocket'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
@@ -15,24 +15,28 @@ import {
     attachClientBuffer,
     getHistory as getLogHistory,
     onLog as onLogSubscribe
-} from '../core/logs.adapter.js'
+} from '../adapters/logs.adapter.js'
 
 // ---------------------------
 // Log filtering configuration
 // ---------------------------
 const LEVEL_ORDER: Record<string, number> = {
-    debug: 10, info: 20, warn: 30, error: 40, fatal: 50
+    debug: 10,
+    info: 20,
+    warn: 30,
+    error: 40,
+    fatal: 50
 }
 
 // Build allowlist once from env (single source of truth)
 const envAllow = String(process.env.LOG_CHANNEL_ALLOWLIST ?? '').trim()
 const CHANNEL_ALLOWLIST = envAllow
     ? new Set(
-        envAllow
-          .split(',')
-          .map(s => s.trim().toLowerCase())
-          .filter(Boolean)
-          .map(s => s.split(':')[0]) // allow "device:serial" by matching top-level token
+          envAllow
+              .split(',')
+              .map(s => s.trim().toLowerCase())
+              .filter(Boolean)
+              .map(s => s.split(':')[0]) // allow "device:serial" by matching top-level token
       )
     : null // null => no channel filter (allow all channels, subject to level)
 
@@ -55,18 +59,17 @@ if (REDACT_PATTERN) {
 const HB_LOG = String(process.env.WS_HEARTBEAT_LOG ?? 'false').toLowerCase() === 'true'
 
 // Normalize any incoming channel (enum number or string) to a lowercased name.
-// For numeric enums, rely on TypeScript's reverse mapping emitted in JS.
 function normalizeChannelName(ch: unknown): string {
     if (typeof ch === 'number' && Number.isFinite(ch)) {
         const name = (LogChannel as any)?.[ch]
         if (typeof name === 'string' && name.length > 0) {
             return name.trim().toLowerCase()
         }
-        return String(ch) // fallback, unlikely to match allowlist but safe
+        return String(ch)
     }
     if (typeof ch === 'string') {
         const s = ch.trim().toLowerCase()
-        return s.split(':')[0] // top-level before any colon
+        return s.split(':')[0]
     }
     return String(ch ?? '').trim().toLowerCase()
 }
@@ -82,7 +85,6 @@ function allowLog(e: ClientLog): boolean {
 }
 
 function transformLog(e: ClientLog): ClientLog {
-    // Always emit the normalized channel name so the client consistently receives strings
     const normalizedChannel = normalizeChannelName((e as any).channel) as any
     const base: ClientLog = { ...e, channel: normalizedChannel }
     if (!redacter || !base.message) return base
@@ -143,28 +145,65 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
     app.get('/ws', { websocket: true }, (socket: WSSocket, _req: FastifyRequest) => {
         sockets.add(socket)
 
+        // Per-socket snapshot ticker: keep the mirror fresh even if patch wiring misbehaves.
+        let snapshotTimer: NodeJS.Timeout | null = null
+
+        const startSnapshotTimer = () => {
+            if (snapshotTimer) return
+            snapshotTimer = setInterval(() => {
+                if (socket.readyState !== socket.OPEN) return
+                try {
+                    const snap = getSnapshot()
+                    socket.send(
+                        JSON.stringify({
+                            type: 'state.snapshot',
+                            stateVersion: snap.version,
+                            data: snap
+                        })
+                    )
+                } catch (e) {
+                    logWs.warn('failed to send periodic snapshot', {
+                        err: (e as Error).message
+                    })
+                }
+            }, 1000) // 1s cadence for live-ish power meter updates
+        }
+
+        const stopSnapshotTimer = () => {
+            if (snapshotTimer) {
+                clearInterval(snapshotTimer)
+                snapshotTimer = null
+            }
+        }
+
         try {
-            socket.send(JSON.stringify({
-                type: 'welcome',
-                serverTime: new Date().toISOString()
-            }))
+            socket.send(
+                JSON.stringify({
+                    type: 'welcome',
+                    serverTime: new Date().toISOString()
+                })
+            )
 
             // Send an immediate state snapshot
             const snap = getSnapshot()
-            socket.send(JSON.stringify({
-                type: 'state.snapshot',
-                stateVersion: snap.version,
-                data: snap
-            }))
+            socket.send(
+                JSON.stringify({
+                    type: 'state.snapshot',
+                    stateVersion: snap.version,
+                    data: snap
+                })
+            )
+
+            // Start periodic snapshots so the client mirror stays updated.
+            startSnapshotTimer()
 
             // Send bounded, filtered log history snapshot
-            // Prefer server-driven count; fall back to env/default
             const snapshotCount = Math.max(
                 0,
                 Number(
                     snap?.serverConfig?.logs?.snapshot ??
-                    process.env.CLIENT_LOGS_SNAPSHOT ??
-                    LOGS_SNAPSHOT_DEFAULT
+                        process.env.CLIENT_LOGS_SNAPSHOT ??
+                        LOGS_SNAPSHOT_DEFAULT
                 )
             )
 
@@ -172,10 +211,12 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const raw = getLogHistory(snapshotCount)
                 const filtered = filterAndTransform(raw)
                 if (filtered.length > 0) {
-                    socket.send(JSON.stringify({
-                        type: 'logs.history',
-                        entries: filtered
-                    }))
+                    socket.send(
+                        JSON.stringify({
+                            type: 'logs.history',
+                            entries: filtered
+                        })
+                    )
                 }
             }
 
@@ -214,25 +255,31 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     const includeSnapshot = !!msg?.payload?.includeSnapshot
                     if (includeSnapshot) {
                         const snap2 = getSnapshot()
-                        socket.send(JSON.stringify({
-                            type: 'state.snapshot',
-                            stateVersion: snap2.version,
-                            data: snap2
-                        }))
+                        socket.send(
+                            JSON.stringify({
+                                type: 'state.snapshot',
+                                stateVersion: snap2.version,
+                                data: snap2
+                            })
+                        )
 
-                        // Optional: resend filtered logs history on demand
                         const n = Number(msg?.payload?.logsHistory ?? 0)
                         if (n > 0) {
                             const raw = getLogHistory(n)
                             const filtered = filterAndTransform(raw)
                             if (filtered.length > 0) {
-                                socket.send(JSON.stringify({
-                                    type: 'logs.history',
-                                    entries: filtered
-                                }))
+                                socket.send(
+                                    JSON.stringify({
+                                        type: 'logs.history',
+                                        entries: filtered
+                                    })
+                                )
                             }
                         }
                     }
+
+                    // Ensure the snapshot timer is running once client subscribes
+                    startSnapshotTimer()
                     return
                 }
             } catch {
@@ -242,13 +289,14 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
         socket.on('close', () => {
             sockets.delete(socket)
+            stopSnapshotTimer()
             logWs.info('client disconnected')
         })
     })
 
     // --- Broadcast state changes ---
 
-    // Full snapshots
+    // Full snapshots (still kept for future callers that may rely on this)
     const onSnapshot = (snap: any) => {
         const payload = JSON.stringify({
             type: 'state.snapshot',
@@ -268,6 +316,19 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
     // Incremental patches
     const onPatch = (evt: { from: number; to: number; patch: unknown[] }) => {
+        // Simple debug: does this patch touch powerMeter at all?
+        const hasPowerMeter = Array.isArray(evt.patch)
+            ? (evt.patch as any[]).some(
+                  (op: any) => typeof op?.path === 'string' && op.path.startsWith('/powerMeter')
+              )
+            : false
+
+        logWs.debug('broadcasting state.patch', {
+            from: evt.from,
+            to: evt.to,
+            hasPowerMeter
+        })
+
         const payload = JSON.stringify({
             type: 'state.patch',
             fromVersion: evt.from,
@@ -297,7 +358,9 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             } catch {}
         }
         sockets.clear()
-        try { unsubscribeLogs() } catch {}
+        try {
+            unsubscribeLogs()
+        } catch {}
         done()
     })
 })

@@ -1,3 +1,5 @@
+// services/orchestrator/src/app.ts
+
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
@@ -27,6 +29,7 @@ import wsPlugin from './plugins/ws.js'
 import { setMessage, setLayout } from './core/state.js'
 import layoutsRoutes from './routes/layouts.js'
 import serialPlugin from './plugins/serial.js'
+import powerMeterPlugin from './plugins/powerMeter.js'
 
 declare module 'fastify' {
     interface FastifyInstance {
@@ -97,6 +100,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
         // matchers intentionally omitted -> serialPlugin will read SERIAL_MATCHERS_JSON
         logPrefix: 'serial'
     })
+
+    // Power meter bootstrap: dedicated discovery + service wiring
+    void app.register(powerMeterPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {

@@ -1,4 +1,3 @@
-// apps/orchestrator/src/core/state.ts
 import { EventEmitter } from 'node:events'
 import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
 
@@ -25,6 +24,35 @@ export type ServerConfig = {
 }
 
 /**
+ * Snapshot of the power meter for WS/state consumers.
+ *
+ * This is intentionally decoupled from the internal SerialPowerMeterService types
+ * so that app state stays package-agnostic and only exposes what the UI needs.
+ */
+export type PowerMeterSnapshot = {
+    // High-level phase (mirrors PowerMeterState.phase but kept locally here)
+    phase: 'disconnected' | 'connecting' | 'streaming' | 'error'
+    // Optional human-readable message (e.g., error details)
+    message?: string
+
+    // Lightweight stats
+    stats: {
+        totalSamples: number
+        bytesReceived: number
+        lastSampleAt: number | null
+        lastErrorAt: number | null
+    }
+
+    // Last sample, if any
+    lastSample: {
+        ts: string
+        watts: number
+        volts: number
+        amps: number
+    } | null
+}
+
+/**
  * Server-authoritative application state (seed this with your real domains).
  * You can expand this shape freely; the snapshot broadcast will carry whatever is here.
  */
@@ -34,6 +62,12 @@ export type AppState = {
     layout: { rows: number; cols: number }
     message: string
     serverConfig: ServerConfig
+
+    /**
+     * Live power meter slice, streamed to the client via WS state snapshots/patches.
+     * This is populated by server-side glue that observes the power meter service.
+     */
+    powerMeter: PowerMeterSnapshot
 }
 
 /** Payload for incremental patch broadcasts */
@@ -89,6 +123,19 @@ const WS_RECONNECT_JITTER      = num(process.env.VITE_WS_RECONNECT_JITTER, 0.2)
 
 const startedAt = new Date().toISOString()
 
+// Initial power meter slice: fully disconnected, no samples yet.
+const initialPowerMeter: PowerMeterSnapshot = {
+    phase: 'disconnected',
+    message: undefined,
+    stats: {
+        totalSamples: 0,
+        bytesReceived: 0,
+        lastSampleAt: null,
+        lastErrorAt: null
+    },
+    lastSample: null
+}
+
 let state: AppState = {
     version: 1,
     meta: { startedAt, status: 'ready' },
@@ -110,7 +157,8 @@ let state: AppState = {
             reconnectFactor: WS_RECONNECT_FACTOR,
             reconnectJitter: WS_RECONNECT_JITTER
         }
-    }
+    },
+    powerMeter: initialPowerMeter
 }
 
 /**
@@ -128,6 +176,7 @@ function clone<T>(v: T): T {
 /** Emit both patch and snapshot (keeps existing listeners working) */
 function emitChanges(prev: AppState, next: AppState) {
     const ops = jsonpatch.compare(prev, next) // RFC 6902 ops to transform prev -> next
+
     if (ops.length > 0) {
         stateEvents.emit('patch', {
             from: prev.version,
@@ -135,6 +184,7 @@ function emitChanges(prev: AppState, next: AppState) {
             patch: ops
         } satisfies PatchEvent)
     }
+
     stateEvents.emit('snapshot', clone(next))
 }
 
@@ -173,4 +223,40 @@ export function setLayout(rows: number, cols: number) {
 /** Optional: update parts of serverConfig at runtime (e.g., admin UI later) */
 export function setServerConfig(partial: Partial<ServerConfig>) {
     set('serverConfig', { ...state.serverConfig, ...clone(partial) })
+}
+
+/**
+ * Replace the entire power meter slice.
+ * Intended for server-side glue that mirrors the SerialPowerMeterService
+ * into WS-visible app state.
+ */
+export function setPowerMeterSnapshot(next: PowerMeterSnapshot) {
+    set('powerMeter', next)
+}
+
+/**
+ * Shallow-merge convenience for incremental updates to the power meter slice.
+ * Allows passing a *partial* stats object, which will be merged with existing stats.
+ */
+export function updatePowerMeterSnapshot(partial: {
+    phase?: PowerMeterSnapshot['phase']
+    message?: string
+    lastSample?: PowerMeterSnapshot['lastSample']
+    stats?: Partial<PowerMeterSnapshot['stats']>
+}) {
+    const prev = state.powerMeter
+
+    const mergedStats: PowerMeterSnapshot['stats'] = {
+        ...prev.stats,
+        ...(partial.stats ?? {})
+    }
+
+    const merged: PowerMeterSnapshot = {
+        phase: partial.phase ?? prev.phase,
+        message: partial.message ?? prev.message,
+        lastSample: partial.lastSample ?? prev.lastSample,
+        stats: mergedStats
+    }
+
+    set('powerMeter', merged)
 }

@@ -1,3 +1,5 @@
+// packages/logging/src/types.ts
+
 export enum LogChannel {
     orchestrator = 'orchestrator',
     sidecar = 'sidecar',
@@ -8,7 +10,8 @@ export enum LogChannel {
     benchmark = 'benchmark',
     websocket = 'websocket',
     app = 'app',
-    request = 'request'
+    request = 'request',
+    powermeter = 'powermeter'
 }
 
 export type ChannelColor =

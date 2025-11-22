@@ -1,3 +1,5 @@
+// packages/logging/src/channels.ts
+
 import { type ChannelColor, LogChannel } from './types.js'
 
 export const CHANNEL_AS_LEVEL = true as const
@@ -8,11 +10,14 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     [LogChannel.ffmpeg]:       { emoji: '🎬', color: 'magenta' },
     [LogChannel.stream]:       { emoji: '📺', color: 'cyan' },
     [LogChannel.ocr]:          { emoji: '🔎', color: 'green' },
-    [LogChannel.device]:       { emoji: '🔌', color: 'red' },
+    // More generic device marker
+    [LogChannel.device]:       { emoji: '🛠️', color: 'red' },
     [LogChannel.benchmark]:    { emoji: '⏱️', color: 'green' },
     [LogChannel.websocket]:    { emoji: '🔗', color: 'cyan' },
     [LogChannel.app]:          { emoji: '📦', color: 'blue' },
-    [LogChannel.request]:      { emoji: '📝', color: 'purple' } // ← NEW
+    [LogChannel.request]:      { emoji: '📝', color: 'purple' },
+    // Power meter-specific channel
+    [LogChannel.powermeter]:   { emoji: '🔌', color: 'yellow' },
 }
 
 export const ANSI: Record<ChannelColor, string> = {
@@ -26,7 +31,6 @@ export const ANSI: Record<ChannelColor, string> = {
     purple: '\x1b[95m' // bright magenta (purple-ish)
 }
 
-
 export const RESET = '\x1b[0m'
 
 export const CUSTOM_LEVELS: Record<LogChannel, number> = {
@@ -39,5 +43,6 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.benchmark]:    30,
     [LogChannel.websocket]:    30,
     [LogChannel.app]:          30,
-    [LogChannel.request]:      30      // ← NEW
+    [LogChannel.request]:      30,
+    [LogChannel.powermeter]:   30,
 }

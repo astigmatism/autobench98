@@ -262,12 +262,25 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     }
   })
 
-  discovery.on('device:identified', ({ id, path, vid, pid, kind, baudRate }) => {
+  discovery.on('device:identified', async ({ id, path, vid, pid, kind, baudRate }) => {
     const now = Date.now()
     const idToken = kindToIdToken.get(kind)
     upsert({ id, kind, path, vid, pid, baudRate, idToken, status: 'ready', lastSeen: now })
     deltaIdentified++
     log.info(`ready id=${idToken ?? 'unknown'} kind=${kind} baud=${baudRate}`)
+
+    // 👉 If this is the power meter, notify the power meter service (if present)
+    if (kind === 'serial.powermeter' && (app as any).powerMeter) {
+      const pm = (app as any).powerMeter as {
+        onDeviceIdentified: (info: { id: string; path: string; baudRate?: number }) => Promise<void> | void
+      }
+
+      try {
+        await pm.onDeviceIdentified({ id, path, baudRate })
+      } catch (err) {
+        log.warn(`powerMeter.onDeviceIdentified failed id=${id} path=${path} err="${(err as Error).message}"`)
+      }
+    }
   })
 
   discovery.on('device:error', ({ id, path, kind /*, error*/ }) => {
@@ -278,9 +291,22 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     deltaErrors++
   })
 
-  discovery.on('device:lost', ({ id }) => {
+  discovery.on('device:lost', async ({ id }) => {
     remove(id)
     log.warn(`device lost id=${id}`)
+
+    // 👉 If this was the power meter, notify the power meter service (if present)
+    if (id && (app as any).powerMeter && id.includes('serial.powermeter')) {
+      const pm = (app as any).powerMeter as {
+        onDeviceLost: (info: { id: string }) => Promise<void> | void
+      }
+
+      try {
+        await pm.onDeviceLost({ id })
+      } catch (err) {
+        log.warn(`powerMeter.onDeviceLost failed id=${id} err="${(err as Error).message}"`)
+      }
+    }
   })
 
   // ---------------------- boot-time single-scan readiness gate ----------------

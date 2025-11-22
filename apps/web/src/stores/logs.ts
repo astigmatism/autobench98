@@ -1,3 +1,5 @@
+// apps/web/src/stores/logs.ts
+
 import { defineStore } from 'pinia'
 
 export type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal'
@@ -12,6 +14,7 @@ export type LogChannel =
     | 'websocket'
     | 'app'
     | 'request'
+    | 'powermeter'
     | (string & {}) // allow future/unknown channels without breaking types
 
 export interface ClientLog {
