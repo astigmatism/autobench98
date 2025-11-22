@@ -154,6 +154,19 @@ export class SerialDiscoveryService extends TypedEmitter {
     const ports = await SerialPort.list()
     const present = new Set<string>(ports.map(p => p.path).filter(Boolean) as string[])
 
+    // 🔍 Debug: what ports does the discovery service actually see?
+    this.emitLog(
+      'debug',
+      `scanOnce ports=${ports.length} details=${JSON.stringify(
+        ports.map(p => ({
+          path: p.path,
+          vid: p.vendorId,
+          pid: p.productId,
+          serial: (p as any).serialNumber ?? undefined,
+        }))
+      )}`
+    )
+
     // Detect lost devices
     for (const path of Array.from(this.claimedPaths)) {
       if (!present.has(path)) {
@@ -171,18 +184,33 @@ export class SerialDiscoveryService extends TypedEmitter {
       if (!path) continue
       if (this.claimedPaths.has(path)) continue
 
+      const vidRaw = info.vendorId
+      const pidRaw = info.productId
+      const serialRaw = (info as any).serialNumber as string | undefined
+
       // If *no* matcher considers this path eligible, skip quickly.
       const eligible = this.eligibleMatchersForPath(
         path,
-        info.vendorId,
-        info.productId,
-        info.serialNumber
+        vidRaw,
+        pidRaw,
+        serialRaw
       )
+
+      // 🔍 Debug: show how eligibility was computed for this path
+      this.emitLog(
+        'debug',
+        `probe path=${path} vid=${vidRaw ?? 'none'} pid=${pidRaw ?? 'none'} ` +
+        `serial=${serialRaw ?? 'none'} eligible=${eligible.length} ` +
+        (eligible.length > 0
+          ? `matchKinds=[${eligible.map(m => m.kind).join(',')}]`
+          : 'matchKinds=[]')
+      )
+
       if (eligible.length === 0) continue
 
-      const vid = normalizeHex(info.vendorId)
-      const pid = normalizeHex(info.productId)
-      const serial = info.serialNumber
+      const vid = normalizeHex(vidRaw)
+      const pid = normalizeHex(pidRaw)
+      const serial = serialRaw
 
       // Announce a probe (kind unknown at this point)
       const tempKind = 'unknown'
