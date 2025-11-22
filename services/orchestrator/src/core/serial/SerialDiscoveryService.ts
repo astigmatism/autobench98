@@ -1,5 +1,4 @@
 /* eslint-disable no-console */
-// services/orchestrator/src/core/serial/SerialDiscoveryService.ts
 import { EventEmitter } from 'events'
 import { SerialPort } from 'serialport'
 import { ReadlineParser } from '@serialport/parser-readline'
@@ -190,37 +189,56 @@ export class SerialDiscoveryService extends TypedEmitter {
       this.emit('device:identifying', { id: tempId, path, vid, pid, kind: tempKind })
 
       try {
-        // 1) Active/token-first: send 'identify' and map by token.
+        // Pre-split eligible into active vs static.
         const active = eligible.filter(m => m.identifyRequired !== false && !!m.identificationString)
+        const statics = eligible.filter(m => m.identifyRequired === false)
+        let baudUsed = this.options.defaultBaudRate!
+
+        // 1) Active/token-first: send 'identify' and map by token.
+        //
+        // IMPORTANT FIX:
+        // If active identify fails (e.g., timeout on a non-Arduino like the power meter),
+        // we LOG and FALL THROUGH to static matching instead of treating it as a fatal
+        // error for this port. This allows a static matcher (e.g. serial.powermeter)
+        // to still claim the device.
         if (active.length > 0) {
-          const { token, baudUsed } = await this.readIdentityToken(path)
-          const matched = this.findMatcherByTokenAndFilters(
-            token,
-            path,
-            vid,
-            pid,
-            serial,
-            active
-          )
-          if (matched) {
-            const id = this.makeDeviceId(matched.kind, path, vid, pid)
-            await this.onRecognized(
+          try {
+            const { token, baudUsed: tokenBaud } = await this.readIdentityToken(path)
+            baudUsed = tokenBaud
+
+            const matched = this.findMatcherByTokenAndFilters(
+              token,
               path,
-              matched,
-              id,
               vid,
               pid,
-              baudUsed,
-              /*fromActive=*/true
+              serial,
+              active
             )
-            continue
-          } else {
-            this.emitLog('debug', `token "${token}" not in active set for path=${path}`)
+            if (matched) {
+              const id = this.makeDeviceId(matched.kind, path, vid, pid)
+              await this.onRecognized(
+                path,
+                matched,
+                id,
+                vid,
+                pid,
+                baudUsed,
+                /*fromActive=*/true
+              )
+              continue
+            } else {
+              this.emitLog('debug', `token "${token}" not in active set for path=${path}`)
+              // fall through to static matchers below
+            }
+          } catch (err: any) {
+            // Active identify failed (timeout, etc.). Log and fall through to statics.
+            const e = err instanceof Error ? err : new Error(String(err))
+            this.emitLog('debug', `active identify failed path=${path} err="${e.message}"`)
+            // NOTE: we do NOT rethrow here; we still want to give static matchers a chance.
           }
         }
 
         // 2) Static: choose a matcher that fits VID/PID/pathRegex/serialNumber without probing.
-        const statics = eligible.filter(m => m.identifyRequired === false)
         if (statics.length > 0) {
           const pick = this.pickBestStatic(statics, path, vid, pid, serial)
           if (pick) {
@@ -231,7 +249,7 @@ export class SerialDiscoveryService extends TypedEmitter {
               id,
               vid,
               pid,
-              pick.baudRate ?? this.options.defaultBaudRate!,
+              pick.baudRate ?? baudUsed,
               /*fromActive=*/false
             )
             continue
@@ -241,14 +259,15 @@ export class SerialDiscoveryService extends TypedEmitter {
         // If we get here, we couldn't positively match the device.
         throw new Error('No matching matcher after probe')
       } catch (err: any) {
+        const error = err instanceof Error ? err : new Error(String(err))
         this.emit('device:error', {
           id: tempId,
           path,
           kind: tempKind,
-          error: err instanceof Error ? err : new Error(String(err))
+          error
         })
         // Downgraded to debug so failures don't flood normal logs
-        this.emitLog('debug', `probe failed path=${path} err="${(err as Error)?.message}"`)
+        this.emitLog('debug', `probe failed path=${path} err="${error.message}"`)
       } finally {
         // Close any unclaimed port
         if (!this.claimedPaths.has(path)) {
