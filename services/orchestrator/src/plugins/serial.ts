@@ -132,6 +132,7 @@ function buildMatchersFromRequired(specs: Array<RequiredSpec & { _pathRe?: RegEx
       productId: s.productId,
       pathRegex: s._pathRe,
       baudRate: s.baudRate,
+      serialNumber: s.serialNumber,
       identifyRequired: s.id ? true : false,
       keepOpenOnStatic: false, // default off; can revisit per device later
     }
