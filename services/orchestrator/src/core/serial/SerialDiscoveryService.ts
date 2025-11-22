@@ -10,17 +10,18 @@ import { ReadlineParser } from '@serialport/parser-readline'
  * Two modes:
  *  - Active (token-first): identificationString is present (e.g., 'KB' | 'MS' | 'FP').
  *    We open the port and send 'identify', then match by the returned token.
- *  - Static (no-probe): identifyRequired=false, match by VID/PID/pathRegex only.
+ *  - Static (no-probe): identifyRequired=false, match by VID/PID/pathRegex/serialNumber only.
  *    We do NOT send any commands. Optionally keep the port open.
  *
  * NOTE: Matchers are provided at runtime by the orchestrator plugin; there is no env-driven
  * matcher parsing here.
  */
 export interface SerialMatcher {
-  kind: string                     // e.g. 'arduino.ps2.keyboard', 'serial.printer'
+  kind: string                     // e.g. 'arduino.ps2.keyboard', 'serial.printer', 'serial.powermeter'
   identificationString?: string    // token device returns to 'identify' (active mode)
-  vendorId?: string                // optional coarse/static filters
+  vendorId?: string                // optional coarse/static filters (hex, e.g. "0403")
   productId?: string
+  serialNumber?: string            // optional exact device binding (e.g. "A7005IDU")
   pathRegex?: RegExp
   baudRate?: number                // override per matcher
 
@@ -109,7 +110,10 @@ export class SerialDiscoveryService extends TypedEmitter {
     }
 
     // Single concise startup line
-    this.emitLog('info', `serial discovery start matchers=${this.options.matchers.length} rescanMs=${this.options.rescanIntervalMs ?? 0}`)
+    this.emitLog(
+      'info',
+      `serial discovery start matchers=${this.options.matchers.length} rescanMs=${this.options.rescanIntervalMs ?? 0}`
+    )
 
     await this.scanOnce()
 
@@ -132,8 +136,11 @@ export class SerialDiscoveryService extends TypedEmitter {
     const toClose = Array.from(this.openPorts.entries())
     await Promise.allSettled(
       toClose.map(async ([path, port]) => {
-        try { await new Promise<void>((resolve) => port.close(() => resolve())) }
-        catch (err) { this.emitLog('debug', `close error path=${path} err="${(err as Error).message}"`) }
+        try {
+          await new Promise<void>((resolve) => port.close(() => resolve()))
+        } catch (err) {
+          this.emitLog('debug', `close error path=${path} err="${(err as Error).message}"`)
+        }
       })
     )
 
@@ -165,11 +172,17 @@ export class SerialDiscoveryService extends TypedEmitter {
       if (this.claimedPaths.has(path)) continue
 
       // If *no* matcher considers this path eligible, skip quickly.
-      const eligible = this.eligibleMatchersForPath(path, info.vendorId, info.productId)
+      const eligible = this.eligibleMatchersForPath(
+        path,
+        info.vendorId,
+        info.productId,
+        info.serialNumber
+      )
       if (eligible.length === 0) continue
 
       const vid = normalizeHex(info.vendorId)
       const pid = normalizeHex(info.productId)
+      const serial = info.serialNumber
 
       // Announce a probe (kind unknown at this point)
       const tempKind = 'unknown'
@@ -181,23 +194,46 @@ export class SerialDiscoveryService extends TypedEmitter {
         const active = eligible.filter(m => m.identifyRequired !== false && !!m.identificationString)
         if (active.length > 0) {
           const { token, baudUsed } = await this.readIdentityToken(path)
-          const matched = this.findMatcherByTokenAndFilters(token, path, vid, pid, active)
+          const matched = this.findMatcherByTokenAndFilters(
+            token,
+            path,
+            vid,
+            pid,
+            serial,
+            active
+          )
           if (matched) {
             const id = this.makeDeviceId(matched.kind, path, vid, pid)
-            await this.onRecognized(path, matched, id, vid, pid, baudUsed, /*fromActive=*/true)
+            await this.onRecognized(
+              path,
+              matched,
+              id,
+              vid,
+              pid,
+              baudUsed,
+              /*fromActive=*/true
+            )
             continue
           } else {
             this.emitLog('debug', `token "${token}" not in active set for path=${path}`)
           }
         }
 
-        // 2) Static: choose a matcher that fits VID/PID/pathRegex without probing.
+        // 2) Static: choose a matcher that fits VID/PID/pathRegex/serialNumber without probing.
         const statics = eligible.filter(m => m.identifyRequired === false)
         if (statics.length > 0) {
-          const pick = this.pickBestStatic(statics, path, vid, pid)
+          const pick = this.pickBestStatic(statics, path, vid, pid, serial)
           if (pick) {
             const id = this.makeDeviceId(pick.kind, path, vid, pid)
-            await this.onRecognized(path, pick, id, vid, pid, pick.baudRate ?? this.options.defaultBaudRate!, /*fromActive=*/false)
+            await this.onRecognized(
+              path,
+              pick,
+              id,
+              vid,
+              pid,
+              pick.baudRate ?? this.options.defaultBaudRate!,
+              /*fromActive=*/false
+            )
             continue
           }
         }
@@ -222,16 +258,29 @@ export class SerialDiscoveryService extends TypedEmitter {
     }
   }
 
-  /** Return matchers that would even consider this path (by regex/VID/PID or no filters). */
-  private eligibleMatchersForPath(path: string, vendorId?: string, productId?: string): SerialMatcher[] {
+  /**
+   * Return matchers that would even consider this path (by regex/VID/PID/serial or no filters).
+   *
+   * serialNumber is an additional positive constraint:
+   * - If the matcher has serialNumber, it MUST match exactly.
+   * - If the matcher omits serialNumber, we ignore the device serialNumber.
+   */
+  private eligibleMatchersForPath(
+    path: string,
+    vendorId?: string,
+    productId?: string,
+    serialNumber?: string
+  ): SerialMatcher[] {
     const vid = normalizeHex(vendorId)
     const pid = normalizeHex(productId)
+    const sn = serialNumber?.toString()
 
     return (this.options.matchers ?? []).filter(m => {
       const okPath = m.pathRegex ? m.pathRegex.test(path) : true
       const okVid  = m.vendorId ? normalizeHex(m.vendorId) === vid : true
       const okPid  = m.productId ? normalizeHex(m.productId) === pid : true
-      return okPath && okVid && okPid
+      const okSn   = m.serialNumber ? m.serialNumber === sn : true
+      return okPath && okVid && okPid && okSn
     })
   }
 
@@ -275,12 +324,23 @@ export class SerialDiscoveryService extends TypedEmitter {
     throw lastErr ?? new Error('identify failed')
   }
 
-  /** Match a token to one of the provided active matchers, honoring optional VID/PID/path filters again. */
-  private findMatcherByTokenAndFilters(token: string, path: string, vid?: string, pid?: string, candidates?: SerialMatcher[]): SerialMatcher | undefined {
+  /**
+   * Match a token to one of the provided active matchers, honoring optional
+   * VID/PID/path/serial filters again.
+   */
+  private findMatcherByTokenAndFilters(
+    token: string,
+    path: string,
+    vid?: string,
+    pid?: string,
+    serialNumber?: string,
+    candidates?: SerialMatcher[]
+  ): SerialMatcher | undefined {
     const tokenLower = token.toLowerCase()
     const list = candidates ?? this.options.matchers
     const vidN = normalizeHex(vid)
     const pidN = normalizeHex(pid)
+    const sn = serialNumber?.toString()
 
     for (const m of list) {
       if (m.identifyRequired === false) continue
@@ -290,23 +350,35 @@ export class SerialDiscoveryService extends TypedEmitter {
       const okPath = m.pathRegex ? m.pathRegex.test(path) : true
       const okVid  = m.vendorId ? normalizeHex(m.vendorId) === vidN : true
       const okPid  = m.productId ? normalizeHex(m.productId) === pidN : true
-      if (okPath && okVid && okPid) return m
+      const okSn   = m.serialNumber ? m.serialNumber === sn : true
+
+      if (okPath && okVid && okPid && okSn) return m
     }
     return undefined
   }
 
   /** Choose the static matcher with the strongest constraints satisfied. */
-  private pickBestStatic(statics: SerialMatcher[], path: string, vid?: string, pid?: string): SerialMatcher | undefined {
+  private pickBestStatic(
+    statics: SerialMatcher[],
+    path: string,
+    vid?: string,
+    pid?: string,
+    serialNumber?: string
+  ): SerialMatcher | undefined {
     const vidN = normalizeHex(vid)
     const pidN = normalizeHex(pid)
+    const sn = serialNumber?.toString()
 
-    const scored = statics.map(m => {
-      let score = 0
-      if (m.vendorId && normalizeHex(m.vendorId) === vidN) score += 2
-      if (m.productId && normalizeHex(m.productId) === pidN) score += 2
-      if (m.pathRegex && m.pathRegex.test(path)) score += 1
-      return { m, score }
-    }).filter(x => x.score > 0)
+    const scored = statics
+      .map(m => {
+        let score = 0
+        if (m.vendorId && normalizeHex(m.vendorId) === vidN) score += 2
+        if (m.productId && normalizeHex(m.productId) === pidN) score += 2
+        if (m.pathRegex && m.pathRegex.test(path)) score += 1
+        if (m.serialNumber && m.serialNumber === sn) score += 3 // strong tie to a specific device
+        return { m, score }
+      })
+      .filter(x => x.score > 0)
 
     if (scored.length === 0) return undefined
     scored.sort((a, b) => b.score - a.score)
@@ -325,12 +397,19 @@ export class SerialDiscoveryService extends TypedEmitter {
   ): Promise<void> {
     // Open & optionally finalize handshake for active; for static, open if keeping open.
     if (fromActive) {
-      const { port, parser } = await this.openPort(path, matched.baudRate ?? baud, this.options.identify.parserDelimiter ?? '\r\n')
+      const { port, parser } = await this.openPort(
+        path,
+        matched.baudRate ?? baud,
+        this.options.identify.parserDelimiter ?? '\r\n'
+      )
 
       const completion = this.options.identify.completion
       if (completion) {
         try {
-          await this.writeLine(port, `${completion}${this.options.identify.writeLineEnding ?? '\n'}`)
+          await this.writeLine(
+            port,
+            `${completion}${this.options.identify.writeLineEnding ?? '\n'}`
+          )
         } catch {
           // non-fatal
         }
@@ -340,7 +419,11 @@ export class SerialDiscoveryService extends TypedEmitter {
       this.parsers.set(path, parser)
     } else {
       if (matched.keepOpenOnStatic) {
-        const { port, parser } = await this.openPort(path, matched.baudRate ?? baud, this.options.identify.parserDelimiter ?? '\r\n')
+        const { port, parser } = await this.openPort(
+          path,
+          matched.baudRate ?? baud,
+          this.options.identify.parserDelimiter ?? '\r\n'
+        )
         this.openPorts.set(path, port)
         this.parsers.set(path, parser)
       } else {
@@ -349,8 +432,18 @@ export class SerialDiscoveryService extends TypedEmitter {
     }
 
     this.claimedPaths.add(path)
-    this.emit('device:identified', { id, path, vid, pid, kind: matched.kind, baudRate: matched.baudRate ?? baud })
-    this.emitLog('info', `identified path=${path} kind=${matched.kind} mode=${fromActive ? 'active' : 'static'} baud=${matched.baudRate ?? baud}`)
+    this.emit('device:identified', {
+      id,
+      path,
+      vid,
+      pid,
+      kind: matched.kind,
+      baudRate: matched.baudRate ?? baud
+    })
+    this.emitLog(
+      'info',
+      `identified path=${path} kind=${matched.kind} mode=${fromActive ? 'active' : 'static'} baud=${matched.baudRate ?? baud}`
+    )
   }
 
   // ----- low-level -----
