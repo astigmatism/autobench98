@@ -13,6 +13,7 @@ import { SerialPrinterEvent } from '../devices/serial-printer/types.js'
  *  - Clearing currentJob on completion/error/disconnect
  *  - Correct phase transitions
  *  - Rolling recentJobs and lastJob
+ *  - Canonical full-text for last completed job (lastJobFullText)
  */
 export class SerialPrinterStateAdapter {
     handle(evt: SerialPrinterEvent): void {
@@ -41,6 +42,7 @@ export class SerialPrinterStateAdapter {
                     phase: 'disconnected',
                     message: `Disconnected (${evt.reason})`,
                     currentJob: null,
+                    lastJobFullText: null,
                     stats: {
                         ...stats,
                     },
@@ -63,6 +65,8 @@ export class SerialPrinterStateAdapter {
                         startedAt: evt.createdAt,
                         text: '',
                     },
+                    // We're now in a new job; clear any leftover canonical text.
+                    lastJobFullText: null,
                     stats: {
                         ...stats,
                     },
@@ -125,24 +129,13 @@ export class SerialPrinterStateAdapter {
                     recentJobs.splice(0, recentJobs.length - maxRecentJobs)
                 }
 
-                // Optional: debug log comparing raw job vs snapshot length
-                const currentText = prev.currentJob?.id === job.id ? prev.currentJob.text : ''
-                // eslint-disable-next-line no-console
-                console.log(
-                    '[[SerialPrinterStateAdapter]] job-completed',
-                    {
-                        id: job.id,
-                        rawLength: job.raw.length,
-                        snapshotCurrentTextLength: currentText.length,
-                        previewLength: job.preview.length,
-                    }
-                )
-
                 updateSerialPrinterSnapshot({
                     phase: 'connected', // idle/ready state after completion
                     message: undefined,
                     currentJob: null,
                     lastJob: summary,
+                    // 🔐 canonical, full backend copy of the most recent job
+                    lastJobFullText: job.raw,
                     recentJobs,
                     stats: {
                         ...stats,
@@ -163,6 +156,7 @@ export class SerialPrinterStateAdapter {
                     phase: 'disconnected',
                     message: evt.error,
                     currentJob: null,
+                    lastJobFullText: null,
                     stats: {
                         ...stats,
                         lastErrorAt: evt.at,
@@ -181,6 +175,7 @@ export class SerialPrinterStateAdapter {
                     phase: 'error',
                     message: evt.error,
                     currentJob: null,
+                    lastJobFullText: null,
                     stats: {
                         ...stats,
                         lastErrorAt: evt.at,

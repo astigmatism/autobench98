@@ -18,25 +18,6 @@
             <div class="panel-head">
                 <div class="panel-title-group">
                     <span class="panel-title">Serial Printer Output</span>
-
-                    <!-- Meta row: jobs, bytes, and streaming indicator -->
-                    <div class="panel-meta">
-                        <span class="meta-item">
-                            Jobs:
-                            <span class="meta-value">{{ totalJobsFormatted }}</span>
-                        </span>
-                        <span class="meta-sep">·</span>
-                        <span class="meta-item">
-                            Bytes:
-                            <span class="meta-value">{{ bytesReceivedFormatted }}</span>
-                        </span>
-                        <span
-                            v-if="isStreaming"
-                            class="meta-item meta-item--accent"
-                        >
-                            Streaming…
-                        </span>
-                    </div>
                 </div>
 
                 <!-- Status badge on the right side -->
@@ -99,45 +80,62 @@
                 </div>
             </div>
 
-            <!-- Options panel (minimal for now) -->
+            <!-- Options panel: live typing speed controls -->
             <transition name="slide-fade">
                 <div
                     v-if="showOptions"
                     id="sp-options-panel"
                     class="options-panel"
                 >
-                    <div class="options-row">
-                        <span class="options-label">Max live characters</span>
-                        <span class="options-value">
-                            {{ maxLiveChars }}
-                        </span>
-                        <span class="options-hint">
-                            (configured server-side; trims from the top)
-                        </span>
+                    <div class="options-header">
+                        <span class="options-title">Typing speed</span>
+                        <button
+                            class="options-reset-btn"
+                            type="button"
+                            @click="resetSpeed"
+                        >
+                            Reset to defaults
+                        </button>
                     </div>
+
                     <div class="options-row">
-                        <span class="options-label">Recent jobs tracked</span>
-                        <span class="options-value">
-                            {{ printer.maxRecentJobs }}
-                        </span>
+                        <div class="options-row-main">
+                            <span class="options-label">Update interval</span>
+                            <span class="options-value">
+                                {{ currentIntervalMs }} ms
+                            </span>
+                        </div>
+                        <input
+                            class="options-slider"
+                            type="range"
+                            min="5"
+                            max="80"
+                            step="1"
+                            v-model.number="currentIntervalMs"
+                        />
+                        <div class="options-hint">
+                            Lower = more frequent, smoother updates · Higher = slower ticks
+                        </div>
                     </div>
+
                     <div class="options-row">
-                        <span class="options-label">Typing interval</span>
-                        <span class="options-value">
-                            {{ typingIntervalMs }} ms
-                        </span>
-                        <span class="options-hint">
-                            (VITE_SERIAL_PRINTER_TYPING_INTERVAL_MS)
-                        </span>
-                    </div>
-                    <div class="options-row">
-                        <span class="options-label">Chars per tick</span>
-                        <span class="options-value">
-                            {{ charsPerTick }}
-                        </span>
-                        <span class="options-hint">
-                            (VITE_SERIAL_PRINTER_CHARS_PER_TICK)
-                        </span>
+                        <div class="options-row-main">
+                            <span class="options-label">Characters per tick</span>
+                            <span class="options-value">
+                                {{ currentCharsPerTick }}
+                            </span>
+                        </div>
+                        <input
+                            class="options-slider"
+                            type="range"
+                            min="1"
+                            max="6"
+                            step="1"
+                            v-model.number="currentCharsPerTick"
+                        />
+                        <div class="options-hint">
+                            Higher = faster but chunkier · Lower = slower but smoother
+                        </div>
                     </div>
                 </div>
             </transition>
@@ -251,6 +249,8 @@ type SerialPrinterSnapshotView = {
     stats: SerialPrinterStatsView
     currentJob: SerialPrinterCurrentJob | null
     lastJob: SerialPrinterJobSummary | null
+    // Canonical full text from backend for last completed job
+    lastJobFullText: string | null
     recentJobs: SerialPrinterJobSummary[]
     maxRecentJobs: number
 }
@@ -268,6 +268,7 @@ const initialPrinter: SerialPrinterSnapshotView = {
     },
     currentJob: null,
     lastJob: null,
+    lastJobFullText: null,
     recentJobs: [],
     maxRecentJobs: 20,
 }
@@ -279,7 +280,7 @@ const printer = computed<SerialPrinterSnapshotView>(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Status + stats + streaming indicators                                     */
+/*  Status / connection indicators                                            */
 /* -------------------------------------------------------------------------- */
 
 const isReconnecting = computed(() => {
@@ -300,36 +301,12 @@ const statusLabel = computed(() => {
     return 'Connected'
 })
 
-const totalJobsFormatted = computed(() =>
-    new Intl.NumberFormat().format(printer.value.stats.totalJobs)
-)
-const bytesReceivedFormatted = computed(() =>
-    new Intl.NumberFormat().format(printer.value.stats.bytesReceived)
-)
-
-/**
- * "Streaming" is a UI concept: as long as we're animating or have
- * a current job in the 'receiving' phase, show the pill in the meta line.
- */
-const isStreaming = computed(() => {
-    return (
-        !!liveText.value ||
-        !!pending.value ||
-        printer.value.phase === 'receiving'
-    )
-})
-
 /* -------------------------------------------------------------------------- */
 /*  Tape auto-scroll behavior                                                 */
 /* -------------------------------------------------------------------------- */
 
 const paperRef = ref<HTMLElement | null>(null)
 const autoScrollEnabled = ref(true)
-/**
- * This is just a UI hint; the actual trim is enforced server-side in the
- * adapter (so UI and state are consistent).
- */
-const maxLiveChars = 8000
 
 function scrollToBottom() {
     const el = paperRef.value
@@ -374,21 +351,24 @@ type CompletedJobView = {
 }
 const completedJobs = ref<CompletedJobView[]>([])
 
-/* Typing speed configuration (env-driven) */
+/* Typing speed configuration (env-driven defaults, user-overridable) */
 const DEFAULT_TYPING_INTERVAL_MS = 30
 const DEFAULT_CHARS_PER_TICK = 3
 
-const typingIntervalMs = (() => {
+const envTypingInterval = (() => {
     const raw = import.meta.env.VITE_SERIAL_PRINTER_TYPING_INTERVAL_MS
     const n = raw != null ? Number(raw) : NaN
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_TYPING_INTERVAL_MS
 })()
 
-const charsPerTick = (() => {
+const envCharsPerTick = (() => {
     const raw = import.meta.env.VITE_SERIAL_PRINTER_CHARS_PER_TICK
     const n = raw != null ? Number(raw) : NaN
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CHARS_PER_TICK
 })()
+
+const currentIntervalMs = ref(envTypingInterval)
+const currentCharsPerTick = ref(envCharsPerTick)
 
 let typingTimer: number | null = null
 
@@ -407,13 +387,14 @@ function startTypingTimer() {
             return
         }
 
-        const chunk = pending.value.slice(0, charsPerTick)
-        pending.value = pending.value.slice(charsPerTick)
+        const chars = Math.max(1, currentCharsPerTick.value || 1)
+        const chunk = pending.value.slice(0, chars)
+        pending.value = pending.value.slice(chars)
 
         // Append new characters
         liveText.value += chunk
         // NOTE: no client-side trimming; backend remains source of truth.
-    }, typingIntervalMs) as unknown as number
+    }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
 }
 
 function pushCompletedJob(id: number, text: string) {
@@ -425,12 +406,28 @@ function pushCompletedJob(id: number, text: string) {
     }
 }
 
+/**
+ * Use backend canonical text for a job if available, otherwise fall back
+ * to whatever we streamed locally.
+ */
+function getCanonicalCompletedText(jobId: number, fallback: string): string {
+    const last = printer.value.lastJob
+    if (last && last.id === jobId && printer.value.lastJobFullText) {
+        return printer.value.lastJobFullText
+    }
+    return fallback
+}
+
 function finalizeFinishedJobIfReady() {
     if (finishingJobId.value == null) return
     if (pending.value.length > 0) return
 
+    const id = finishingJobId.value
     // All pending characters have been rendered; move the tape into history.
-    pushCompletedJob(finishingJobId.value, liveText.value)
+    const fallback = liveText.value
+    const text = getCanonicalCompletedText(id, fallback)
+
+    pushCompletedJob(id, text)
 
     finishingJobId.value = null
     currentJobId.value = null
@@ -444,7 +441,8 @@ function finalizeFinishedJobIfReady() {
 /**
  * Watch job identity:
  *  - When a new job starts: if a previous job was still streaming, flush ALL
- *    of its text (live + pending) into completedJobs so we never lose tape.
+ *    of its text (live + pending) into completedJobs so we never lose tape,
+ *    preferring backend canonical text when available.
  *  - When a job finishes: mark it as "finishing" and let the streamer drain
  *    any remaining pending characters before finalizing.
  */
@@ -458,12 +456,12 @@ watch(
             if (previousId != null) {
                 // If a previous job was in "finishing" state, finalize what we have.
                 if (finishingJobId.value === previousId) {
-                    // Flush any pending chars into liveText before finalizing.
                     if (pending.value.length) {
                         liveText.value += pending.value
                         pending.value = ''
                     }
-                    pushCompletedJob(previousId, liveText.value)
+                    const text = getCanonicalCompletedText(previousId, liveText.value)
+                    pushCompletedJob(previousId, text)
                     finishingJobId.value = null
                 } else {
                     // Previous job never reached "finished" state on the backend,
@@ -473,7 +471,8 @@ watch(
                         liveText.value += pending.value
                         pending.value = ''
                     }
-                    pushCompletedJob(previousId, liveText.value)
+                    const text = getCanonicalCompletedText(previousId, liveText.value)
+                    pushCompletedJob(previousId, text)
                 }
             }
 
@@ -547,6 +546,24 @@ watch(
     }
 )
 
+/**
+ * When the user changes typing speed controls, restart the timer if needed
+ * so the new values take effect during an in-flight job.
+ */
+watch(
+    () => ({
+        interval: currentIntervalMs.value,
+        chars: currentCharsPerTick.value,
+    }),
+    () => {
+        if (!pending.value.length) return
+        if (typingTimer !== null) {
+            stopTypingTimer()
+            startTypingTimer()
+        }
+    }
+)
+
 /* -------------------------------------------------------------------------- */
 /*  Auto-scroll watcher                                                       */
 /* -------------------------------------------------------------------------- */
@@ -580,10 +597,15 @@ onBeforeUnmount(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Options panel toggle                                                      */
+/*  Options panel toggle + reset                                              */
 /* -------------------------------------------------------------------------- */
 
 const showOptions = ref(false)
+
+function resetSpeed() {
+    currentIntervalMs.value = envTypingInterval
+    currentCharsPerTick.value = envCharsPerTick
+}
 </script>
 
 <style scoped>
@@ -672,41 +694,6 @@ const showOptions = ref(false)
 .panel-title {
     font-weight: 500;
     font-size: 0.8rem;
-}
-
-/* Meta row under title */
-.panel-meta {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 4px;
-    font-size: 0.72rem;
-    color: #9ca3af;
-}
-
-.meta-item {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 2px;
-}
-
-.meta-value {
-    font-variant-numeric: tabular-nums;
-    color: #e5e7eb;
-}
-
-.meta-sep {
-    opacity: 0.5;
-}
-
-.meta-item--accent {
-    margin-left: 4px;
-    padding: 1px 6px;
-    border-radius: 999px;
-    border: 1px solid #16a34a;
-    color: #bbf7d0;
-    background: rgba(22, 163, 74, 0.12);
-    font-size: 0.7rem;
 }
 
 /* Status badge */
@@ -892,21 +879,56 @@ const showOptions = ref(false)
 /* Options panel */
 .options-panel {
     margin-top: 4px;
-    padding: 6px 8px;
+    padding: 6px 8px 8px;
     border-radius: 6px;
     border: 1px dashed #374151;
     background: #020617;
     font-size: 0.75rem;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 8px;
+}
+
+.options-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 2px;
+}
+
+.options-title {
+    font-weight: 600;
+    font-size: 0.78rem;
+}
+
+.options-reset-btn {
+    border: 1px solid #4b5563;
+    background: #020617;
+    color: #e5e7eb;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 0.7rem;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
+}
+.options-reset-btn:hover {
+    background: #111827;
+    border-color: #9ca3af;
+    transform: translateY(-0.5px);
 }
 
 .options-row {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.options-row-main {
+    display: flex;
+    justify-content: space-between;
     align-items: baseline;
-    gap: 6px;
+    gap: 8px;
 }
 
 .options-label {
@@ -915,10 +937,16 @@ const showOptions = ref(false)
 
 .options-value {
     font-variant-numeric: tabular-nums;
+    color: #e5e7eb;
+}
+
+.options-slider {
+    width: 100%;
 }
 
 .options-hint {
     opacity: 0.7;
+    font-size: 0.7rem;
 }
 
 /* Subtle pulsing border for live job */

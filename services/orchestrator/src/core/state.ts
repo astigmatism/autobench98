@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/state.ts
 import { EventEmitter } from 'node:events'
 import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
 
@@ -77,6 +78,9 @@ export type SerialPrinterSnapshot = {
         completedAt: number
         preview: string
     } | null
+
+    // Canonical, full text of the last completed job (backend raw)
+    lastJobFullText: string | null
 
     // Rolling history of recent jobs
     recentJobs: {
@@ -169,7 +173,7 @@ const initialPowerMeter: PowerMeterSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Initial serial printer slice (UPDATED with currentJob)                    */
+/*  Initial serial printer slice (UPDATED with currentJob + lastJobFullText)  */
 /* -------------------------------------------------------------------------- */
 
 const initialSerialPrinter: SerialPrinterSnapshot = {
@@ -183,6 +187,7 @@ const initialSerialPrinter: SerialPrinterSnapshot = {
     },
     currentJob: null,
     lastJob: null,
+    lastJobFullText: null,
     recentJobs: [],
     maxRecentJobs: 20,
 }
@@ -321,6 +326,7 @@ export function updateSerialPrinterSnapshot(partial: {
     message?: string
     currentJob?: SerialPrinterSnapshot['currentJob'] | null
     lastJob?: SerialPrinterSnapshot['lastJob']
+    lastJobFullText?: string | null
     stats?: Partial<SerialPrinterSnapshot['stats']>
     recentJobs?: SerialPrinterSnapshot['recentJobs']
     maxRecentJobs?: number
@@ -338,6 +344,10 @@ export function updateSerialPrinterSnapshot(partial: {
         currentJob:
             partial.currentJob !== undefined ? partial.currentJob : prev.currentJob,
         lastJob: partial.lastJob ?? prev.lastJob,
+        lastJobFullText:
+            partial.lastJobFullText !== undefined
+                ? partial.lastJobFullText
+                : prev.lastJobFullText,
         stats: mergedStats,
         recentJobs: partial.recentJobs ?? prev.recentJobs,
         maxRecentJobs: partial.maxRecentJobs ?? prev.maxRecentJobs,
