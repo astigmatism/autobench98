@@ -1,5 +1,3 @@
-// services/orchestrator/src/core/devices/serial-printer/SerialPrinterService.ts
-
 import { SerialPort } from 'serialport'
 import {
     type SerialPrinterConfig,

@@ -1,4 +1,3 @@
-// services/orchestrator/src/core/state.ts
 import { EventEmitter } from 'node:events'
 import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
 

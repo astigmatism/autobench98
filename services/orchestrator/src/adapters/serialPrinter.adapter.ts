@@ -8,14 +8,12 @@ import { SerialPrinterEvent } from '../devices/serial-printer/types.js'
  *
  * Mirrors SerialPrinterService events into AppState.serialPrinter.
  *
- * Now fully supports:
+ * Supports:
  *  - Live streaming text via currentJob
  *  - Clearing currentJob on completion/error/disconnect
  *  - Correct phase transitions
  *  - Rolling recentJobs and lastJob
  */
-const MAX_LIVE_CHARS = 8000
-
 export class SerialPrinterStateAdapter {
     handle(evt: SerialPrinterEvent): void {
         switch (evt.kind) {
@@ -86,17 +84,14 @@ export class SerialPrinterStateAdapter {
                     return
                 }
 
-                const combined = (current.text + evt.text)
-                const trimmed =
-                    combined.length > MAX_LIVE_CHARS
-                        ? combined.slice(combined.length - MAX_LIVE_CHARS)
-                        : combined
+                // 🔁 Just append — no length cap. The frontend can decide how to display it.
+                const combined = current.text + evt.text
 
                 updateSerialPrinterSnapshot({
                     phase: 'receiving',
                     currentJob: {
                         ...current,
-                        text: trimmed,
+                        text: combined,
                     },
                     stats: {
                         ...stats,
@@ -130,10 +125,23 @@ export class SerialPrinterStateAdapter {
                     recentJobs.splice(0, recentJobs.length - maxRecentJobs)
                 }
 
+                // Optional: debug log comparing raw job vs snapshot length
+                const currentText = prev.currentJob?.id === job.id ? prev.currentJob.text : ''
+                // eslint-disable-next-line no-console
+                console.log(
+                    '[[SerialPrinterStateAdapter]] job-completed',
+                    {
+                        id: job.id,
+                        rawLength: job.raw.length,
+                        snapshotCurrentTextLength: currentText.length,
+                        previewLength: job.preview.length,
+                    }
+                )
+
                 updateSerialPrinterSnapshot({
-                    phase: 'connected', // <-- FINALLY: idle/ready state after completion
+                    phase: 'connected', // idle/ready state after completion
                     message: undefined,
-                    currentJob: null, // <-- critical fix
+                    currentJob: null,
                     lastJob: summary,
                     recentJobs,
                     stats: {

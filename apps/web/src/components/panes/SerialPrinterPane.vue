@@ -18,7 +18,25 @@
             <div class="panel-head">
                 <div class="panel-title-group">
                     <span class="panel-title">Serial Printer Output</span>
-                    <!-- No logging / subtitle here (logs live in Logs pane) -->
+
+                    <!-- Meta row: jobs, bytes, and streaming indicator -->
+                    <div class="panel-meta">
+                        <span class="meta-item">
+                            Jobs:
+                            <span class="meta-value">{{ totalJobsFormatted }}</span>
+                        </span>
+                        <span class="meta-sep">·</span>
+                        <span class="meta-item">
+                            Bytes:
+                            <span class="meta-value">{{ bytesReceivedFormatted }}</span>
+                        </span>
+                        <span
+                            v-if="isStreaming"
+                            class="meta-item meta-item--accent"
+                        >
+                            Streaming…
+                        </span>
+                    </div>
                 </div>
 
                 <!-- Status badge on the right side -->
@@ -261,30 +279,44 @@ const printer = computed<SerialPrinterSnapshotView>(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Status label + reconnect semantics (aligned with Power Meter)             */
+/*  Status + stats + streaming indicators                                     */
 /* -------------------------------------------------------------------------- */
 
 const isReconnecting = computed(() => {
     return printer.value.phase === 'disconnected' && printer.value.stats.lastErrorAt != null
 })
 
+/**
+ * Status badge is now purely about connection/health, not "printing".
+ */
 const statusLabel = computed(() => {
-    if (printer.value.phase === 'receiving') {
-        return 'Printing…'
-    }
-    if (printer.value.phase === 'connected') {
-        return 'Connected'
-    }
-    if (printer.value.phase === 'queued') {
-        return 'Jobs available'
-    }
     if (printer.value.phase === 'error') {
         return 'Error'
     }
     if (printer.value.phase === 'disconnected') {
         return isReconnecting.value ? 'Reconnecting…' : 'Disconnected'
     }
-    return 'Unknown'
+    // connected, queued, receiving are all simply "Connected" at the transport level
+    return 'Connected'
+})
+
+const totalJobsFormatted = computed(() =>
+    new Intl.NumberFormat().format(printer.value.stats.totalJobs)
+)
+const bytesReceivedFormatted = computed(() =>
+    new Intl.NumberFormat().format(printer.value.stats.bytesReceived)
+)
+
+/**
+ * "Streaming" is a UI concept: as long as we're animating or have
+ * a current job in the 'receiving' phase, show the pill in the meta line.
+ */
+const isStreaming = computed(() => {
+    return (
+        !!liveText.value ||
+        !!pending.value ||
+        printer.value.phase === 'receiving'
+    )
 })
 
 /* -------------------------------------------------------------------------- */
@@ -640,6 +672,41 @@ const showOptions = ref(false)
 .panel-title {
     font-weight: 500;
     font-size: 0.8rem;
+}
+
+/* Meta row under title */
+.panel-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px;
+    font-size: 0.72rem;
+    color: #9ca3af;
+}
+
+.meta-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 2px;
+}
+
+.meta-value {
+    font-variant-numeric: tabular-nums;
+    color: #e5e7eb;
+}
+
+.meta-sep {
+    opacity: 0.5;
+}
+
+.meta-item--accent {
+    margin-left: 4px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid #16a34a;
+    color: #bbf7d0;
+    background: rgba(22, 163, 74, 0.12);
+    font-size: 0.7rem;
 }
 
 /* Status badge */
