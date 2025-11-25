@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/state.ts
 import { EventEmitter } from 'node:events'
 import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
 
@@ -7,9 +8,9 @@ import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
  */
 export type ServerConfig = {
     logs: {
-        snapshot: number            // how many log entries server sends on connect
-        capacity: number            // suggested client-side ring buffer size
-        allowedChannels: string[]   // WS-visible channels (already filtered server-side)
+        snapshot: number
+        capacity: number
+        allowedChannels: string[]
         minLevel: 'debug' | 'info' | 'warn' | 'error' | 'fatal'
     }
     ws: {
@@ -23,27 +24,19 @@ export type ServerConfig = {
     }
 }
 
-/**
- * Snapshot of the power meter for WS/state consumers.
- *
- * This is intentionally decoupled from the internal SerialPowerMeterService types
- * so that app state stays package-agnostic and only exposes what the UI needs.
- */
-export type PowerMeterSnapshot = {
-    // High-level phase (mirrors PowerMeterState.phase but kept locally here)
-    phase: 'disconnected' | 'connecting' | 'streaming' | 'error'
-    // Optional human-readable message (e.g., error details)
-    message?: string
+/* -------------------------------------------------------------------------- */
+/*  Power meter snapshot (unchanged except formatting)                        */
+/* -------------------------------------------------------------------------- */
 
-    // Lightweight stats
+export type PowerMeterSnapshot = {
+    phase: 'disconnected' | 'connecting' | 'streaming' | 'error'
+    message?: string
     stats: {
         totalSamples: number
         bytesReceived: number
         lastSampleAt: number | null
         lastErrorAt: number | null
     }
-
-    // Last sample, if any
     lastSample: {
         ts: string
         watts: number
@@ -52,34 +45,77 @@ export type PowerMeterSnapshot = {
     } | null
 }
 
-/**
- * Server-authoritative application state (seed this with your real domains).
- * You can expand this shape freely; the snapshot broadcast will carry whatever is here.
- */
+/* -------------------------------------------------------------------------- */
+/*  Serial printer snapshot (UPDATED)                                         */
+/* -------------------------------------------------------------------------- */
+
+export type SerialPrinterSnapshot = {
+    // High-level phase
+    phase: 'disconnected' | 'connected' | 'queued' | 'error' | 'receiving'
+
+    // Optional human-readable message
+    message?: string
+
+    // Lightweight stats
+    stats: {
+        totalJobs: number
+        bytesReceived: number
+        lastJobAt: number | null
+        lastErrorAt: number | null
+    }
+
+    // Live in-progress job (streamed text as it arrives)
+    currentJob: {
+        id: number
+        startedAt: number
+        text: string
+    } | null
+
+    // Last completed job, summary only
+    lastJob: {
+        id: number
+        createdAt: number
+        completedAt: number
+        preview: string
+    } | null
+
+    // Rolling history of recent jobs
+    recentJobs: {
+        id: number
+        createdAt: number
+        completedAt: number
+        preview: string
+    }[]
+
+    // UI hint for how many to keep
+    maxRecentJobs: number
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Full AppState                                                             */
+/* -------------------------------------------------------------------------- */
+
 export type AppState = {
     version: number
     meta: { startedAt: string; status: 'booting' | 'ready' | 'error' }
     layout: { rows: number; cols: number }
     message: string
     serverConfig: ServerConfig
-
-    /**
-     * Live power meter slice, streamed to the client via WS state snapshots/patches.
-     * This is populated by server-side glue that observes the power meter service.
-     */
     powerMeter: PowerMeterSnapshot
+    serialPrinter: SerialPrinterSnapshot
 }
 
-/** Payload for incremental patch broadcasts */
+/* -------------------------------------------------------------------------- */
+/*  Patch event and state internals                                           */
+/* -------------------------------------------------------------------------- */
+
 export type PatchEvent = {
     from: number
     to: number
     patch: jsonpatch.Operation[]
 }
 
-/* ---------------------------
-   Env helpers (safe parsing)
---------------------------- */
+/* ENV helpers */
 function num(v: unknown, def: number): number {
     const n = Number(v)
     return Number.isFinite(n) ? n : def
@@ -95,35 +131,32 @@ function bool(v: unknown, def: boolean): boolean {
 }
 function csv(v: unknown): string[] {
     if (typeof v !== 'string') return []
-    return v
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean)
+    return v.split(',').map(s => s.trim()).filter(Boolean)
 }
 
-/* ---------------------------
-   Initial config from env
---------------------------- */
-// Logs
+/* -------------------------------------------------------------------------- */
+/*  Initial configuration                                                     */
+/* -------------------------------------------------------------------------- */
+
 const LOGS_SNAPSHOT = num(process.env.CLIENT_LOGS_SNAPSHOT, 200)
-// Suggest a client capacity (introduce SERVER-driven capacity; falls back to 500)
 const LOGS_CAPACITY = num(process.env.CLIENT_LOGS_CAPACITY, 500)
-// Visibility / level come from your existing WS log filter envs
 const LOG_ALLOWED = csv(process.env.LOG_CHANNEL_ALLOWLIST)
 const LOG_MIN = (process.env.LOG_LEVEL_MIN ?? 'debug').toLowerCase() as ServerConfig['logs']['minLevel']
 
-// WS heartbeat + reconnect (we expose the same values to the client)
 const WS_HEARTBEAT_INTERVAL_MS = num(process.env.VITE_WS_HEARTBEAT_INTERVAL_MS, 10_000)
-const WS_HEARTBEAT_TIMEOUT_MS  = num(process.env.VITE_WS_HEARTBEAT_TIMEOUT_MS, 5_000)
-const WS_RECONNECT_ENABLED     = bool(process.env.VITE_WS_RECONNECT_ENABLED, true)
-const WS_RECONNECT_MIN_MS      = num(process.env.VITE_WS_RECONNECT_MIN_MS, 1_000)
-const WS_RECONNECT_MAX_MS      = num(process.env.VITE_WS_RECONNECT_MAX_MS, 15_000)
-const WS_RECONNECT_FACTOR      = num(process.env.VITE_WS_RECONNECT_FACTOR, 1.8)
-const WS_RECONNECT_JITTER      = num(process.env.VITE_WS_RECONNECT_JITTER, 0.2)
+const WS_HEARTBEAT_TIMEOUT_MS = num(process.env.VITE_WS_HEARTBEAT_TIMEOUT_MS, 5_000)
+const WS_RECONNECT_ENABLED = bool(process.env.VITE_WS_RECONNECT_ENABLED, true)
+const WS_RECONNECT_MIN_MS = num(process.env.VITE_WS_RECONNECT_MIN_MS, 1_000)
+const WS_RECONNECT_MAX_MS = num(process.env.VITE_WS_RECONNECT_MAX_MS, 15_000)
+const WS_RECONNECT_FACTOR = num(process.env.VITE_WS_RECONNECT_FACTOR, 1.8)
+const WS_RECONNECT_JITTER = num(process.env.VITE_WS_RECONNECT_JITTER, 0.2)
 
 const startedAt = new Date().toISOString()
 
-// Initial power meter slice: fully disconnected, no samples yet.
+/* -------------------------------------------------------------------------- */
+/*  Initial power meter slice                                                 */
+/* -------------------------------------------------------------------------- */
+
 const initialPowerMeter: PowerMeterSnapshot = {
     phase: 'disconnected',
     message: undefined,
@@ -131,10 +164,33 @@ const initialPowerMeter: PowerMeterSnapshot = {
         totalSamples: 0,
         bytesReceived: 0,
         lastSampleAt: null,
-        lastErrorAt: null
+        lastErrorAt: null,
     },
-    lastSample: null
+    lastSample: null,
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Initial serial printer slice (UPDATED with currentJob)                    */
+/* -------------------------------------------------------------------------- */
+
+const initialSerialPrinter: SerialPrinterSnapshot = {
+    phase: 'disconnected',
+    message: undefined,
+    stats: {
+        totalJobs: 0,
+        bytesReceived: 0,
+        lastJobAt: null,
+        lastErrorAt: null,
+    },
+    currentJob: null,
+    lastJob: null,
+    recentJobs: [],
+    maxRecentJobs: 20,
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Initial full state                                                        */
+/* -------------------------------------------------------------------------- */
 
 let state: AppState = {
     version: 1,
@@ -146,7 +202,7 @@ let state: AppState = {
             snapshot: LOGS_SNAPSHOT,
             capacity: LOGS_CAPACITY,
             allowedChannels: LOG_ALLOWED,
-            minLevel: LOG_MIN
+            minLevel: LOG_MIN,
         },
         ws: {
             heartbeatIntervalMs: WS_HEARTBEAT_INTERVAL_MS,
@@ -155,45 +211,43 @@ let state: AppState = {
             reconnectMinMs: WS_RECONNECT_MIN_MS,
             reconnectMaxMs: WS_RECONNECT_MAX_MS,
             reconnectFactor: WS_RECONNECT_FACTOR,
-            reconnectJitter: WS_RECONNECT_JITTER
-        }
+            reconnectJitter: WS_RECONNECT_JITTER,
+        },
     },
-    powerMeter: initialPowerMeter
+    powerMeter: initialPowerMeter,
+    serialPrinter: initialSerialPrinter,
 }
 
-/**
- * Event bus for state changes.
- *  - 'snapshot' => (state: AppState)
- *  - 'patch'    => (evt: PatchEvent)
- */
+/* -------------------------------------------------------------------------- */
+/*  Internal event emission helpers                                           */
+/* -------------------------------------------------------------------------- */
+
 export const stateEvents = new EventEmitter()
 
-/** Deep clone via JSON (sufficient here since state is POJO) */
 function clone<T>(v: T): T {
     return JSON.parse(JSON.stringify(v)) as T
 }
 
-/** Emit both patch and snapshot (keeps existing listeners working) */
 function emitChanges(prev: AppState, next: AppState) {
-    const ops = jsonpatch.compare(prev, next) // RFC 6902 ops to transform prev -> next
-
+    const ops = jsonpatch.compare(prev, next)
     if (ops.length > 0) {
         stateEvents.emit('patch', {
             from: prev.version,
             to: next.version,
-            patch: ops
+            patch: ops,
         } satisfies PatchEvent)
     }
-
     stateEvents.emit('snapshot', clone(next))
 }
 
-/** Read-only snapshot (clone) */
+/* -------------------------------------------------------------------------- */
+/*  Public state update wrappers                                              */
+/* -------------------------------------------------------------------------- */
+
 export function getSnapshot(): AppState {
     return clone(state)
 }
 
-/** Replace entire state (careful): computes and emits patch + snapshot */
 export function replaceState(next: Omit<AppState, 'version'> & { version?: number }) {
     const prev = clone(state)
     const version = (typeof next.version === 'number' ? next.version : state.version) + 1
@@ -202,42 +256,37 @@ export function replaceState(next: Omit<AppState, 'version'> & { version?: numbe
     emitChanges(prev, updated)
 }
 
-/** Merge helper for small updates; expands with real domain setters over time */
 export function set<K extends keyof AppState>(key: K, value: AppState[K]) {
     const prev = clone(state)
-    // ensure we replace nested objects so diffing remains precise
-    const nextShallow = { ...state, [key]: clone(value) } as AppState
-    const updated: AppState = { ...nextShallow, version: state.version + 1 }
-    state = updated
-    emitChanges(prev, updated)
+    const nextShallow = {
+        ...state,
+        [key]: clone(value),
+        version: state.version + 1,
+    } as AppState
+    state = nextShallow
+    emitChanges(prev, nextShallow)
 }
 
-/** Tiny demos you can call from routes/tests */
 export function setMessage(text: string) {
     set('message', text)
 }
+
 export function setLayout(rows: number, cols: number) {
     set('layout', { rows, cols })
 }
 
-/** Optional: update parts of serverConfig at runtime (e.g., admin UI later) */
 export function setServerConfig(partial: Partial<ServerConfig>) {
     set('serverConfig', { ...state.serverConfig, ...clone(partial) })
 }
 
-/**
- * Replace the entire power meter slice.
- * Intended for server-side glue that mirrors the SerialPowerMeterService
- * into WS-visible app state.
- */
+/* -------------------------------------------------------------------------- */
+/*  Power meter update helpers                                                */
+/* -------------------------------------------------------------------------- */
+
 export function setPowerMeterSnapshot(next: PowerMeterSnapshot) {
     set('powerMeter', next)
 }
 
-/**
- * Shallow-merge convenience for incremental updates to the power meter slice.
- * Allows passing a *partial* stats object, which will be merged with existing stats.
- */
 export function updatePowerMeterSnapshot(partial: {
     phase?: PowerMeterSnapshot['phase']
     message?: string
@@ -245,18 +294,55 @@ export function updatePowerMeterSnapshot(partial: {
     stats?: Partial<PowerMeterSnapshot['stats']>
 }) {
     const prev = state.powerMeter
-
     const mergedStats: PowerMeterSnapshot['stats'] = {
         ...prev.stats,
-        ...(partial.stats ?? {})
+        ...(partial.stats ?? {}),
     }
 
     const merged: PowerMeterSnapshot = {
         phase: partial.phase ?? prev.phase,
         message: partial.message ?? prev.message,
         lastSample: partial.lastSample ?? prev.lastSample,
-        stats: mergedStats
+        stats: mergedStats,
     }
 
     set('powerMeter', merged)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Serial printer update helpers (UPDATED)                                   */
+/* -------------------------------------------------------------------------- */
+
+export function setSerialPrinterSnapshot(next: SerialPrinterSnapshot) {
+    set('serialPrinter', next)
+}
+
+export function updateSerialPrinterSnapshot(partial: {
+    phase?: SerialPrinterSnapshot['phase']
+    message?: string
+    currentJob?: SerialPrinterSnapshot['currentJob'] | null
+    lastJob?: SerialPrinterSnapshot['lastJob']
+    stats?: Partial<SerialPrinterSnapshot['stats']>
+    recentJobs?: SerialPrinterSnapshot['recentJobs']
+    maxRecentJobs?: number
+}) {
+    const prev = state.serialPrinter
+
+    const mergedStats: SerialPrinterSnapshot['stats'] = {
+        ...prev.stats,
+        ...(partial.stats ?? {}),
+    }
+
+    const merged: SerialPrinterSnapshot = {
+        phase: partial.phase ?? prev.phase,
+        message: partial.message ?? prev.message,
+        currentJob:
+            partial.currentJob !== undefined ? partial.currentJob : prev.currentJob,
+        lastJob: partial.lastJob ?? prev.lastJob,
+        stats: mergedStats,
+        recentJobs: partial.recentJobs ?? prev.recentJobs,
+        maxRecentJobs: partial.maxRecentJobs ?? prev.maxRecentJobs,
+    }
+
+    set('serialPrinter', merged)
 }

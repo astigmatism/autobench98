@@ -270,7 +270,7 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     deltaIdentified++
     log.info(`ready id=${idToken ?? 'unknown'} kind=${kind} baud=${baudRate}`)
 
-    // 👉 If this is the power meter, notify the power meter service (if present)
+    // 👉 Power meter wiring
     if (kind === 'serial.powermeter' && (app as any).powerMeter) {
       const pm = (app as any).powerMeter as {
         onDeviceIdentified: (info: { id: string; path: string; baudRate?: number }) => Promise<void> | void
@@ -280,6 +280,19 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
         await pm.onDeviceIdentified({ id, path, baudRate })
       } catch (err) {
         log.warn(`powerMeter.onDeviceIdentified failed id=${id} path=${path} err="${(err as Error).message}"`)
+      }
+    }
+
+    // 👉 Serial printer wiring (mirror the power meter pattern)
+    if (kind === 'serial.printer' && (app as any).serialPrinter) {
+      const sp = (app as any).serialPrinter as {
+        onDeviceIdentified: (info: { id: string; path: string; baudRate?: number }) => Promise<void> | void
+      }
+
+      try {
+        await sp.onDeviceIdentified({ id, path, baudRate })
+      } catch (err) {
+        log.warn(`serialPrinter.onDeviceIdentified failed id=${id} path=${path} err="${(err as Error).message}"`)
       }
     }
   })
@@ -293,11 +306,15 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
   })
 
   discovery.on('device:lost', async ({ id }) => {
+    // Look up the record BEFORE removal so we know what kind it was.
+    const rec = id ? devices.get(id) : undefined
+    const kind = rec?.kind
+
     remove(id)
     log.warn(`device lost id=${id}`)
 
-    // 👉 If this was the power meter, notify the power meter service (if present)
-    if (id && (app as any).powerMeter && id.includes('serial.powermeter')) {
+    // 👉 Power meter lost wiring
+    if (kind === 'serial.powermeter' && (app as any).powerMeter) {
       const pm = (app as any).powerMeter as {
         onDeviceLost: (info: { id: string }) => Promise<void> | void
       }
@@ -306,6 +323,19 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
         await pm.onDeviceLost({ id })
       } catch (err) {
         log.warn(`powerMeter.onDeviceLost failed id=${id} err="${(err as Error).message}"`)
+      }
+    }
+
+    // 👉 Serial printer lost wiring
+    if (kind === 'serial.printer' && (app as any).serialPrinter) {
+      const sp = (app as any).serialPrinter as {
+        onDeviceLost: (info: { id: string }) => Promise<void> | void
+      }
+
+      try {
+        await sp.onDeviceLost({ id })
+      } catch (err) {
+        log.warn(`serialPrinter.onDeviceLost failed id=${id} err="${(err as Error).message}"`)
       }
     }
   })

@@ -1,5 +1,3 @@
-// services/orchestrator/src/app.ts
-
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
@@ -30,6 +28,7 @@ import { setMessage, setLayout } from './core/state.js'
 import layoutsRoutes from './routes/layouts.js'
 import serialPlugin from './plugins/serial.js'
 import powerMeterPlugin from './plugins/powerMeter.js'
+import serialPrinterPlugin from './plugins/serialPrinter.js'
 
 declare module 'fastify' {
     interface FastifyInstance {
@@ -95,7 +94,8 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
 
-    // Serial plugin: honor env-driven matchers (KB, MS, FP). Do NOT override here.
+    // Serial discovery plugin: honor env-driven matchers (KB, MS, FP, printer, powermeter).
+    // Do NOT override here; it will use SERIAL_MATCHERS_JSON / SERIAL_REQUIRED_DEVICES_JSON.
     void app.register(serialPlugin, {
         // matchers intentionally omitted -> serialPlugin will read SERIAL_MATCHERS_JSON
         logPrefix: 'serial'
@@ -103,6 +103,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
 
     // Power meter bootstrap: dedicated discovery + service wiring
     void app.register(powerMeterPlugin)
+
+    // Serial printer bootstrap: dedicated serial printer service + logging + state adapter
+    void app.register(serialPrinterPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
