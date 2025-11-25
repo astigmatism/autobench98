@@ -1,0 +1,25 @@
+Power Switch Control Wiring (using one AQY212)
+	•	Arduino Pin D3 → 220Ω resistor → AQY212 Pin 1 (Anode)
+	•	Arduino GND → AQY212 Pin 2 (Cathode)
+	•	Motherboard Power Switch + (Orange Wire) → AQY212 Pin 3 (Switch Terminal A)
+	•	Motherboard Power Switch – (White Wire) → AQY212 Pin 4 (Switch Terminal B)
+(These two are interchangeable — polarity does not matter)
+
+⸻
+
+Reset Switch Control Wiring (using a second AQY212)
+	•	Arduino Pin D4 → 220Ω resistor → AQY212 Pin 1 (Anode)
+	•	Arduino GND → AQY212 Pin 2 (Cathode)
+	•	Motherboard Reset Switch + (Positive Pin) → AQY212 Pin 3 (Switch Terminal A)
+	•	Motherboard Reset Switch – (Negative Pin) → AQY212 Pin 4 (Switch Terminal B)
+(Again, these two wires can be swapped — either way works)
+
+⸻
+
+Power Status Detection Wiring (unchanged from your current design)
+
+This part is the same as before, because it does not use the AQY212.
+	•	Molex +5V (Red Wire) → 330Ω resistor → Pin 1 (Anode of your sensing component)
+	•	Molex GND (Black Wire) → Pin 2 (Cathode)
+	•	Pin 4 (output) → Arduino Pin D2 (POWER_LED_PIN)
+	•	Pin 3 (output ground) → Arduino GND
