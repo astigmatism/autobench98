@@ -1,4 +1,3 @@
-// services/orchestrator/src/core/state.ts
 import { EventEmitter } from 'node:events'
 import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
 
@@ -82,7 +81,18 @@ export type SerialPrinterSnapshot = {
     // Canonical, full text of the last completed job (backend raw)
     lastJobFullText: string | null
 
-    // Rolling history of recent jobs
+    // Rolling history of recent jobs (full text, server-side bounded)
+    history: {
+        id: number
+        createdAt: number
+        completedAt: number
+        text: string
+    }[]
+
+    // Maximum number of history entries the server keeps
+    historyLimit: number
+
+    // Rolling history of recent jobs (summary only, unchanged)
     recentJobs: {
         id: number
         createdAt: number
@@ -90,7 +100,7 @@ export type SerialPrinterSnapshot = {
         preview: string
     }[]
 
-    // UI hint for how many to keep
+    // UI hint for how many to keep in recentJobs
     maxRecentJobs: number
 }
 
@@ -154,6 +164,9 @@ const WS_RECONNECT_MAX_MS = num(process.env.VITE_WS_RECONNECT_MAX_MS, 15_000)
 const WS_RECONNECT_FACTOR = num(process.env.VITE_WS_RECONNECT_FACTOR, 1.8)
 const WS_RECONNECT_JITTER = num(process.env.VITE_WS_RECONNECT_JITTER, 0.2)
 
+// How many full-text jobs to keep in memory/server snapshots
+const SERIAL_PRINTER_HISTORY_LIMIT = num(process.env.SERIAL_PRINTER_HISTORY_LIMIT, 10)
+
 const startedAt = new Date().toISOString()
 
 /* -------------------------------------------------------------------------- */
@@ -173,7 +186,8 @@ const initialPowerMeter: PowerMeterSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Initial serial printer slice (UPDATED with currentJob + lastJobFullText)  */
+/*  Initial serial printer slice (UPDATED with currentJob + lastJobFullText +
+ *  server-side history buffer)                                               */
 /* -------------------------------------------------------------------------- */
 
 const initialSerialPrinter: SerialPrinterSnapshot = {
@@ -188,6 +202,8 @@ const initialSerialPrinter: SerialPrinterSnapshot = {
     currentJob: null,
     lastJob: null,
     lastJobFullText: null,
+    history: [],
+    historyLimit: SERIAL_PRINTER_HISTORY_LIMIT,
     recentJobs: [],
     maxRecentJobs: 20,
 }
@@ -328,6 +344,8 @@ export function updateSerialPrinterSnapshot(partial: {
     lastJob?: SerialPrinterSnapshot['lastJob']
     lastJobFullText?: string | null
     stats?: Partial<SerialPrinterSnapshot['stats']>
+    history?: SerialPrinterSnapshot['history']
+    historyLimit?: number
     recentJobs?: SerialPrinterSnapshot['recentJobs']
     maxRecentJobs?: number
 }) {
@@ -349,6 +367,8 @@ export function updateSerialPrinterSnapshot(partial: {
                 ? partial.lastJobFullText
                 : prev.lastJobFullText,
         stats: mergedStats,
+        history: partial.history ?? prev.history,
+        historyLimit: partial.historyLimit ?? prev.historyLimit,
         recentJobs: partial.recentJobs ?? prev.recentJobs,
         maxRecentJobs: partial.maxRecentJobs ?? prev.maxRecentJobs,
     }

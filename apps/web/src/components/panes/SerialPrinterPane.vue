@@ -137,6 +137,20 @@
                             Higher = faster but chunkier · Lower = slower but smoother
                         </div>
                     </div>
+
+                    <!-- Server history info -->
+                    <div class="options-row">
+                        <div class="options-row-main">
+                            <span class="options-label">Server history</span>
+                            <span class="options-value">
+                                {{ printer.historyLimit }} jobs
+                            </span>
+                        </div>
+                        <div class="options-hint">
+                            Number of completed jobs the server keeps for refresh / new clients
+                            (SERIAL_PRINTER_HISTORY_LIMIT).
+                        </div>
+                    </div>
                 </div>
             </transition>
         </div>
@@ -243,14 +257,25 @@ type SerialPrinterCurrentJob = {
     text: string
 }
 
+type SerialPrinterHistoryEntry = {
+    id: number
+    createdAt: number
+    completedAt: number
+    text: string
+}
+
 type SerialPrinterSnapshotView = {
     phase: SerialPrinterPhase
     message?: string
     stats: SerialPrinterStatsView
     currentJob: SerialPrinterCurrentJob | null
     lastJob: SerialPrinterJobSummary | null
-    // Canonical full text from backend for last completed job
+    // Canonical full text for last completed job
     lastJobFullText: string | null
+    // Full-text history, server-side bounded
+    history: SerialPrinterHistoryEntry[]
+    historyLimit: number
+    // Summary list (existing)
     recentJobs: SerialPrinterJobSummary[]
     maxRecentJobs: number
 }
@@ -269,6 +294,8 @@ const initialPrinter: SerialPrinterSnapshotView = {
     currentJob: null,
     lastJob: null,
     lastJobFullText: null,
+    history: [],
+    historyLimit: 10,
     recentJobs: [],
     maxRecentJobs: 20,
 }
@@ -342,8 +369,8 @@ const currentJobId = ref<number | null>(null)
 const finishingJobId = ref<number | null>(null)
 
 /**
- * completedJobs: local-only store of full job texts, in order.
- * This is the historical "tape" above the current job.
+ * completedJobs: local view of full job texts, in order.
+ * Hydrated from server-side history and updated while streaming.
  */
 type CompletedJobView = {
     id: number
@@ -400,7 +427,7 @@ function startTypingTimer() {
 function pushCompletedJob(id: number, text: string) {
     if (!text) return
     completedJobs.value.push({ id, text })
-    const cap = printer.value.maxRecentJobs || 20
+    const cap = printer.value.historyLimit || printer.value.maxRecentJobs || 20
     if (completedJobs.value.length > cap) {
         completedJobs.value.splice(0, completedJobs.value.length - cap)
     }
@@ -439,12 +466,27 @@ function finalizeFinishedJobIfReady() {
 }
 
 /**
+ * Hydrate local completedJobs from server-side history whenever it changes.
+ */
+watch(
+    () => printer.value.history,
+    (history) => {
+        if (!history) return
+        completedJobs.value = history.map(h => ({
+            id: h.id,
+            text: h.text,
+        }))
+    },
+    { immediate: true, deep: true }
+)
+
+/**
  * Watch job identity:
  *  - When a new job starts: if a previous job was still streaming, flush ALL
  *    of its text (live + pending) into completedJobs so we never lose tape,
  *    preferring backend canonical text when available.
- *  - When a job finishes: mark it as "finishing" and let the streamer drain
- *    any remaining pending characters before finalizing.
+ *  - When a job finishes: mark it as "finishing" and let the
+ *    streamer drain remaining pending characters before finalizing.
  */
 watch(
     () => printer.value.currentJob,
@@ -489,17 +531,14 @@ watch(
         if (!job && prevJob) {
             // Don't clear text yet; just remember which job is finishing.
             finishingJobId.value = prevJob.id
-            // We now rely on finalizeFinishedJobIfReady (driven by pending watcher)
-            // to move this job into completedJobs once all pending chars are rendered.
+            // finalizeFinishedJobIfReady (driven by pending watcher)
+            // will move this job into completedJobs once pending is empty.
         }
     }
 )
 
 /**
  * Watch the server-driven currentJob text.
- * We just look at length deltas and append; if the server ever *shrinks*
- * the text (e.g. it trims from the top), we hard-sync to its version
- * without doing a clear/retype cycle.
  */
 watch(
     () => printer.value.currentJob?.text,
@@ -512,8 +551,7 @@ watch(
         const full = serverText
         const fullLen = full.length
 
-        // If server text is shorter than what we think we've shown, resync
-        // directly to the server's view (no typewriter, no flicker).
+        // If server text is shorter than what we think we've shown, resync.
         if (fullLen < displayedLength.value) {
             liveText.value = full
             pending.value = ''
