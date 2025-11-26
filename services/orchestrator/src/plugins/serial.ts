@@ -141,6 +141,14 @@ function buildMatchersFromRequired(specs: Array<RequiredSpec & { _pathRe?: RegEx
   })
 }
 
+// Shape we’ll expose to the app for readiness querying
+export type DeviceStatusSummary = {
+  ready: boolean
+  missing: Array<{ id: string; kind?: string }>
+  devices: DeviceRecord[]
+  byStatus: Record<DeviceStatus, number>
+}
+
 export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyInstance, opts) {
   const devices = new Map<string, DeviceRecord>()
   app.decorate('devices', devices)
@@ -169,8 +177,9 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
 
   const { specs: requiredSpecs, error: requiredParseErr } = parseRequiredFromEnv()
   const failOnMissing = parseBoolEnv('SERIAL_FAIL_ON_MISSING', true)
-  const startupSettleMs = parseIntEnv('SERIAL_STARTUP_SETTLE_MS', 1500) ?? 1500
-  const quietWindowMs = 200 // no changes for this long => consider settled
+
+  // Explicit startup timeout (how long we’re willing to wait for required devices)
+  const startupTimeoutMs = parseIntEnv('SERIAL_STARTUP_TIMEOUT_MS', 30000) ?? 30000
 
   const effective: EffectiveOptions = {
     identify: { ...envIdentify, ...(opts.identify ?? {}) },
@@ -191,7 +200,6 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     log.warn('no required devices configured; discovery will still scan, but startup gating will pass trivially')
   }
 
-  // Build runtime matchers strictly from required specs
   const runtimeMatchers: SerialMatcher[] = buildMatchersFromRequired(requiredSpecs)
 
   // Map kind -> idToken (from runtime matchers) so we can record idToken on DeviceRecord
@@ -208,14 +216,7 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
   let deltaLost = 0
   let summaryTimer: NodeJS.Timeout | null = null
 
-  // 🔇 Deduplicate “identifying …” spam: one line per (idToken, kind) per boot.
-  const announcedIdentifying = new Set<string>()
-
-  // Track last time devices map changed to implement a short settle period
-  let lastChangeAt = Date.now()
-  const bumpChange = () => { lastChangeAt = Date.now() }
-
-  const tallyStatus = () => {
+  const tallyStatus = (): Record<DeviceStatus, number> => {
     const byStatus: Record<DeviceStatus, number> = { identifying: 0, ready: 0, error: 0, lost: 0 }
     for (const rec of devices.values()) {
       byStatus[rec.status] = (byStatus[rec.status] ?? 0) + 1
@@ -225,14 +226,16 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
 
   const logSummary = (reason: string) => {
     const by = tallyStatus()
-    log.info(`devices summary reason=${reason} total=${devices.size} byStatus=${JSON.stringify(by)} delta={"identified":${deltaIdentified},"errors":${deltaErrors},"lost":${deltaLost}}`)
+    log.info(
+      `devices summary reason=${reason} total=${devices.size} ` +
+      `byStatus=${JSON.stringify(by)} delta={"identified":${deltaIdentified},"errors":${deltaErrors},"lost":${deltaLost}}`
+    )
     deltaIdentified = 0; deltaErrors = 0; deltaLost = 0
   }
   // ---------------------------------------------------------------------------
 
   const upsert = (rec: DeviceRecord) => {
     devices.set(rec.id, rec)
-    bumpChange()
     try { opts?.stateAdapter?.upsert?.(rec) } catch (err) {
       log.error(`stateAdapter.upsert failed err="${(err as Error).message}"`)
     }
@@ -240,27 +243,33 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
 
   const remove = (id: string) => {
     const existed = devices.delete(id)
-    if (existed) bumpChange()
     try { opts?.stateAdapter?.remove?.(id) } catch (err) {
       log.error(`stateAdapter.remove failed err="${(err as Error).message}"`)
     }
     if (existed) deltaLost++
   }
 
+  // 👉 Public status function for the app (used by /ready and logs)
+  const getDeviceStatus = (): DeviceStatusSummary => {
+    const byStatus = tallyStatus()
+    const missing = computeMissingSinglePass(requiredSpecs, devices)
+    const ready = requiredSpecs.length === 0 || missing.length === 0
+
+    return {
+      ready,
+      missing,
+      devices: Array.from(devices.values()),
+      byStatus,
+    }
+  }
+
+  ;(app as any).getDeviceStatus = getDeviceStatus
+
   // Service → plugin log translation (concise)
   discovery.on('device:identifying', ({ id, path, vid, pid, kind }) => {
     const now = Date.now()
     const idToken = kindToIdToken.get(kind)
     upsert({ id, kind, path, vid, pid, idToken, status: 'identifying', lastSeen: now })
-
-    // Only announce once per token+kind combo (noise reduction). Static devices have no token.
-    if (idToken) {
-      const key = `${idToken}:${kind}`
-      if (!announcedIdentifying.has(key)) {
-        log.info(`identifying id=${idToken} kind=${kind}`)
-        announcedIdentifying.add(key)
-      }
-    }
   })
 
   discovery.on('device:identified', async ({ id, path, vid, pid, kind, baudRate }) => {
@@ -283,7 +292,7 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
       }
     }
 
-    // 👉 Serial printer wiring (mirror the power meter pattern)
+    // 👉 Serial printer wiring
     if (kind === 'serial.printer' && (app as any).serialPrinter) {
       const sp = (app as any).serialPrinter as {
         onDeviceIdentified: (info: { id: string; path: string; baudRate?: number }) => Promise<void> | void
@@ -306,27 +315,24 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
   })
 
   discovery.on('device:lost', async ({ id }) => {
-    // Look up the record BEFORE removal so we know what kind it was.
     const rec = id ? devices.get(id) : undefined
     const kind = rec?.kind
 
     remove(id)
     log.warn(`device lost id=${id}`)
 
-    // 👉 Power meter lost wiring
     if (kind === 'serial.powermeter' && (app as any).powerMeter) {
       const pm = (app as any).powerMeter as {
         onDeviceLost: (info: { id: string }) => Promise<void> | void
       }
 
       try {
-        await pm.onDeviceLost({ id })
-      } catch (err) {
+        await pm.onDeviceLost({ id }) }
+      catch (err) {
         log.warn(`powerMeter.onDeviceLost failed id=${id} err="${(err as Error).message}"`)
       }
     }
 
-    // 👉 Serial printer lost wiring
     if (kind === 'serial.printer' && (app as any).serialPrinter) {
       const sp = (app as any).serialPrinter as {
         onDeviceLost: (info: { id: string }) => Promise<void> | void
@@ -340,7 +346,7 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     }
   })
 
-  // ---------------------- boot-time single-scan readiness gate ----------------
+  // ---------------------- non-blocking startup gating ------------------------
   app.addHook('onReady', async () => {
     const identifyDefaults: IdentifyConfig = {
       request: 'identify',
@@ -352,82 +358,90 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     }
 
     const options: SerialDiscoveryOptions = {
-      matchers: runtimeMatchers,                 // <-- only from required specs
+      matchers: runtimeMatchers,
       identify: { ...identifyDefaults, ...(effective.identify ?? {}) },
       defaultBaudRate: effective.defaultBaudRate,
       rescanIntervalMs: effective.rescanIntervalMs,
       logPrefix: effective.logPrefix,
-      settleWindowMs: startupSettleMs,
+      settleWindowMs: startupTimeoutMs,
     }
 
-    // Preface: what we’re about to scan for
     log.info(
       `startup scan begin matchers=${runtimeMatchers.length} required=${requiredSpecs.length} ` +
       `ids=[${requiredSpecs.map(s => s.id ?? '(static)').join(',')}] rescanMs=${effective.rescanIntervalMs ?? 0} ` +
-      `settleMs=${startupSettleMs}`
+      `timeoutMs=${startupTimeoutMs}`
     )
 
-    // Start service (it should enumerate/emit immediately).
+    // Start discovery; returns quickly (non-blocking).
     await discovery.start(options)
 
-    // Allow a short settle window so all initial ports can emit at least once.
-    const start = Date.now()
-    let waited = 0
-    const minWait = Math.min(200, startupSettleMs)
-    while (true) {
-      const now = Date.now()
-      waited = now - start
-      const quietFor = now - lastChangeAt
-      if (waited >= startupSettleMs || (waited >= minWait && quietFor >= quietWindowMs)) break
-      await sleep(50)
-    }
+    // Background gating loop – does NOT block Fastify start.
+    void (async () => {
+      const start = Date.now()
+      let elapsed = 0
 
-    // Settle summary before gating
-    const byStatus = tallyStatus()
-    log.info(
-      `startup scan settled after ${waited}ms devices=${devices.size} ` +
-      `byStatus=${JSON.stringify(byStatus)}`
-    )
+      while (true) {
+        elapsed = Date.now() - start
 
-    // ---- Single evaluation of required devices (no countdown) ----
-    if (requiredSpecs.length > 0) {
-      const missing = computeMissingSinglePass(requiredSpecs, devices)
-      if (missing.length === 0) {
-        const list = requiredSpecs.map(s => s.id ?? '(static)').join(',')
-        log.info(`required devices present at startup ids=[${list}]`)
-      } else {
-        const candidates = Array.from(devices.values())
-          .filter(d => d.status === 'identifying' || d.status === 'ready')
-          .map(d => ({
-            idToken: d.idToken ?? '(none)',
-            kind: d.kind,
-            status: d.status,
-            path: d.path,
-            vid: d.vid, pid: d.pid, baud: d.baudRate
-          }))
-        log.warn(`startup candidates: ${JSON.stringify(candidates)}`)
+        const status = getDeviceStatus()
 
-        const ids = missing.map(m => m.id).join(',')
-        const msg = `startup requirement not met; missing ids=[${ids}]`
-        if (failOnMissing) {
-          log.error(msg)
-          try { await discovery.stop() } catch { /* ignore */ }
-          throw new Error(msg)
-        } else {
-          log.warn(msg)
+        if (status.ready) {
+          log.info(
+            `startup scan satisfied after ${elapsed}ms devices=${status.devices.length} ` +
+            `byStatus=${JSON.stringify(status.byStatus)}`
+          )
+
+          const summaryEvery = effective.summaryIntervalMs
+          if (summaryEvery && summaryEvery > 0) {
+            const ms = Math.max(1000, summaryEvery)
+            summaryTimer = setInterval(() => { logSummary('interval') }, ms)
+            setTimeout(() => logSummary('startup'), 1000)
+          }
+          break
         }
-      }
-    }
 
-    // Optional periodic summaries (unrelated to startup gating)
-    const summaryEvery = effective.summaryIntervalMs
-    if (summaryEvery && summaryEvery > 0) {
-      const ms = Math.max(1000, summaryEvery)
-      summaryTimer = setInterval(() => { logSummary('interval') }, ms)
-      setTimeout(() => logSummary('startup'), 1000)
-    }
+        if (elapsed >= startupTimeoutMs) {
+          const candidates = status.devices
+            .filter(d => d.status === 'identifying' || d.status === 'ready')
+            .map(d => ({
+              idToken: d.idToken ?? '(none)',
+              kind: d.kind,
+              status: d.status,
+              path: d.path,
+              vid: d.vid, pid: d.pid, baud: d.baudRate
+            }))
+
+          if (candidates.length > 0) {
+            log.warn(`startup candidates: ${JSON.stringify(candidates)}`)
+          }
+
+          const ids = status.missing.map(m => m.id).join(',')
+          const msg = `startup requirement not met; missing ids=[${ids}]`
+
+          if (failOnMissing) {
+            log.error(msg)
+            try { await discovery.stop() } catch { /* ignore */ }
+            // Hard fail – outer supervisor (or you) will decide what to do.
+            process.exit(1)
+          } else {
+            log.warn(msg)
+
+            const summaryEvery = effective.summaryIntervalMs
+            if (summaryEvery && summaryEvery > 0) {
+              const ms = Math.max(1000, summaryEvery)
+              summaryTimer = setInterval(() => { logSummary('interval') }, ms)
+              setTimeout(() => logSummary('startup'), 1000)
+            }
+          }
+          break
+        }
+
+        await sleep(100)
+      }
+    })()
   })
 
+  // ---------------------- app.onClose cleanup --------------------------------
   app.addHook('onClose', async () => {
     const sz = devices.size
     log.info(`stopping serial discovery totalDevices=${sz}`)
@@ -452,7 +466,6 @@ function specMatchesRecord(spec: RequiredSpec & { _pathRe?: RegExp }, rec: Devic
   const acceptable = rec.status === 'identifying' || rec.status === 'ready'
   if (!acceptable) return false
 
-  // Tokened (active) requirement: must match token if provided
   if (spec.id) {
     if (rec.idToken && spec.id !== rec.idToken) return false
     if (!rec.idToken) {
@@ -478,7 +491,6 @@ function specMatchesRecord(spec: RequiredSpec & { _pathRe?: RegExp }, rec: Devic
   return true
 }
 
-/** Single-pass: which required specs aren't satisfied by any acceptable device right now */
 function computeMissingSinglePass(
   specs: Array<RequiredSpec & { _pathRe?: RegExp }>,
   devs: Map<string, DeviceRecord>

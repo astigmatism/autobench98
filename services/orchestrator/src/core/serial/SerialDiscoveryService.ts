@@ -71,7 +71,10 @@ class TypedEmitter extends EventEmitter {
 }
 
 /**
- * SerialDiscoveryService (hybrid: token-first + static)
+ * SerialDiscoveryService (hybrid: token-first + static, non-blocking)
+ *
+ * NOTE: `start()` returns quickly; scans run in the background so callers
+ * (e.g. Fastify onReady hooks) aren’t blocked.
  */
 export class SerialDiscoveryService extends TypedEmitter {
   private options!: SerialDiscoveryOptions
@@ -114,12 +117,16 @@ export class SerialDiscoveryService extends TypedEmitter {
       `serial discovery start matchers=${this.options.matchers.length} rescanMs=${this.options.rescanIntervalMs ?? 0}`
     )
 
-    await this.scanOnce()
+    // Initial scan in the background so start() returns quickly.
+    void this.scanOnce().catch(err => {
+      const e = err instanceof Error ? err : new Error(String(err))
+      this.emitLog('debug', `initial scan failed err="${e.message}"`)
+    })
 
     if (this.options.rescanIntervalMs && this.options.rescanIntervalMs > 0) {
       this.rescanTimer = setInterval(() => {
         this.scanOnce().catch((err) =>
-          this.emitLog('debug', `rescan failed err="${err.message}"`)
+          this.emitLog('debug', `rescan failed err="${(err as Error).message}"`)
         )
       }, this.options.rescanIntervalMs)
     }
@@ -195,9 +202,6 @@ export class SerialDiscoveryService extends TypedEmitter {
         let baudUsed = this.options.defaultBaudRate!
 
         // 1) Active/token-first: send 'identify' and map by token.
-        //
-        // IMPORTANT: if active identify fails (timeout, etc.), we fall through
-        // to static matchers instead of treating it as a fatal error.
         if (active.length > 0) {
           try {
             const { token, baudUsed: tokenBaud } = await this.readIdentityToken(path)
@@ -275,10 +279,6 @@ export class SerialDiscoveryService extends TypedEmitter {
 
   /**
    * Return matchers that would even consider this path (by regex/VID/PID/serial or no filters).
-   *
-   * serialNumber is an additional positive constraint:
-   * - If the matcher has serialNumber, it MUST match exactly.
-   * - If the matcher omits serialNumber, we ignore the device serialNumber.
    */
   private eligibleMatchersForPath(
     path: string,
@@ -292,9 +292,22 @@ export class SerialDiscoveryService extends TypedEmitter {
 
     return (this.options.matchers ?? []).filter(m => {
       const okPath = m.pathRegex ? m.pathRegex.test(path) : true
-      const okVid  = m.vendorId ? normalizeHex(m.vendorId) === vid : true
-      const okPid  = m.productId ? normalizeHex(m.productId) === pid : true
-      const okSn   = m.serialNumber ? m.serialNumber === sn : true
+
+      const okVid =
+        m.vendorId && vid
+          ? normalizeHex(m.vendorId) === vid
+          : true
+
+      const okPid =
+        m.productId && pid
+          ? normalizeHex(m.productId) === pid
+          : true
+
+      const okSn =
+        m.serialNumber && sn
+          ? m.serialNumber === sn
+          : true
+
       return okPath && okVid && okPid && okSn
     })
   }
@@ -339,10 +352,6 @@ export class SerialDiscoveryService extends TypedEmitter {
     throw lastErr ?? new Error('identify failed')
   }
 
-  /**
-   * Match a token to one of the provided active matchers, honoring optional
-   * VID/PID/path/serial filters again.
-   */
   private findMatcherByTokenAndFilters(
     token: string,
     path: string,
@@ -363,16 +372,24 @@ export class SerialDiscoveryService extends TypedEmitter {
       if (m.identificationString.toLowerCase() !== tokenLower) continue
 
       const okPath = m.pathRegex ? m.pathRegex.test(path) : true
-      const okVid  = m.vendorId ? normalizeHex(m.vendorId) === vidN : true
-      const okPid  = m.productId ? normalizeHex(m.productId) === pidN : true
-      const okSn   = m.serialNumber ? m.serialNumber === sn : true
+      const okVid =
+        m.vendorId && vidN
+          ? normalizeHex(m.vendorId) === vidN
+          : true
+      const okPid =
+        m.productId && pidN
+          ? normalizeHex(m.productId) === pidN
+          : true
+      const okSn =
+        m.serialNumber && sn
+          ? m.serialNumber === sn
+          : true
 
       if (okPath && okVid && okPid && okSn) return m
     }
     return undefined
   }
 
-  /** Choose the static matcher with the strongest constraints satisfied. */
   private pickBestStatic(
     statics: SerialMatcher[],
     path: string,
@@ -387,10 +404,10 @@ export class SerialDiscoveryService extends TypedEmitter {
     const scored = statics
       .map(m => {
         let score = 0
-        if (m.vendorId && normalizeHex(m.vendorId) === vidN) score += 2
-        if (m.productId && normalizeHex(m.productId) === pidN) score += 2
+        if (m.vendorId && vidN && normalizeHex(m.vendorId) === vidN) score += 2
+        if (m.productId && pidN && normalizeHex(m.productId) === pidN) score += 2
         if (m.pathRegex && m.pathRegex.test(path)) score += 1
-        if (m.serialNumber && m.serialNumber === sn) score += 3 // strong tie to a specific device
+        if (m.serialNumber && sn && m.serialNumber === sn) score += 3
         return { m, score }
       })
       .filter(x => x.score > 0)
@@ -400,7 +417,6 @@ export class SerialDiscoveryService extends TypedEmitter {
     return scored[0].m
   }
 
-  /** Handle a recognized device (both active and static). */
   private async onRecognized(
     path: string,
     matched: SerialMatcher,
@@ -410,7 +426,6 @@ export class SerialDiscoveryService extends TypedEmitter {
     baud: number,
     fromActive: boolean
   ): Promise<void> {
-    // Open & optionally finalize handshake for active; for static, open if keeping open.
     if (fromActive) {
       const { port, parser } = await this.openPort(
         path,
@@ -461,10 +476,8 @@ export class SerialDiscoveryService extends TypedEmitter {
     )
   }
 
-  // ----- low-level -----
   private async openPort(path: string, baudRate: number, delimiter: string): Promise<{ port: SerialPort; parser: ReadlineParser }> {
-    // IMPORTANT: lock=false so discovery never participates in user-space locks.
-    // This avoids contention with the power meter service (which uses lock:true).
+    // lock=false so discovery never competes with user-space locks.
     const port = new SerialPort({ path, baudRate, autoOpen: false, lock: false })
 
     await new Promise<void>((resolve, reject) => {
@@ -491,7 +504,15 @@ export class SerialDiscoveryService extends TypedEmitter {
     await this.flushAndDrain(port)
 
     const response = await new Promise<string>((resolve, reject) => {
-      const onData = (data: string) => { cleanup(); resolve(data) }
+      const onData = (data: string) => {
+        const trimmed = (data ?? '').toString().trim()
+        if (!trimmed) return
+        const lower = trimmed.toLowerCase()
+        if (lower.startsWith('debug:')) return
+
+        cleanup()
+        resolve(trimmed)
+      }
       const onError = (err: Error) => { cleanup(); reject(err) }
       const timer = setTimeout(() => { cleanup(); reject(new Error('Identify timeout')) }, timeoutMs)
 

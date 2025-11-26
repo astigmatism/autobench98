@@ -5,7 +5,7 @@ import Fastify, {
     type FastifyReply
 } from 'fastify'
 import cors from '@fastify/cors'
-import fastifyMultipart from '@fastify/multipart' // ✅ enable uploads for /api/layouts/import
+import fastifyMultipart from '@fastify/multipart'
 
 // ✨ static hosting imports
 import fastifyStatic from '@fastify/static'
@@ -26,13 +26,14 @@ import {
 import wsPlugin from './plugins/ws.js'
 import { setMessage, setLayout } from './core/state.js'
 import layoutsRoutes from './routes/layouts.js'
-import serialPlugin from './plugins/serial.js'
+import serialPlugin, { type DeviceStatusSummary } from './plugins/serial.js'
 import powerMeterPlugin from './plugins/powerMeter.js'
 import serialPrinterPlugin from './plugins/serialPrinter.js'
 
 declare module 'fastify' {
     interface FastifyInstance {
         clientBuf: ClientLogBuffer
+        getDeviceStatus?: () => DeviceStatusSummary
     }
 }
 
@@ -45,7 +46,6 @@ const REQUEST_VERBOSE = String(process.env.REQUEST_VERBOSE ?? 'false').toLowerCa
 const REQUEST_LOG_HEADERS =
     String(process.env.REQUEST_LOG_HEADERS ?? 'false').toLowerCase() === 'true'
 const REQUEST_SAMPLE = Math.max(1, Number(process.env.REQUEST_SAMPLE ?? '1'))
-// Extra: WebSocket-specific debug for /ws
 const WS_DEBUG = String(process.env.WS_DEBUG ?? 'false').toLowerCase() === 'true'
 // --------------------------------------
 
@@ -75,41 +75,33 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const startedAt = new Map<string, number>()
     const sampledIds = new Set<string>()
 
-    // Keep Fastify defaults; plugin will fail fast if devices missing.
     const app = Fastify({ logger: false, ...opts })
-
     app.decorate('clientBuf', clientBuf)
 
-    // CORS first
+    // CORS
     void app.register(cors, { origin: true })
 
-    // ✅ Multipart: enables file uploads for /api/layouts/import in layoutsRoutes.
-    //    Keep config minimal here; the route can still accept raw JSON bodies if desired.
+    // File uploads for /api/layouts/import
     void app.register(fastifyMultipart, {
-        attachFieldsToBody: true,         // fields become available on req.body
-        limits: { files: 1, fileSize: 2 * 1024 * 1024 } // 1 file up to 2MB (tweak as needed)
+        attachFieldsToBody: true,
+        limits: { files: 1, fileSize: 2 * 1024 * 1024 }
     })
 
     // WebSocket + layouts routes
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
 
-    // Serial discovery plugin: honor env-driven matchers (KB, MS, FP, printer, powermeter).
-    // Do NOT override here; it will use SERIAL_MATCHERS_JSON / SERIAL_REQUIRED_DEVICES_JSON.
+    // Serial discovery plugin
     void app.register(serialPlugin, {
-        // matchers intentionally omitted -> serialPlugin will read SERIAL_MATCHERS_JSON
         logPrefix: 'serial'
     })
 
-    // Power meter bootstrap: dedicated discovery + service wiring
+    // Power meter + serial printer
     void app.register(powerMeterPlugin)
-
-    // Serial printer bootstrap: dedicated serial printer service + logging + state adapter
     void app.register(serialPrinterPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
-        // Always log WS-specific debug when enabled, independent of sampling.
         if (WS_DEBUG && req.url === '/ws') {
             const headers = req.headers as Record<string, unknown>
             const upgrade = headers['upgrade']
@@ -211,9 +203,34 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     })
     // -----------------------------
 
-    // Health / basic
+    // Health / ready
     app.get('/health', async () => ({ status: 'ok' }))
-    app.get('/ready', async () => ({ ready: true }))
+
+    app.get('/ready', async () => {
+        const statusFn = app.getDeviceStatus
+        if (!statusFn) {
+            // If the plugin isn't loaded for some reason, surface "ready"
+            // so this doesn't become a hard dependency.
+            return { ready: true }
+        }
+        const status = statusFn()
+        return {
+            ready: status.ready,
+            missing: status.missing,
+            byStatus: status.byStatus,
+            devices: status.devices.map(d => ({
+                id: d.id,
+                kind: d.kind,
+                path: d.path,
+                status: d.status,
+                vid: d.vid,
+                pid: d.pid,
+                baudRate: d.baudRate,
+                idToken: d.idToken,
+            }))
+        }
+    })
+
     app.get('/', async (_req, reply) => { reply.status(301); reply.redirect('/studio/') })
     app.get('/version', async () => ({ name: 'autobench98-orchestrator', version: '0.1.0' }))
 

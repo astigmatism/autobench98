@@ -45,7 +45,6 @@ function unescapeLineEnding(s: string | undefined): string | undefined {
     return s
 }
 function summarizeSerialEnv() {
-    // Don’t fail if JSON is bad; just report.
     let matchersCount: number | null = null
     let matchersError: string | null = null
     const raw = process.env.SERIAL_MATCHERS_JSON
@@ -89,6 +88,14 @@ async function start() {
 
     try {
         app = buildApp()
+
+        // Standard Fastify ready cycle (will run plugin onReady hooks).
+        await app.ready()
+
+        // Do NOT block here on device discovery – the serial plugin
+        // will gate startup in the background and exit(1) if required
+        // devices never come online.
+
         await app.listen({ port: PORT, host: HOST })
 
         // API/host summary
@@ -121,11 +128,29 @@ async function start() {
         process.on('SIGINT', () => void shutdown('SIGINT'))
         process.on('SIGTERM', () => void shutdown('SIGTERM'))
     } catch (err) {
-        // Boot failure (e.g., required devices missing after timeout)
-        logOrch.error(`failed to start err="${(err as Error).message}"`)
+        // Boot/runtime failure (including "required devices missing" if plugin exited early)
+        const msg = (err as Error)?.message ?? String(err)
+        logOrch.error(`failed to start err="${msg}"`)
+
+        // If we *do* have device status, surface it once for easier diagnosis.
+        if (app && (app as any).getDeviceStatus) {
+            try {
+                const status = (app as any).getDeviceStatus()
+                logOrch.error('device readiness at failure', {
+                    ready: status.ready,
+                    missing: status.missing,
+                    byStatus: status.byStatus,
+                })
+            } catch {
+                // best-effort only
+            }
+        }
+
         try {
             await app?.close()
-        } catch { /* ignore */ }
+        } catch {
+            // ignore
+        }
         process.exit(1)
     }
 }
