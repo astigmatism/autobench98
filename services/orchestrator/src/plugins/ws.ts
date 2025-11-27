@@ -1,4 +1,3 @@
-// services/orchestrator/src/plugins/ws.ts
 import fp from 'fastify-plugin'
 import websocket from '@fastify/websocket'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
@@ -16,6 +15,7 @@ import {
     getHistory as getLogHistory,
     onLog as onLogSubscribe
 } from '../adapters/logs.adapter.js'
+import type { AtlonaControllerService } from '../devices/atlona-controller/AtlonaControllerService.js'
 
 // ---------------------------
 // Log filtering configuration
@@ -140,6 +140,51 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }
         }
     })
+
+    // Helper: handle Atlona commands from a WS message
+    async function handleAtlonaCommand(msg: any) {
+        // 🔑 IMPORTANT: look up the controller lazily so we don't capture
+        // an undefined reference before the plugin decorates the app.
+        const atlonaController = (app as unknown as {
+            atlonaController?: AtlonaControllerService
+        }).atlonaController
+
+        if (!atlonaController) {
+            logWs.warn('received atlona.command but controller is not attached')
+            return
+        }
+
+        const payload = msg?.payload ?? {}
+        const kind = payload.kind
+        const switchIdRaw = payload.switchId
+        const requestedBy =
+            typeof payload.requestedBy === 'string'
+                ? payload.requestedBy
+                : 'ws-client'
+
+        const idNum = Number(switchIdRaw)
+        if (idNum !== 1 && idNum !== 2 && idNum !== 3) {
+            logWs.warn('atlona.command: invalid switchId', { switchId: switchIdRaw })
+            return
+        }
+        const switchId = idNum as 1 | 2 | 3
+
+        try {
+            if (kind === 'hold') {
+                await atlonaController.holdSwitch(switchId, requestedBy)
+            } else if (kind === 'release') {
+                await atlonaController.releaseSwitch(switchId, requestedBy)
+            } else {
+                logWs.warn('atlona.command: unknown kind', { kind })
+            }
+        } catch (e) {
+            logWs.warn('atlona.command failed', {
+                kind,
+                switchId,
+                err: (e as Error).message
+            })
+        }
+    }
 
     // Handler signature: (socket, request)
     app.get('/ws', { websocket: true }, (socket: WSSocket, _req: FastifyRequest) => {
@@ -280,6 +325,12 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
                     // Ensure the snapshot timer is running once client subscribes
                     startSnapshotTimer()
+                    return
+                }
+
+                // --- Atlona front-end commands --------------------------------
+                if (msg?.type === 'atlona.command') {
+                    void handleAtlonaCommand(msg)
                     return
                 }
             } catch {

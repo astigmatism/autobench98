@@ -10,7 +10,8 @@ export enum LogChannel {
     app = 'app',
     request = 'request',
     powermeter = 'powermeter',
-    serial_printer = 'serial-printer'
+    serial_printer = 'serial-printer',
+    atlona_controller = 'atlona-controller',
 }
 
 export type ChannelColor =

@@ -304,6 +304,19 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
         log.warn(`serialPrinter.onDeviceIdentified failed id=${id} path=${path} err="${(err as Error).message}"`)
       }
     }
+
+    // 👉 Atlona controller wiring (additive, mirrors the pattern above)
+    if (kind === 'arduino.atlonacontroller' && (app as any).atlonaController) {
+      const controller = (app as any).atlonaController as {
+        onDeviceIdentified: (info: { id: string; path: string; baudRate?: number }) => Promise<void> | void
+      }
+
+      try {
+        await controller.onDeviceIdentified({ id, path, baudRate })
+      } catch (err) {
+        log.warn(`atlonaController.onDeviceIdentified failed id=${id} path=${path} err="${(err as Error).message}"`)
+      }
+    }
   })
 
   discovery.on('device:error', ({ id, path, kind /*, error*/ }) => {
@@ -342,6 +355,19 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
         await sp.onDeviceLost({ id })
       } catch (err) {
         log.warn(`serialPrinter.onDeviceLost failed id=${id} err="${(err as Error).message}"`)
+      }
+    }
+
+    // 👉 Atlona controller lost wiring
+    if (kind === 'arduino.atlonacontroller' && (app as any).atlonaController) {
+      const controller = (app as any).atlonaController as {
+        onDeviceLost: (info: { id: string }) => Promise<void> | void
+      }
+
+      try {
+        await controller.onDeviceLost({ id })
+      } catch (err) {
+        log.warn(`atlonaController.onDeviceLost failed id=${id} err="${(err as Error).message}"`)
       }
     }
   })

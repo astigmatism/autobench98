@@ -70,3 +70,8 @@ export function stopRealtime(): void {
     }
     listenerDisposers = []
 }
+
+// NEW: Allow panes to access the existing WS client.
+export function getRealtimeClient(): WSClient | null {
+    return wsInstance
+}

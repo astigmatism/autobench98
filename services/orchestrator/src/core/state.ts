@@ -105,6 +105,21 @@ export type SerialPrinterSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Atlona controller snapshot                                                */
+/* -------------------------------------------------------------------------- */
+
+export type AtlonaControllerSnapshot = {
+    phase: 'disconnected' | 'connecting' | 'ready' | 'error'
+    message?: string
+    identified: boolean
+    switches: {
+        1: { name: 'menu'; isHeld: boolean }
+        2: { name: 'minus'; isHeld: boolean }
+        3: { name: 'plus'; isHeld: boolean }
+    }
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Full AppState                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -116,6 +131,7 @@ export type AppState = {
     serverConfig: ServerConfig
     powerMeter: PowerMeterSnapshot
     serialPrinter: SerialPrinterSnapshot
+    atlonaController: AtlonaControllerSnapshot
 }
 
 /* -------------------------------------------------------------------------- */
@@ -209,6 +225,21 @@ const initialSerialPrinter: SerialPrinterSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Initial Atlona controller slice                                           */
+/* -------------------------------------------------------------------------- */
+
+const initialAtlonaController: AtlonaControllerSnapshot = {
+    phase: 'disconnected',
+    message: undefined,
+    identified: false,
+    switches: {
+        1: { name: 'menu', isHeld: false },
+        2: { name: 'minus', isHeld: false },
+        3: { name: 'plus', isHeld: false },
+    },
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initial full state                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -236,6 +267,7 @@ let state: AppState = {
     },
     powerMeter: initialPowerMeter,
     serialPrinter: initialSerialPrinter,
+    atlonaController: initialAtlonaController,
 }
 
 /* -------------------------------------------------------------------------- */
@@ -374,4 +406,48 @@ export function updateSerialPrinterSnapshot(partial: {
     }
 
     set('serialPrinter', merged)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Atlona controller update helpers                                          */
+/* -------------------------------------------------------------------------- */
+
+export function setAtlonaControllerSnapshot(next: AtlonaControllerSnapshot) {
+    set('atlonaController', next)
+}
+
+export function updateAtlonaControllerSnapshot(partial: {
+    phase?: AtlonaControllerSnapshot['phase']
+    message?: string
+    identified?: boolean
+    switches?: {
+        1?: { isHeld: boolean }
+        2?: { isHeld: boolean }
+        3?: { isHeld: boolean }
+    }
+}) {
+    const prev = state.atlonaController
+
+    const switches = {
+        ...prev.switches,
+    }
+
+    if (partial.switches?.[1]) {
+        switches[1] = { ...switches[1], ...partial.switches[1] }
+    }
+    if (partial.switches?.[2]) {
+        switches[2] = { ...switches[2], ...partial.switches[2] }
+    }
+    if (partial.switches?.[3]) {
+        switches[3] = { ...switches[3], ...partial.switches[3] }
+    }
+
+    const merged: AtlonaControllerSnapshot = {
+        phase: partial.phase ?? prev.phase,
+        message: partial.message ?? prev.message,
+        identified: partial.identified ?? prev.identified,
+        switches,
+    }
+
+    set('atlonaController', merged)
 }

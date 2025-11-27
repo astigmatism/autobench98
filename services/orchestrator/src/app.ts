@@ -29,6 +29,7 @@ import layoutsRoutes from './routes/layouts.js'
 import serialPlugin, { type DeviceStatusSummary } from './plugins/serial.js'
 import powerMeterPlugin from './plugins/powerMeter.js'
 import serialPrinterPlugin from './plugins/serialPrinter.js'
+import atlonaControllerPlugin from './plugins/atlonaController.js' // 🔹 NEW
 
 declare module 'fastify' {
     interface FastifyInstance {
@@ -90,6 +91,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     // WebSocket + layouts routes
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
+
+    // 🔹 Atlona controller plugin (creates app.atlonaController and state fanout)
+    void app.register(atlonaControllerPlugin)
 
     // Serial discovery plugin
     void app.register(serialPlugin, {
