@@ -1,5 +1,3 @@
-// services/orchestrator/src/core/devices/serial-power-meter/SerialPowerMeterService.ts
-
 /* eslint-disable no-console */
 
 import { SerialPort } from 'serialport'
@@ -62,9 +60,48 @@ export class SerialPowerMeterService {
     /** Multiple concurrent recorders (benchmark, UI, other spans). */
     private recorders = new Map<string, RecorderInstance>()
 
+    /**
+     * Guardrails for unparseable data:
+     *
+     * - We treat repeated invalid frames as a sign that the device is unhealthy
+     *   (or the link is corrupted), even if bytes are still flowing.
+     * - After a threshold of consecutive failures, we behave as if the device
+     *   were disconnected and let normal reconnect logic take over.
+     *
+     * These are intentionally conservative defaults and can be tuned via env:
+     *   - SERIAL_PM_MAX_PARSE_FAILURES
+     *   - SERIAL_PM_PARSE_FAILURE_WINDOW_MS
+     */
+    private consecutiveParseFailures = 0
+    private readonly maxConsecutiveParseFailures: number
+    private readonly parseFailureWindowMs: number
+
     constructor(config: PowerMeterConfig, deps: SerialPowerMeterServiceDeps) {
         this.config = config
         this.deps = deps
+
+        const intervalSec = this.config.samplingIntervalSec ?? 1
+
+        // ---- Max consecutive failures (env override with sane default) ----
+        const maxFailRaw = process.env.SERIAL_PM_MAX_PARSE_FAILURES
+        const maxFailNum = maxFailRaw !== undefined ? Number(maxFailRaw) : NaN
+        this.maxConsecutiveParseFailures =
+            Number.isFinite(maxFailNum) && maxFailNum > 0
+                ? maxFailNum
+                : 10
+
+        // ---- Failure window ms (env override with heuristic fallback) -----
+        const windowRaw = process.env.SERIAL_PM_PARSE_FAILURE_WINDOW_MS
+        const windowNum = windowRaw !== undefined ? Number(windowRaw) : NaN
+
+        if (Number.isFinite(windowNum) && windowNum > 0) {
+            this.parseFailureWindowMs = windowNum
+        } else {
+            // Heuristic: ~2x the time it would take to see
+            // maxConsecutiveParseFailures samples, clamped to [10s, 60s].
+            const heuristic = intervalSec * 1000 * this.maxConsecutiveParseFailures * 2
+            this.parseFailureWindowMs = Math.max(10_000, Math.min(60_000, heuristic))
+        }
     }
 
     /* ---------------------------------------------------------------------- */
@@ -84,6 +121,7 @@ export class SerialPowerMeterService {
         this.state = { phase: 'disconnected' }
         this.deviceId = null
         this.devicePath = null
+        this.consecutiveParseFailures = 0
     }
 
     /** Current high-level state. */
@@ -169,6 +207,7 @@ export class SerialPowerMeterService {
         await this.closePort('device-lost')
 
         this.state = { phase: 'disconnected' }
+        this.consecutiveParseFailures = 0
 
         this.deps.events.publish({
             kind: 'meter-device-lost',
@@ -260,6 +299,7 @@ export class SerialPowerMeterService {
         const baudRate = this.deviceBaudRate
 
         this.state = { phase: 'connecting' }
+        this.consecutiveParseFailures = 0
 
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
@@ -443,19 +483,53 @@ export class SerialPowerMeterService {
     }
 
     private handleDataFrame(line: string): void {
+        const now = Date.now()
         const sample = parseWattsUpFrame(line)
+
         if (!sample) {
+            this.consecutiveParseFailures += 1
+
+            // Strongly worded message so it stands out in logs
+            this.stats.lastErrorAt = now
             this.deps.events.publish({
                 kind: 'recoverable-error',
-                at: Date.now(),
-                error: 'Failed to parse WattsUp data frame',
+                at: now,
+                error: `Failed to parse WattsUp data frame (consecutiveFailures=${this.consecutiveParseFailures})`,
             })
+
+            // If we've gone too long without a good sample, or the consecutive
+            // failures are excessive, treat this as an effective disconnect and
+            // let normal reconnect logic handle it.
+            const lastSampleAt = this.stats.lastSampleAt
+            const tooLongSinceGoodSample =
+                lastSampleAt != null && now - lastSampleAt > this.parseFailureWindowMs
+
+            if (
+                this.consecutiveParseFailures >= this.maxConsecutiveParseFailures ||
+                tooLongSinceGoodSample
+            ) {
+                this.deps.events.publish({
+                    kind: 'recoverable-error',
+                    at: now,
+                    error: 'Too many invalid WattsUp frames; treating meter as disconnected',
+                })
+
+                // This will emit another recoverable-error + meter-device-disconnected
+                // and schedule reconnect if enabled.
+                void this.handlePortError(
+                    new Error('Too many invalid WattsUp data frames (soft disconnect)')
+                )
+            }
+
             return
         }
 
-        const now = Date.now()
+        // ✅ Good sample: reset failure counter.
+        this.consecutiveParseFailures = 0
+
+        const nowSample = now
         this.stats.totalSamples += 1
-        this.stats.lastSampleAt = now
+        this.stats.lastSampleAt = nowSample
 
         // Maintain bounded recent sample buffer
         this.recentSamples.push(sample)
@@ -470,7 +544,7 @@ export class SerialPowerMeterService {
 
         this.deps.events.publish({
             kind: 'meter-sample',
-            at: now,
+            at: nowSample,
             sample,
         })
     }
@@ -490,6 +564,7 @@ export class SerialPowerMeterService {
 
         await this.closePort('io-error')
         this.state = { phase: 'disconnected' }
+        this.consecutiveParseFailures = 0
 
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
@@ -518,6 +593,7 @@ export class SerialPowerMeterService {
 
         await this.closePort('io-error')
         this.state = { phase: 'disconnected' }
+        this.consecutiveParseFailures = 0
 
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()

@@ -1,5 +1,3 @@
-// services/orchestrator/src/adapters/powerMeter.adapter.ts
-
 import {
     getSnapshot,
     updatePowerMeterSnapshot,
