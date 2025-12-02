@@ -61,6 +61,14 @@ export class SerialPrinterService {
     private currentJobId: number | null = null
     private currentJobStartedAt: number | null = null
 
+    /**
+     * Per-job diagnostics to help understand corruption / truncation:
+     * - bytesReceived snapshot at job start
+     * - how many chunks we saw for the job
+     */
+    private currentJobBytesReceivedAtStart: number | null = null
+    private currentJobChunkCount = 0
+
     constructor(config: SerialPrinterConfig, deps: SerialPrinterServiceDeps) {
         this.config = config
         this.deps = deps
@@ -88,6 +96,8 @@ export class SerialPrinterService {
         this.devicePath = null
         this.currentJobId = null
         this.currentJobStartedAt = null
+        this.currentJobBytesReceivedAtStart = null
+        this.currentJobChunkCount = 0
     }
 
     /** Current state for observability. */
@@ -186,6 +196,8 @@ export class SerialPrinterService {
         this.devicePath = null
         this.currentJobId = null
         this.currentJobStartedAt = null
+        this.currentJobBytesReceivedAtStart = null
+        this.currentJobChunkCount = 0
     }
 
     /* ---------------------------------------------------------------------- */
@@ -313,6 +325,7 @@ export class SerialPrinterService {
         }
 
         const now = Date.now()
+        const size = chunk.length
 
         // First byte for a new job: allocate id + mark start, emit job-started.
         // IMPORTANT: treat both 'idle' and 'queued' as "ready for a new job"
@@ -324,6 +337,8 @@ export class SerialPrinterService {
             this.state = 'receiving'
             this.currentJobId = jobId
             this.currentJobStartedAt = now
+            this.currentJobBytesReceivedAtStart = this.stats.bytesReceived
+            this.currentJobChunkCount = 0
 
             this.deps.events.publish({
                 kind: 'job-started',
@@ -338,6 +353,8 @@ export class SerialPrinterService {
             const jobId = this.nextJobId++
             this.currentJobId = jobId
             this.currentJobStartedAt = now
+            this.currentJobBytesReceivedAtStart = this.stats.bytesReceived
+            this.currentJobChunkCount = 0
 
             this.deps.events.publish({
                 kind: 'job-started',
@@ -348,8 +365,10 @@ export class SerialPrinterService {
         }
 
         this.buffer += chunk
-        const size = chunk.length
         this.stats.bytesReceived += size
+        if (this.state === 'receiving' && size > 0) {
+            this.currentJobChunkCount += 1
+        }
 
         // Emit streaming chunk for live UI.
         if (this.currentJobId != null && size > 0) {
@@ -390,6 +409,8 @@ export class SerialPrinterService {
                 this.state = 'idle'
                 this.currentJobId = null
                 this.currentJobStartedAt = null
+                this.currentJobBytesReceivedAtStart = null
+                this.currentJobChunkCount = 0
             }
             return
         }
@@ -400,10 +421,14 @@ export class SerialPrinterService {
         const jobId = this.currentJobId ?? this.nextJobId++
         const createdAt = this.currentJobStartedAt ?? now
 
+        const bufferLenBeforeNormalize = this.buffer.length
+
         const rawNormalized =
             this.config.lineEnding === '\n'
                 ? this.buffer
                 : this.buffer.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n')
+
+        const rawLen = rawNormalized.length
 
         const preview = buildPreview(rawNormalized, DEFAULT_PREVIEW_CHARS)
 
@@ -415,16 +440,38 @@ export class SerialPrinterService {
             preview,
         }
 
-        // Optional debug (commented out by default):
-        console.log('================= SERIAL PRINTER JOB RAW START =================')
-        console.log(`Job ID: ${jobId}`)
-        console.log(`Raw length (chars): ${job.raw.length}`)
-        console.log(job.raw)
-        console.log('================== SERIAL PRINTER JOB RAW END ==================')
+        // --- DEBUG DIAGNOSTICS (safe to leave in while we track corruption) ---
+        const bytesStart = this.currentJobBytesReceivedAtStart ?? this.stats.bytesReceived
+        const bytesForJob = this.stats.bytesReceived - bytesStart
+        const durationMs = now - createdAt
+        const platform = process.platform
+        const idleFlushMs = this.config.idleFlushMs ?? 0
+
+        // This gives you one concise line per job to compare between macOS/Linux
+        // and between "good" and "bad" runs, without dumping full text.
+        // Example pattern to grep for:
+        //   SERIAL PRINTER JOB DEBUG
+        console.log(
+            [
+                'SERIAL PRINTER JOB DEBUG',
+                `jobId=${jobId}`,
+                `platform=${platform}`,
+                `idleFlushMs=${idleFlushMs}`,
+                `durationMs=${durationMs}`,
+                `chunks=${this.currentJobChunkCount}`,
+                `bufferLen=${bufferLenBeforeNormalize}`,
+                `rawLen=${rawLen}`,
+                `bytesForJob=${bytesForJob}`,
+                `bytesTotal=${this.stats.bytesReceived}`,
+            ].join(' ')
+        )
+        // ----------------------------------------------------------------------
 
         this.buffer = ''
         this.currentJobId = null
         this.currentJobStartedAt = null
+        this.currentJobBytesReceivedAtStart = null
+        this.currentJobChunkCount = 0
 
         // Enqueue with bounded capacity
         this.queue.push(job)
@@ -467,6 +514,8 @@ export class SerialPrinterService {
         this.state = 'disconnected'
         this.currentJobId = null
         this.currentJobStartedAt = null
+        this.currentJobBytesReceivedAtStart = null
+        this.currentJobChunkCount = 0
         this.buffer = ''
 
         if (this.config.reconnect.enabled) {
@@ -495,6 +544,8 @@ export class SerialPrinterService {
         this.state = 'disconnected'
         this.currentJobId = null
         this.currentJobStartedAt = null
+        this.currentJobBytesReceivedAtStart = null
+        this.currentJobChunkCount = 0
         this.buffer = ''
 
         if (this.config.reconnect.enabled) {
