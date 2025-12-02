@@ -1,4 +1,8 @@
+// services/orchestrator/src/core/adapters/serial-printer/SerialPrinterService.ts
+
 import { SerialPort } from 'serialport'
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import {
     type SerialPrinterConfig,
     type SerialPrinterEventSink,
@@ -220,11 +224,6 @@ export class SerialPrinterService {
 
         const baudRate = this.deviceBaudRate || this.config.baudRate
 
-        // Flow control wiring based on config
-        const flowControl = this.config.flowControl ?? 'none'
-        const useSoftwareFlow = flowControl === 'software'
-        const useHardwareFlow = flowControl === 'hardware'
-
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
                 path,
@@ -233,21 +232,12 @@ export class SerialPrinterService {
                 dataBits: 8,
                 parity: 'none',
                 stopBits: 1,
-                /**
-                 * Flow control:
-                 *  - software: XON/XOFF (xon/xoff=true, rtscts=false)
-                 *  - hardware: RTS/CTS (rtscts=true, xon/xoff=false)
-                 *  - none:     all disabled
-                 *
-                 * IMPORTANT:
-                 * Win98 printer COM ports are often configured with XON/XOFF.
-                 * If we don't mirror that here on Linux, long jobs can silently
-                 * drop bytes when buffers overflow, which looks exactly like
-                 * your "missing middle pages" symptom.
-                 */
-                xon: useSoftwareFlow,
-                xoff: useSoftwareFlow,
-                rtscts: useHardwareFlow,
+                // ❌ Do NOT enable software flow control unless both sides agree.
+                // Win98 COM ports for printers are typically configured with no
+                // XON/XOFF. Enabling it here can cause data bytes to be treated
+                // as flow-control and dropped by the stack/driver.
+                xon: false,
+                xoff: false,
             })
 
             const onOpen = () => {
@@ -452,13 +442,43 @@ export class SerialPrinterService {
             preview,
         }
 
+        /* ------------------------------------------------------------------ */
+        /*  DEBUG: dump full job to disk for offline inspection               */
+        /* ------------------------------------------------------------------ */
+        try {
+            const dumpDir = process.env.SERIAL_PRINTER_DEBUG_DUMP_DIR || '/tmp'
+            mkdirSync(dumpDir, { recursive: true })
+            const dumpPath = join(dumpDir, `serial-printer-job-${jobId}.txt`)
+
+            // Use latin1 to preserve 0x00–0xFF one-to-one.
+            writeFileSync(dumpPath, job.raw, { encoding: 'latin1' })
+
+            console.log(
+                [
+                    'SERIAL PRINTER JOB DUMP',
+                    `jobId=${jobId}`,
+                    `path=${dumpPath}`,
+                    `sizeChars=${job.raw.length}`,
+                ].join(' ')
+            )
+        } catch (err) {
+            console.warn(
+                'SERIAL PRINTER JOB DUMP FAILED',
+                (err as Error).message
+            )
+        }
+        /* ------------------------------------------------------------------ */
+
         // --- DEBUG DIAGNOSTICS (safe to leave in while we track corruption) ---
-        const bytesStart = this.currentJobBytesReceivedAtStart ?? this.stats.bytesReceived
+        const bytesStart =
+            this.currentJobBytesReceivedAtStart ?? this.stats.bytesReceived
         const bytesForJob = this.stats.bytesReceived - bytesStart
         const durationMs = now - createdAt
         const platform = process.platform
+        const flowControl = this.config.reconnect
+            ? 'software'
+            : 'none' // crude label; real HW/SW mix is at OS/driver level
         const idleFlushMs = this.config.idleFlushMs ?? 0
-        const flowControl = this.config.flowControl ?? 'none'
 
         console.log(
             [
