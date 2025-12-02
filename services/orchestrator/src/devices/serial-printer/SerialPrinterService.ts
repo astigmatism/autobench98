@@ -222,9 +222,10 @@ export class SerialPrinterService {
 
         const baudRate = this.deviceBaudRate || this.config.baudRate
 
-        // Flow control → low-level flags
-        const useSoftwareFlow = this.config.flowControl === 'software'
-        const useHardwareFlow = this.config.flowControl === 'hardware'
+        // Map our abstract flowControl config to serialport options
+        const flowControl = this.config.flowControl ?? 'software'
+        const useXonXoff = flowControl === 'software'
+        const useRtsCts = flowControl === 'hardware'
 
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
@@ -234,21 +235,13 @@ export class SerialPrinterService {
                 dataBits: 8,
                 parity: 'none',
                 stopBits: 1,
-                /**
-                 * Flow control mapping:
-                 *
-                 * - 'none'     → all false
-                 * - 'software' → xon/xoff true (Win98 default)
-                 * - 'hardware' → rtscts true
-                 *
-                 * We never mix both at once. This keeps Linux/macOS behavior
-                 * aligned with what the Win98 COM port is actually configured
-                 * to use.
-                 */
-                xon: useSoftwareFlow,
-                xoff: useSoftwareFlow,
-                xany: false,
-                rtscts: useHardwareFlow,
+                // Flow control:
+                //  - Win98 COM properties are typically set to XON/XOFF for printers.
+                //  - Matching here avoids the driver treating XON/XOFF bytes
+                //    as magic and silently dropping them in the TTY layer.
+                xon: useXonXoff,
+                xoff: useXonXoff,
+                rtscts: useRtsCts,
             })
 
             const onOpen = () => {
@@ -439,7 +432,7 @@ export class SerialPrinterService {
         const rawNormalized =
             this.config.lineEnding === '\n'
                 ? this.buffer
-                : this.buffer.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n')
+                : this.buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n')
 
         const rawLen = rawNormalized.length
 
@@ -459,13 +452,14 @@ export class SerialPrinterService {
         const durationMs = now - createdAt
         const platform = process.platform
         const idleFlushMs = this.config.idleFlushMs ?? 0
+        const flowControl = this.config.flowControl ?? 'software'
 
         console.log(
             [
                 'SERIAL PRINTER JOB DEBUG',
                 `jobId=${jobId}`,
                 `platform=${platform}`,
-                `flowControl=${this.config.flowControl}`,
+                `flowControl=${flowControl}`,
                 `idleFlushMs=${idleFlushMs}`,
                 `durationMs=${durationMs}`,
                 `chunks=${this.currentJobChunkCount}`,

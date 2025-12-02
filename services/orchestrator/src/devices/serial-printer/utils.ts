@@ -63,17 +63,11 @@ function resolveLineEndingEnv(): '\n' | '\r\n' {
 
 function resolveFlowControlEnv(): SerialPrinterFlowControl {
     const raw = readStringEnv('SERIAL_PRINTER_FLOW_CONTROL')
-    if (!raw) {
-        // Win98 default expectation: XON/XOFF enabled.
-        return 'software'
-    }
-
+    if (!raw) return 'software'
     const v = raw.trim().toLowerCase()
     if (v === 'none') return 'none'
-    if (v === 'hardware' || v === 'rtscts') return 'hardware'
-    if (v === 'software' || v === 'xonxoff' || v === 'xon/xoff') return 'software'
-
-    // Fallback: be explicit and safe.
+    if (v === 'hardware') return 'hardware'
+    // default / unknown => software (XON/XOFF)
     return 'software'
 }
 
