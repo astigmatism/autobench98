@@ -573,6 +573,23 @@ export class SerialPowerMeterService {
         // ✅ Good sample: reset failure counter.
         this.consecutiveParseFailures = 0
 
+        // --- TEMPORARY DEBUG LOG FOR WATTS / VOLTS / AMPS ---
+        try {
+            // Adjust these property names if your PowerSample uses different ones.
+            // This will safely no-op if sample has extra fields.
+            const debugWatts = (sample as any).watts
+            const debugVolts = (sample as any).volts
+            const debugAmps = (sample as any).amps
+
+            console.log(
+                '[powermeter:debug] sample parsed →',
+                `watts=${debugWatts}  volts=${debugVolts}  amps=${debugAmps}`
+            )
+        } catch (err) {
+            console.log('[powermeter:debug] failed to inspect PowerSample', err)
+        }
+        // ------------------------------------------------------
+
         const nowSample = now
         this.stats.totalSamples += 1
         this.stats.lastSampleAt = nowSample
