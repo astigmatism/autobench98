@@ -61,11 +61,33 @@ export class SerialPrinterService {
     private currentJobId: number | null = null
     private currentJobStartedAt: number | null = null
 
+    /**
+     * Effective idle flush used for job segmentation.
+     *
+     * - Base value comes from config.idleFlushMs.
+     * - On Linux we enforce a slightly larger minimum to accommodate
+     *   more bursty / buffered delivery from the USB–serial stack,
+     *   which can otherwise cause a single print to be split into
+     *   multiple jobs compared to macOS.
+     */
+    private readonly effectiveIdleFlushMs: number
+
     constructor(config: SerialPrinterConfig, deps: SerialPrinterServiceDeps) {
         this.config = config
         this.deps = deps
         // Use config baud as default; discovery may override per-device
         this.deviceBaudRate = config.baudRate
+
+        const baseIdle = this.config.idleFlushMs ?? 1000
+        if (process.platform === 'linux') {
+            // Linux drivers tend to batch/flush in larger bursts, so give
+            // them a bit more slack to keep a single Win98 print as one job.
+            // If you really want a smaller value on Linux, you can still
+            // raise idleFlushMs in config above this floor.
+            this.effectiveIdleFlushMs = Math.max(baseIdle, 4000)
+        } else {
+            this.effectiveIdleFlushMs = baseIdle
+        }
     }
 
     /* ---------------------------------------------------------------------- */
@@ -368,11 +390,11 @@ export class SerialPrinterService {
 
     private scheduleIdleFlush(): void {
         this.clearIdleTimer()
-        if (!this.config.idleFlushMs || this.config.idleFlushMs <= 0) return
+        if (!this.effectiveIdleFlushMs || this.effectiveIdleFlushMs <= 0) return
 
         this.idleTimer = setTimeout(() => {
             this.finalizeJob()
-        }, this.config.idleFlushMs)
+        }, this.effectiveIdleFlushMs)
     }
 
     private clearIdleTimer(): void {
