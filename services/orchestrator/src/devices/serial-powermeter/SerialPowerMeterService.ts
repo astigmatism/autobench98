@@ -149,10 +149,6 @@ export class SerialPowerMeterService {
     /*  Discovery-driven lifecycle                                            */
     /* ---------------------------------------------------------------------- */
 
-    /**
-     * Called by orchestrator / discovery layer when a compatible power meter
-     * is identified.
-     */
     public async onDeviceIdentified(args: {
         id: string
         path: string
@@ -162,7 +158,6 @@ export class SerialPowerMeterService {
 
         // On macOS, SerialPort.list() typically returns /dev/tty.*,
         // but the recommended node for outgoing serial use is /dev/cu.*.
-        // To mimic the working MJS probe, we translate tty → cu here.
         let effectivePath = args.path
         if (effectivePath.startsWith('/dev/tty.')) {
             const cuPath = '/dev/cu.' + effectivePath.slice('/dev/tty.'.length)
@@ -180,7 +175,6 @@ export class SerialPowerMeterService {
             baudRate: this.deviceBaudRate,
         })
 
-        // If we are already connected to this exact path, do nothing.
         if (
             this.port &&
             this.port.isOpen &&
@@ -193,15 +187,8 @@ export class SerialPowerMeterService {
         await this.openPort()
     }
 
-    /**
-     * Called by orchestrator / discovery layer when a previously identified
-     * power meter is lost (USB unplug, etc.).
-     */
     public async onDeviceLost(args: { id: string }): Promise<void> {
-        if (this.deviceId !== args.id) {
-            // Not our current device; ignore.
-            return
-        }
+        if (this.deviceId !== args.id) return
 
         this.clearReconnectTimer()
         await this.closePort('device-lost')
@@ -220,14 +207,8 @@ export class SerialPowerMeterService {
     /*  Recording API                                                         */
     /* ---------------------------------------------------------------------- */
 
-    /**
-     * Begin a new recording keyed by recorderId.
-     * This is intentionally generic: benchmark runs, UI sessions, or
-     * any future windowed spans can all be recorders.
-     */
     public beginRecording(recorderId: string, options?: PowerRecorderOptions): void {
         if (this.recorders.has(recorderId)) {
-            // Idempotent-ish; we could also choose to throw here.
             return
         }
 
@@ -243,10 +224,6 @@ export class SerialPowerMeterService {
         })
     }
 
-    /**
-     * End an existing recording and return its summary.
-     * Returns null if no such recorder existed.
-     */
     public endRecording(recorderId: string): PowerRecordingSummary | null {
         const inst = this.recorders.get(recorderId)
         if (!inst) return null
@@ -266,7 +243,6 @@ export class SerialPowerMeterService {
         return summary
     }
 
-    /** Cancel a recording without generating a summary. */
     public cancelRecording(recorderId: string, reason: string): void {
         const inst = this.recorders.get(recorderId)
         if (!inst) return
@@ -322,7 +298,6 @@ export class SerialPowerMeterService {
                     baudRate,
                 })
 
-                // Attach data/error/close handlers only after successful open
                 port.on('data', (chunk: Buffer) => {
                     this.handleData(chunk.toString('ascii'))
                 })
@@ -331,7 +306,6 @@ export class SerialPowerMeterService {
                     void this.handlePortError(err)
                 })
 
-                // Observe port close events (e.g., USB unplug)
                 port.on('close', () => {
                     void this.handlePortClose()
                 })
@@ -373,12 +347,11 @@ export class SerialPowerMeterService {
         const hadPort = !!port
 
         if (port && port.isOpen) {
-            // Try to send stop-logging command on graceful paths
             if (reason === 'explicit-close' || reason === 'unknown') {
                 try {
                     await this.writeCommand('#L,W,0;')
                 } catch {
-                    // Non-fatal; we are closing anyway.
+                    // ignore
                 }
             }
 
@@ -387,11 +360,8 @@ export class SerialPowerMeterService {
             })
         }
 
-        // At this point the port is definitely not open.
         this.state = { phase: 'disconnected' }
 
-        // Always emit a disconnect event if we previously had a port,
-        // regardless of whether the OS closed it first.
         if (hadPort) {
             this.deps.events.publish({
                 kind: 'meter-device-disconnected',
@@ -403,24 +373,20 @@ export class SerialPowerMeterService {
     }
 
     private async initializeWattsUpDevice(): Promise<void> {
-        // Align with the reference Python implementation:
         // 1) Version query
-        // 2) Set INTERNAL mode ("I") with configured interval
-        // 3) Set output handling (default FULLHANDLING = 2)
-        //
-        // We keep small sleeps between commands to avoid overrunning the device.
+        // 2) Set EXTERNAL (E) logging mode with configured interval (stream frames to host)
+        // 3) Set output handling (FULLHANDLING = 2 by default)
         await this.writeCommand('#V,3;')
         await this.sleep(200)
 
         const intervalSec = this.config.samplingIntervalSec ?? 1
 
-        // Python example: #L,W,3,I,,<interval>;
-        const internalModeChar = 'I'
-        const modeCmd = `#L,W,3,${internalModeChar},,${intervalSec};`
+        // IMPORTANT: use "E" (external streaming) so the meter actually sends #d frames.
+        const externalModeChar = 'E'
+        const modeCmd = `#L,W,3,${externalModeChar},,${intervalSec};`
         await this.writeCommand(modeCmd)
         await this.sleep(200)
 
-        // Python example uses FULLHANDLING = 2
         const fullHandling = this.config.fullHandling ?? 2
         const outCmd = `#O,W,1,${fullHandling};`
         await this.writeCommand(outCmd)
@@ -435,11 +401,8 @@ export class SerialPowerMeterService {
 
         await new Promise<void>((resolve, reject) => {
             port.write(wire, (err) => {
-                if (err) {
-                    reject(err)
-                } else {
-                    resolve()
-                }
+                if (err) reject(err)
+                else resolve()
             })
         })
     }
@@ -469,7 +432,6 @@ export class SerialPowerMeterService {
             if (!trimmed) continue
 
             if (trimmed.startsWith('#d')) {
-                // TEMP: log whenever we see a raw #d frame
                 console.log('[powermeter:debug] raw data frame:', trimmed)
                 this.handleDataFrame(trimmed)
             } else if (trimmed.startsWith('#')) {
@@ -479,13 +441,12 @@ export class SerialPowerMeterService {
                     line: trimmed,
                 })
             } else {
-                // Attempt to detect and recover "headerless" WattsUp data frames.
                 const csvParts = trimmed.split(',')
                 const enoughFields = csvParts.length >= 5
 
                 const looksNumericOrPlaceholder = csvParts.every(part => {
                     const withoutTerminator = part.replace(/;$/, '')
-                    if (!withoutTerminator) return true // allow empty
+                    if (!withoutTerminator) return true
                     if (withoutTerminator === '_' || withoutTerminator === '-') return true
                     return /^-?\d+(\.\d+)?$/.test(withoutTerminator)
                 })
@@ -493,20 +454,17 @@ export class SerialPowerMeterService {
                 if (enoughFields && looksNumericOrPlaceholder && trimmed.endsWith(';')) {
                     const synthetic = `#d,${trimmed}`
 
-                    // TEMP: log when we attempt headerless recovery
                     console.log('[powermeter:debug] headerless candidate:', trimmed)
                     console.log('[powermeter:debug] synthetic frame:', synthetic)
 
                     try {
                         this.handleDataFrame(synthetic)
-                        // Treat as successfully handled data; no unknown-line noise.
                         continue
                     } catch (err) {
                         console.log(
                             '[powermeter:debug] handleDataFrame threw on synthetic frame:',
                             (err as Error)?.message ?? err
                         )
-                        // Fall through to unknown-line handling below.
                     }
                 }
 
@@ -534,7 +492,6 @@ export class SerialPowerMeterService {
         if (!sample) {
             this.consecutiveParseFailures += 1
 
-            // Strongly worded message so it stands out in logs
             this.stats.lastErrorAt = now
             this.deps.events.publish({
                 kind: 'recoverable-error',
@@ -542,9 +499,6 @@ export class SerialPowerMeterService {
                 error: `Failed to parse WattsUp data frame (consecutiveFailures=${this.consecutiveParseFailures})`,
             })
 
-            // If we've gone too long without a good sample, or the consecutive
-            // failures are excessive, treat this as an effective disconnect and
-            // let normal reconnect logic take over.
             const lastSampleAt = this.stats.lastSampleAt
             const tooLongSinceGoodSample =
                 lastSampleAt != null && now - lastSampleAt > this.parseFailureWindowMs
@@ -559,8 +513,6 @@ export class SerialPowerMeterService {
                     error: 'Too many invalid WattsUp frames; treating meter as disconnected',
                 })
 
-                // This will emit another recoverable-error + meter-device-disconnected
-                // and schedule reconnect if enabled.
                 void this.handlePortError(
                     new Error('Too many invalid WattsUp data frames (soft disconnect)')
                 )
@@ -569,37 +521,31 @@ export class SerialPowerMeterService {
             return
         }
 
-        // ✅ Good sample: reset failure counter.
         this.consecutiveParseFailures = 0
 
-        // --- TEMPORARY DEBUG LOG FOR WATTS / VOLTS / AMPS ---
+        // TEMP debug for watts / volts / amps
         try {
-            // Adjust these property names if your PowerSample uses different ones.
-            // This will safely no-op if sample has extra fields.
             const debugWatts = (sample as any).watts
             const debugVolts = (sample as any).volts
             const debugAmps = (sample as any).amps
 
             console.log(
                 '[powermeter:debug] sample parsed →',
-                `watts=${debugWatts}  volts=${debugVolts}  amps=${debugAmps}`
+                `watts=${debugWatts} volts=${debugVolts} amps=${debugAmps}`
             )
         } catch (err) {
             console.log('[powermeter:debug] failed to inspect PowerSample', err)
         }
-        // ------------------------------------------------------
 
         const nowSample = now
         this.stats.totalSamples += 1
         this.stats.lastSampleAt = nowSample
 
-        // Maintain bounded recent sample buffer
         this.recentSamples.push(sample)
         if (this.recentSamples.length > this.config.maxRecentSamples) {
             this.recentSamples.splice(0, this.recentSamples.length - this.config.maxRecentSamples)
         }
 
-        // Feed all active recorders
         for (const inst of this.recorders.values()) {
             inst.addSample(sample)
         }
@@ -640,9 +586,7 @@ export class SerialPowerMeterService {
         }
     }
 
-    // Handle the port closing (e.g., device unplug) even if there was no explicit error
     private async handlePortClose(): Promise<void> {
-        // Avoid double-handling if we already marked an error / disconnect
         if (this.state.phase === 'disconnected' || this.state.phase === 'error') return
 
         this.stats.lastErrorAt = Date.now()
@@ -690,14 +634,6 @@ export class SerialPowerMeterService {
         }
     }
 
-    /**
-     * Schedule a reconnect attempt with exponential backoff.
-     *
-     * NOTE: When reconnect.enabled === true, retries are effectively infinite
-     * for the lifetime of the process. maxAttempts is ignored for exhaustion
-     * purposes and only used indirectly to shape logging / expectations if
-     * you want, but we never transition to a "reconnect exhausted" fatal state.
-     */
     private scheduleReconnect(): void {
         this.clearReconnectTimer()
 
@@ -726,14 +662,10 @@ export class SerialPowerMeterService {
         try {
             await this.openPort()
         } catch {
-            // openPort already published errors and may schedule further reconnect attempts.
+            // already logged
         }
     }
 
-    /**
-     * Exponential backoff:
-     *   delay = baseDelayMs * 2^(attempt - 1), clamped between baseDelayMs and maxDelayMs.
-     */
     private computeReconnectDelay(
         baseDelayMs: number,
         maxDelayMs: number,
@@ -750,10 +682,6 @@ export class SerialPowerMeterService {
 
         return candidate
     }
-
-    /* ---------------------------------------------------------------------- */
-    /*  Small helpers                                                         */
-    /* ---------------------------------------------------------------------- */
 
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms))
