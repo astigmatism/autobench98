@@ -125,6 +125,27 @@ export class SerialPrinterStateAdapter {
                     preview: job.preview,
                 }
 
+                // --- DEBUG: log lengths as seen by the adapter -----------------
+                try {
+                    const currentTextLen = prev.currentJob?.text.length ?? 0
+                    const lastJobFullLen = prev.lastJobFullText?.length ?? 0
+                    // eslint-disable-next-line no-console
+                    console.log(
+                        [
+                            'SERIAL PRINTER STATE JOB DEBUG',
+                            `jobId=${job.id}`,
+                            `evtRawLen=${job.raw.length}`,
+                            `previewLen=${job.preview.length}`,
+                            `currentJobTextLen=${currentTextLen}`,
+                            `prevLastJobFullTextLen=${lastJobFullLen}`,
+                            `historyEntries=${prev.history.length}`,
+                        ].join(' ')
+                    )
+                } catch {
+                    // Avoid ever throwing from debug logging
+                }
+                // ----------------------------------------------------------------
+
                 // Maintain lightweight recentJobs for quick summaries
                 const recentJobs = [...prev.recentJobs, summary]
                 const maxRecentJobs = prev.maxRecentJobs

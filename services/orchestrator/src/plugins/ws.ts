@@ -124,6 +124,42 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
     const sockets = new Set<WSSocket>()
 
+    // --- DEBUG ROUTE: inspect last serial-printer job on the server ----------
+    app.get('/debug/serial-printer/last-job', async (_req, reply) => {
+        try {
+            const snap = getSnapshot()
+            const sp = snap.serialPrinter
+
+            const lastJobId = sp.lastJob?.id ?? null
+            const lastJobPreviewLen = sp.lastJob?.preview.length ?? 0
+            const lastJobFullLen = sp.lastJobFullText?.length ?? 0
+
+            const historySummary = sp.history.map(h => ({
+                id: h.id,
+                createdAt: h.createdAt,
+                completedAt: h.completedAt,
+                textLen: h.text.length
+            }))
+
+            const payload = {
+                lastJobId,
+                lastJobPreviewLen,
+                lastJobFullLen,
+                historyCount: sp.history.length,
+                history: historySummary,
+                stats: sp.stats
+            }
+
+            return reply.send(payload)
+        } catch (e) {
+            logWs.warn('debug serial-printer route failed', {
+                err: (e as Error).message
+            })
+            return reply.status(500).send({ error: 'debug route failed' })
+        }
+    })
+    // ------------------------------------------------------------------------
+
     // Live logs -> filter/transform -> broadcast
     const unsubscribeLogs = onLogSubscribe((entry: ClientLog) => {
         const filtered = filterAndTransform([entry])
