@@ -1,3 +1,5 @@
+// services/orchestrator/src/core/devices/serial-printer/types.ts
+
 export type SerialPrinterState =
     | 'idle'          // Port open, no active job
     | 'receiving'     // Currently accumulating bytes for a job
@@ -30,20 +32,6 @@ export interface SerialPrinterReconnectPolicy {
     maxDelayMs: number
 }
 
-/**
- * Flow control configuration for the serial printer capture.
- *
- * - 'none'     → No flow control (xon/xoff=false, rtscts=false)
- * - 'software' → XON/XOFF (xon/xoff=true, rtscts=false)
- * - 'hardware' → RTS/CTS (xon/xoff=false, rtscts=true)
- *
- * NOTE: Windows 98 printer ports are very commonly configured with
- * XON/XOFF software flow control. When running on Linux, you must
- * mirror that here or the Win98 side can overrun buffers and drop
- * bytes, leading to truncated print jobs.
- */
-export type SerialPrinterFlowControl = 'none' | 'software' | 'hardware'
-
 export interface SerialPrinterConfig {
     /** OS device path (e.g., /dev/ttyUSB0 or /dev/tty.usbserial-XXXX) */
     portPath: string
@@ -57,11 +45,6 @@ export interface SerialPrinterConfig {
     maxQueuedJobs: number
     /** Reconnection policy when the device disappears or open fails */
     reconnect: SerialPrinterReconnectPolicy
-    /**
-     * Flow control mode. Must match the Win98 COM port configuration
-     * (none / XON/XOFF / hardware) to avoid dropped bytes on long jobs.
-     */
-    flowControl: SerialPrinterFlowControl
 }
 
 export interface SerialPrinterStats {
