@@ -469,6 +469,8 @@ export class SerialPowerMeterService {
             if (!trimmed) continue
 
             if (trimmed.startsWith('#d')) {
+                // TEMP: log whenever we see a raw #d frame
+                console.log('[powermeter:debug] raw data frame:', trimmed)
                 this.handleDataFrame(trimmed)
             } else if (trimmed.startsWith('#')) {
                 this.deps.events.publish({
@@ -478,14 +480,6 @@ export class SerialPowerMeterService {
                 })
             } else {
                 // Attempt to detect and recover "headerless" WattsUp data frames.
-                //
-                // The device sometimes appears to output CSV bodies that look
-                // like valid #d payloads but without the leading "#d,".
-                // When a line:
-                //   - is comma-separated
-                //   - has at least a handful of fields
-                //   - each field is numeric / "_" / "-" (optionally ending with ';')
-                // we treat it as a candidate frame body and synthesize a #d header.
                 const csvParts = trimmed.split(',')
                 const enoughFields = csvParts.length >= 5
 
@@ -498,19 +492,24 @@ export class SerialPowerMeterService {
 
                 if (enoughFields && looksNumericOrPlaceholder && trimmed.endsWith(';')) {
                     const synthetic = `#d,${trimmed}`
+
+                    // TEMP: log when we attempt headerless recovery
+                    console.log('[powermeter:debug] headerless candidate:', trimmed)
+                    console.log('[powermeter:debug] synthetic frame:', synthetic)
+
                     try {
                         this.handleDataFrame(synthetic)
                         // Treat as successfully handled data; no unknown-line noise.
                         continue
-                    } catch {
+                    } catch (err) {
+                        console.log(
+                            '[powermeter:debug] handleDataFrame threw on synthetic frame:',
+                            (err as Error)?.message ?? err
+                        )
                         // Fall through to unknown-line handling below.
                     }
                 }
 
-                // Unknown/non-# line from the meter:
-                //  - Still emit the structured meter-unknown-line event
-                //  - Also emit a recoverable-error so downstream logging can
-                //    treat this as warning-level noise.
                 const now = Date.now()
 
                 this.deps.events.publish({
