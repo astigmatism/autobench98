@@ -71,11 +71,45 @@ export class SerialPrinterService {
     private currentJobBytesReceivedAtStart: number | null = null
     private currentJobChunkCount = 0
 
+    /**
+     * Verbose debug logging can be enabled with:
+     *   SERIAL_PRINTER_DEBUG=1
+     */
+    private readonly debugEnabled =
+        process.env.SERIAL_PRINTER_DEBUG === '1' ||
+        process.env.SERIAL_PRINTER_DEBUG === 'true'
+
     constructor(config: SerialPrinterConfig, deps: SerialPrinterServiceDeps) {
         this.config = config
         this.deps = deps
         // Use config baud as default; discovery may override per-device
         this.deviceBaudRate = config.baudRate
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Debug helpers                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    private debug(msg: string, meta: Record<string, unknown> = {}): void {
+        if (!this.debugEnabled) return
+
+        const safeMeta = {
+            state: this.state,
+            devicePath: this.devicePath,
+            baudRate: this.deviceBaudRate,
+            bufferLen: this.buffer.length,
+            currentJobId: this.currentJobId,
+            queueLen: this.queue.length,
+            bytesReceived: this.stats.bytesReceived,
+            ...meta,
+        }
+
+        // eslint-disable-next-line no-console
+        console.log(
+            '[SerialPrinterService DEBUG]',
+            msg,
+            JSON.stringify(safeMeta)
+        )
     }
 
     /* ---------------------------------------------------------------------- */
@@ -87,9 +121,11 @@ export class SerialPrinterService {
      */
     public async start(): Promise<void> {
         // No-op: we connect only when onDeviceIdentified is called.
+        this.debug('start() called (no-op)')
     }
 
     public async stop(): Promise<void> {
+        this.debug('stop() called; tearing down')
         this.clearIdleTimer()
         this.clearReconnectTimer()
         await this.closePort('explicit-close')
@@ -123,15 +159,26 @@ export class SerialPrinterService {
         const job = this.queue.shift()
         if (!job) return null
         if (this.queue.length === 0 && this.state === 'queued') {
+            this.debug('getNextJob(): queue empty, transitioning queued → idle', {
+                dequeuedJobId: job.id,
+            })
             this.state = 'idle'
+        } else {
+            this.debug('getNextJob(): dequeued job', {
+                dequeuedJobId: job.id,
+            })
         }
         return job
     }
 
     /** Clear all pending jobs (e.g., when resetting the bench run). */
     public clearQueue(): void {
+        this.debug('clearQueue() called', {
+            previousQueueLen: this.queue.length,
+        })
         this.queue = []
         if (this.state === 'queued') {
+            this.debug('clearQueue(): transitioning queued → idle')
             this.state = 'idle'
         }
     }
@@ -155,11 +202,21 @@ export class SerialPrinterService {
         path: string
         baudRate?: number
     }): Promise<void> {
+        this.debug('onDeviceIdentified() called', {
+            id: args.id,
+            path: args.path,
+            baudRate: args.baudRate ?? this.config.baudRate,
+        })
+
         this.deviceId = args.id
 
         let effectivePath = args.path
         if (effectivePath.startsWith('/dev/tty.')) {
             const cuPath = '/dev/cu.' + effectivePath.slice('/dev/tty.'.length)
+            this.debug('Translating macOS tty.* → cu.*', {
+                originalPath: effectivePath,
+                translatedPath: cuPath,
+            })
             effectivePath = cuPath
         }
 
@@ -174,6 +231,7 @@ export class SerialPrinterService {
             this.state !== 'disconnected' &&
             this.state !== 'error'
         ) {
+            this.debug('onDeviceIdentified(): already connected; ignoring')
             return
         }
 
@@ -185,8 +243,13 @@ export class SerialPrinterService {
      * printer is lost (USB unplug, etc.).
      */
     public async onDeviceLost(args: { id: string }): Promise<void> {
+        this.debug('onDeviceLost() called', { id: args.id })
+
         if (this.deviceId !== args.id) {
             // Not our current device; ignore.
+            this.debug('onDeviceLost(): deviceId mismatch; ignoring', {
+                currentDeviceId: this.deviceId,
+            })
             return
         }
 
@@ -200,6 +263,7 @@ export class SerialPrinterService {
         this.currentJobStartedAt = null
         this.currentJobBytesReceivedAtStart = null
         this.currentJobChunkCount = 0
+        this.debug('onDeviceLost(): state reset to disconnected')
     }
 
     /* ---------------------------------------------------------------------- */
@@ -219,10 +283,16 @@ export class SerialPrinterService {
                     'openPort called without devicePath (no discovery path and no configured portPath)',
             })
             this.state = 'disconnected'
+            this.debug('openPort(): no path available; staying disconnected')
             return
         }
 
         const baudRate = this.deviceBaudRate || this.config.baudRate
+
+        this.debug('openPort(): attempting to open port', {
+            path,
+            baudRate,
+        })
 
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
@@ -245,6 +315,11 @@ export class SerialPrinterService {
                 this.state = 'idle'
                 this.reconnectAttempts = 0
 
+                this.debug('openPort(): port opened successfully', {
+                    path,
+                    baudRate,
+                })
+
                 this.deps.events.publish({
                     kind: 'device-connected',
                     at: Date.now(),
@@ -253,6 +328,9 @@ export class SerialPrinterService {
 
                 // Attach data/error handlers only after successful open
                 port.on('data', (chunk: Buffer) => {
+                    this.debug('data event received from serial port', {
+                        chunkLength: chunk.length,
+                    })
                     // Preserve 8-bit values as-is; latin1 is a 1:1 mapping for
                     // bytes 0x00–0xFF into Unicode code points. This avoids the
                     // lossy behavior of 'ascii' and surprises of 'utf8' on
@@ -261,11 +339,13 @@ export class SerialPrinterService {
                 })
 
                 port.on('error', (err: Error) => {
+                    this.debug('SerialPort error event', { error: err.message })
                     void this.handlePortError(err)
                 })
 
                 // 🔌 Explicit handler for unexpected close (USB yank, etc.)
                 port.on('close', () => {
+                    this.debug('SerialPort close event received')
                     void this.handlePortClose()
                 })
 
@@ -275,6 +355,7 @@ export class SerialPrinterService {
             const onError = (err: Error) => {
                 port.off('open', onOpen)
                 port.off('error', onError)
+                this.debug('openPort(): error during open', { error: err.message })
                 this.handlePortOpenError(err)
                 reject(err)
             }
@@ -292,8 +373,15 @@ export class SerialPrinterService {
         const port = this.port
         this.port = null
 
+        this.debug('closePort() called', {
+            reason,
+            hadPort: !!port,
+            portIsOpen: port?.isOpen ?? false,
+        })
+
         if (!port || !port.isOpen) {
             this.state = 'disconnected'
+            this.debug('closePort(): no open port; state → disconnected')
             return
         }
 
@@ -302,6 +390,8 @@ export class SerialPrinterService {
         })
 
         this.state = 'disconnected'
+
+        this.debug('closePort(): port closed', { reason })
 
         this.deps.events.publish({
             kind: 'device-disconnected',
@@ -323,11 +413,21 @@ export class SerialPrinterService {
                 at: Date.now(),
                 error: 'Received data while in invalid state',
             })
+            this.debug('handleData(): data received in invalid state', {
+                chunkLength: chunk.length,
+            })
             return
         }
 
         const now = Date.now()
         const size = chunk.length
+
+        this.debug('handleData(): entering', {
+            chunkLength: size,
+            state: this.state,
+            currentJobId: this.currentJobId,
+            bufferLenBefore: this.buffer.length,
+        })
 
         // First byte for a new job: allocate id + mark start, emit job-started.
         // IMPORTANT: treat both 'idle' and 'queued' as "ready for a new job"
@@ -341,6 +441,12 @@ export class SerialPrinterService {
             this.currentJobStartedAt = now
             this.currentJobBytesReceivedAtStart = this.stats.bytesReceived
             this.currentJobChunkCount = 0
+
+            this.debug('handleData(): starting new job from idle/queued', {
+                jobId,
+                stateBefore: this.state === 'receiving' ? 'idle/queued' : this.state,
+                bytesReceivedAtStart: this.currentJobBytesReceivedAtStart,
+            })
 
             this.deps.events.publish({
                 kind: 'job-started',
@@ -358,6 +464,11 @@ export class SerialPrinterService {
             this.currentJobBytesReceivedAtStart = this.stats.bytesReceived
             this.currentJobChunkCount = 0
 
+            this.debug('handleData(): recovery path, created job in receiving state', {
+                jobId,
+                bytesReceivedAtStart: this.currentJobBytesReceivedAtStart,
+            })
+
             this.deps.events.publish({
                 kind: 'job-started',
                 at: now,
@@ -371,6 +482,13 @@ export class SerialPrinterService {
         if (this.state === 'receiving' && size > 0) {
             this.currentJobChunkCount += 1
         }
+
+        this.debug('handleData(): after appending chunk', {
+            addedBytes: size,
+            newBufferLen: this.buffer.length,
+            currentJobChunkCount: this.currentJobChunkCount,
+            statsBytesReceived: this.stats.bytesReceived,
+        })
 
         // Emit streaming chunk for live UI.
         if (this.currentJobId != null && size > 0) {
@@ -389,15 +507,32 @@ export class SerialPrinterService {
 
     private scheduleIdleFlush(): void {
         this.clearIdleTimer()
-        if (!this.config.idleFlushMs || this.config.idleFlushMs <= 0) return
+        if (!this.config.idleFlushMs || this.config.idleFlushMs <= 0) {
+            this.debug('scheduleIdleFlush(): idleFlushMs disabled or <= 0')
+            return
+        }
+
+        const delay = this.config.idleFlushMs
+
+        this.debug('scheduleIdleFlush(): scheduling idle flush', {
+            idleFlushMs: delay,
+            currentJobId: this.currentJobId,
+            state: this.state,
+        })
 
         this.idleTimer = setTimeout(() => {
+            this.debug('idleFlush timer fired; finalizing job', {
+                currentJobId: this.currentJobId,
+                bufferLenAtFlush: this.buffer.length,
+                stateAtFlush: this.state,
+            })
             this.finalizeJob()
-        }, this.config.idleFlushMs)
+        }, delay)
     }
 
     private clearIdleTimer(): void {
         if (this.idleTimer) {
+            this.debug('clearIdleTimer(): clearing existing idle timer')
             clearTimeout(this.idleTimer)
             this.idleTimer = null
         }
@@ -406,8 +541,17 @@ export class SerialPrinterService {
     private finalizeJob(): void {
         this.clearIdleTimer()
         if (this.buffer.length === 0) {
+            this.debug('finalizeJob(): buffer empty, nothing to finalize', {
+                state: this.state,
+            })
             // Nothing accumulated; if we were in receiving, go back to idle.
             if (this.state === 'receiving') {
+                this.debug(
+                    'finalizeJob(): buffer empty but state=receiving; transitioning to idle and clearing job metadata',
+                    {
+                        currentJobId: this.currentJobId,
+                    }
+                )
                 this.state = 'idle'
                 this.currentJobId = null
                 this.currentJobStartedAt = null
@@ -424,6 +568,14 @@ export class SerialPrinterService {
         const createdAt = this.currentJobStartedAt ?? now
 
         const bufferLenBeforeNormalize = this.buffer.length
+
+        this.debug('finalizeJob(): normalizing and completing job', {
+            jobId,
+            createdAt,
+            bufferLenBeforeNormalize,
+            state: this.state,
+            currentJobChunkCount: this.currentJobChunkCount,
+        })
 
         const rawNormalized =
             this.config.lineEnding === '\n'
@@ -497,6 +649,11 @@ export class SerialPrinterService {
         )
         // ----------------------------------------------------------------------
 
+        this.debug('finalizeJob(): enqueueing job and resetting state', {
+            jobId,
+            queueLenBefore: this.queue.length,
+        })
+
         this.buffer = ''
         this.currentJobId = null
         this.currentJobStartedAt = null
@@ -506,12 +663,21 @@ export class SerialPrinterService {
         // Enqueue with bounded capacity
         this.queue.push(job)
         if (this.queue.length > this.config.maxQueuedJobs) {
-            this.queue.shift()
+            const dropped = this.queue.shift()
+            this.debug('finalizeJob(): queue over capacity, dropped oldest job', {
+                droppedJobId: dropped?.id,
+            })
         }
 
         this.stats.totalJobs += 1
         this.stats.lastJobAt = now
         this.state = this.queue.length > 0 ? 'queued' : 'idle'
+
+        this.debug('finalizeJob(): job completed', {
+            jobId,
+            queueLenAfter: this.queue.length,
+            stateAfter: this.state,
+        })
 
         this.deps.events.publish({
             kind: 'job-completed',
@@ -526,8 +692,17 @@ export class SerialPrinterService {
 
     /** Handle unexpected port close (e.g., device unplugged) */
     private async handlePortClose(): Promise<void> {
+        this.debug('handlePortClose(): unexpected port close', {
+            stateAtClose: this.state,
+            bufferLen: this.buffer.length,
+            currentJobId: this.currentJobId,
+        })
+
         // If we're already in a terminal state from our own close(), ignore.
         if (this.state === 'disconnected' || this.state === 'error') {
+            this.debug(
+                'handlePortClose(): already in disconnected/error state; ignoring'
+            )
             return
         }
 
@@ -548,6 +723,10 @@ export class SerialPrinterService {
         this.currentJobChunkCount = 0
         this.buffer = ''
 
+        this.debug('handlePortClose(): state reset; considering reconnect', {
+            reconnectEnabled: this.config.reconnect.enabled,
+        })
+
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
         } else {
@@ -557,6 +736,9 @@ export class SerialPrinterService {
                 error: 'Serial printer port closed and reconnect disabled',
             })
             this.state = 'error'
+            this.debug(
+                'handlePortClose(): reconnect disabled, transitioning to error state'
+            )
         }
     }
 
@@ -569,6 +751,12 @@ export class SerialPrinterService {
             error: `Serial port error: ${err.message}`,
         })
 
+        this.debug('handlePortError(): serial port error encountered', {
+            error: err.message,
+            bufferLen: this.buffer.length,
+            currentJobId: this.currentJobId,
+        })
+
         // Close and attempt reconnect if configured.
         await this.closePort('io-error')
         this.state = 'disconnected'
@@ -577,6 +765,10 @@ export class SerialPrinterService {
         this.currentJobBytesReceivedAtStart = null
         this.currentJobChunkCount = 0
         this.buffer = ''
+
+        this.debug('handlePortError(): state reset; considering reconnect', {
+            reconnectEnabled: this.config.reconnect.enabled,
+        })
 
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
@@ -588,6 +780,9 @@ export class SerialPrinterService {
                 error: 'Serial port error and reconnect disabled',
             })
             this.state = 'error'
+            this.debug(
+                'handlePortError(): reconnect disabled, transitioning to error state'
+            )
         }
     }
 
@@ -600,6 +795,11 @@ export class SerialPrinterService {
             error: `Failed to open serial port: ${err.message}`,
         })
 
+        this.debug('handlePortOpenError(): failed to open port', {
+            error: err.message,
+            reconnectEnabled: this.config.reconnect.enabled,
+        })
+
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
         } else {
@@ -609,6 +809,9 @@ export class SerialPrinterService {
                 error: 'Failed to open serial port and reconnect disabled',
             })
             this.state = 'error'
+            this.debug(
+                'handlePortOpenError(): reconnect disabled, transitioning to error state'
+            )
         }
     }
 
@@ -639,25 +842,47 @@ export class SerialPrinterService {
             this.reconnectAttempts
         )
 
+        this.debug('scheduleReconnect(): scheduling reconnect attempt', {
+            attempt: this.reconnectAttempts,
+            delayMs: delay,
+            maxAttempts,
+        })
+
         this.reconnectTimer = setTimeout(() => {
+            this.debug('scheduleReconnect(): reconnect timer fired', {
+                attempt: this.reconnectAttempts,
+            })
             void this.tryReconnect()
         }, delay)
     }
 
     private clearReconnectTimer(): void {
         if (this.reconnectTimer) {
+            this.debug('clearReconnectTimer(): clearing reconnect timer')
             clearTimeout(this.reconnectTimer)
             this.reconnectTimer = null
         }
     }
 
     private async tryReconnect(): Promise<void> {
-        if (this.state === 'error') return
+        if (this.state === 'error') {
+            this.debug(
+                'tryReconnect(): current state is error; will not attempt reconnect'
+            )
+            return
+        }
+
+        this.debug('tryReconnect(): attempting to reopen port', {
+            attempt: this.reconnectAttempts,
+        })
 
         try {
             await this.openPort()
         } catch {
             // openPort already emitted errors and scheduled further reconnect if appropriate
+            this.debug(
+                'tryReconnect(): openPort threw; relying on openPort error handling'
+            )
         }
     }
 
