@@ -473,10 +473,22 @@ export class SerialPowerMeterService {
                     line: trimmed,
                 })
             } else {
+                // Unknown/non-# line from the meter:
+                //  - Still emit the structured meter-unknown-line event
+                //  - Also emit a recoverable-error so downstream logging can
+                //    treat this as warning-level noise.
+                const now = Date.now()
+
                 this.deps.events.publish({
                     kind: 'meter-unknown-line',
-                    at: Date.now(),
+                    at: now,
                     line: trimmed,
+                })
+
+                this.deps.events.publish({
+                    kind: 'recoverable-error',
+                    at: now,
+                    error: `Unknown line from power meter: "${trimmed}"`,
                 })
             }
         }
