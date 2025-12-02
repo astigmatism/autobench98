@@ -72,11 +72,6 @@ export class SerialPrinterService {
     private currentJobChunkCount = 0
 
     /**
-     * Global chunk index so we can reason about ordering and gaps.
-     */
-    private globalChunkIndex = 0
-
-    /**
      * Verbose debug logging can be enabled with:
      *   SERIAL_PRINTER_DEBUG=1
      */
@@ -117,17 +112,6 @@ export class SerialPrinterService {
         )
     }
 
-    /** Simple deterministic hash for job content diagnostics (DJB2). */
-    private computeHash(text: string): number {
-        let hash = 5381
-        for (let i = 0; i < text.length; i += 1) {
-            // hash * 33 + charCode
-            hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0
-        }
-        // Keep as unsigned 32-bit for readability
-        return hash >>> 0
-    }
-
     /* ---------------------------------------------------------------------- */
     /*  Public API                                                            */
     /* ---------------------------------------------------------------------- */
@@ -144,16 +128,6 @@ export class SerialPrinterService {
         this.debug('stop() called; tearing down')
         this.clearIdleTimer()
         this.clearReconnectTimer()
-
-        // If a job is in-flight when stop() is called, finalize it instead of dropping.
-        if (this.buffer.length > 0 && this.currentJobId != null) {
-            this.debug('stop(): finalizing in-flight job before close', {
-                currentJobId: this.currentJobId,
-                bufferLen: this.buffer.length,
-            })
-            this.finalizeJob()
-        }
-
         await this.closePort('explicit-close')
         this.state = 'disconnected'
         this.deviceId = null
@@ -280,17 +254,6 @@ export class SerialPrinterService {
         }
 
         this.clearReconnectTimer()
-
-        // If we lose the device while a job is in-flight, finalize that job
-        // instead of dropping the buffer on the floor.
-        if (this.buffer.length > 0 && this.currentJobId != null) {
-            this.debug('onDeviceLost(): finalizing in-flight job before disconnect', {
-                currentJobId: this.currentJobId,
-                bufferLen: this.buffer.length,
-            })
-            this.finalizeJob()
-        }
-
         await this.closePort('unknown')
 
         this.state = 'disconnected'
@@ -365,16 +328,14 @@ export class SerialPrinterService {
 
                 // Attach data/error handlers only after successful open
                 port.on('data', (chunk: Buffer) => {
-                    this.globalChunkIndex += 1
                     this.debug('data event received from serial port', {
                         chunkLength: chunk.length,
-                        chunkIndex: this.globalChunkIndex,
                     })
                     // Preserve 8-bit values as-is; latin1 is a 1:1 mapping for
                     // bytes 0x00–0xFF into Unicode code points. This avoids the
                     // lossy behavior of 'ascii' and surprises of 'utf8' on
                     // arbitrary RAW/text print streams from Win98.
-                    this.handleData(chunk.toString('latin1'), this.globalChunkIndex)
+                    this.handleData(chunk.toString('latin1'))
                 })
 
                 port.on('error', (err: Error) => {
@@ -444,7 +405,7 @@ export class SerialPrinterService {
     /*  Data & job lifecycle                                                  */
     /* ---------------------------------------------------------------------- */
 
-    private handleData(chunk: string, chunkIndex: number): void {
+    private handleData(chunk: string): void {
         if (this.state === 'disconnected' || this.state === 'error') {
             // Data while in these states is unexpected; treat as recoverable error.
             this.deps.events.publish({
@@ -454,7 +415,6 @@ export class SerialPrinterService {
             })
             this.debug('handleData(): data received in invalid state', {
                 chunkLength: chunk.length,
-                chunkIndex,
             })
             return
         }
@@ -464,7 +424,6 @@ export class SerialPrinterService {
 
         this.debug('handleData(): entering', {
             chunkLength: size,
-            chunkIndex,
             state: this.state,
             currentJobId: this.currentJobId,
             bufferLenBefore: this.buffer.length,
@@ -485,7 +444,7 @@ export class SerialPrinterService {
 
             this.debug('handleData(): starting new job from idle/queued', {
                 jobId,
-                firstChunkIndex: chunkIndex,
+                stateBefore: this.state === 'receiving' ? 'idle/queued' : this.state,
                 bytesReceivedAtStart: this.currentJobBytesReceivedAtStart,
             })
 
@@ -507,7 +466,6 @@ export class SerialPrinterService {
 
             this.debug('handleData(): recovery path, created job in receiving state', {
                 jobId,
-                chunkIndex,
                 bytesReceivedAtStart: this.currentJobBytesReceivedAtStart,
             })
 
@@ -527,7 +485,6 @@ export class SerialPrinterService {
 
         this.debug('handleData(): after appending chunk', {
             addedBytes: size,
-            chunkIndex,
             newBufferLen: this.buffer.length,
             currentJobChunkCount: this.currentJobChunkCount,
             statsBytesReceived: this.stats.bytesReceived,
@@ -612,32 +569,20 @@ export class SerialPrinterService {
 
         const bufferLenBeforeNormalize = this.buffer.length
 
-        // Basic control-character stats for diagnostics.
-        const formFeedCount = (this.buffer.match(/\f/g) ?? []).length
-        const crCount = (this.buffer.match(/\r/g) ?? []).length
-        const lfCount = (this.buffer.match(/\n/g) ?? []).length
-
         this.debug('finalizeJob(): normalizing and completing job', {
             jobId,
             createdAt,
             bufferLenBeforeNormalize,
             state: this.state,
             currentJobChunkCount: this.currentJobChunkCount,
-            formFeedCount,
-            crCount,
-            lfCount,
         })
 
         const rawNormalized =
             this.config.lineEnding === '\n'
                 ? this.buffer
-                : this.buffer
-                      .replace(/\r\n/g, '\n')
-                      .replace(/\r/g, '\n')
-                      .replace(/\n/g, '\r\n')
+                : this.buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n')
 
         const rawLen = rawNormalized.length
-        const hash = this.computeHash(rawNormalized)
 
         const preview = buildPreview(rawNormalized, DEFAULT_PREVIEW_CHARS)
 
@@ -666,7 +611,6 @@ export class SerialPrinterService {
                     `jobId=${jobId}`,
                     `path=${dumpPath}`,
                     `sizeChars=${job.raw.length}`,
-                    `hash=${hash}`,
                 ].join(' ')
             )
         } catch (err) {
@@ -683,6 +627,9 @@ export class SerialPrinterService {
         const bytesForJob = this.stats.bytesReceived - bytesStart
         const durationMs = now - createdAt
         const platform = process.platform
+        const flowControl = this.config.reconnect
+            ? 'software'
+            : 'none' // crude label; real HW/SW mix is at OS/driver level
         const idleFlushMs = this.config.idleFlushMs ?? 0
 
         console.log(
@@ -690,6 +637,7 @@ export class SerialPrinterService {
                 'SERIAL PRINTER JOB DEBUG',
                 `jobId=${jobId}`,
                 `platform=${platform}`,
+                `flowControl=${flowControl}`,
                 `idleFlushMs=${idleFlushMs}`,
                 `durationMs=${durationMs}`,
                 `chunks=${this.currentJobChunkCount}`,
@@ -697,10 +645,6 @@ export class SerialPrinterService {
                 `rawLen=${rawLen}`,
                 `bytesForJob=${bytesForJob}`,
                 `bytesTotal=${this.stats.bytesReceived}`,
-                `hash=${hash}`,
-                `formFeedCount=${formFeedCount}`,
-                `crCount=${crCount}`,
-                `lfCount=${lfCount}`,
             ].join(' ')
         )
         // ----------------------------------------------------------------------
@@ -764,15 +708,6 @@ export class SerialPrinterService {
 
         this.stats.lastErrorAt = Date.now()
 
-        // If the port closes while a job is in progress, finalize whatever we have.
-        if (this.buffer.length > 0 && this.currentJobId != null) {
-            this.debug('handlePortClose(): finalizing in-flight job on close', {
-                currentJobId: this.currentJobId,
-                bufferLen: this.buffer.length,
-            })
-            this.finalizeJob()
-        }
-
         this.deps.events.publish({
             kind: 'recoverable-error',
             at: this.stats.lastErrorAt,
@@ -821,15 +756,6 @@ export class SerialPrinterService {
             bufferLen: this.buffer.length,
             currentJobId: this.currentJobId,
         })
-
-        // If an error happens mid-job, finalize what we have instead of dropping it.
-        if (this.buffer.length > 0 && this.currentJobId != null) {
-            this.debug('handlePortError(): finalizing in-flight job on error', {
-                currentJobId: this.currentJobId,
-                bufferLen: this.buffer.length,
-            })
-            this.finalizeJob()
-        }
 
         // Close and attempt reconnect if configured.
         await this.closePort('io-error')
