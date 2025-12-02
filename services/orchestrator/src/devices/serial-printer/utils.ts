@@ -1,5 +1,3 @@
-// services/orchestrator/src/core/devices/serial-printer/utils.ts
-
 import type {
     SerialPrinterConfig,
     SerialPrinterReconnectPolicy,
@@ -61,13 +59,21 @@ function resolveLineEndingEnv(): '\n' | '\r\n' {
     return '\r\n'
 }
 
+/**
+ * Flow control:
+ *   SERIAL_PRINTER_FLOW_CONTROL = NONE | SOFTWARE | HARDWARE
+ */
 function resolveFlowControlEnv(): SerialPrinterFlowControl {
     const raw = readStringEnv('SERIAL_PRINTER_FLOW_CONTROL')
-    if (!raw) return 'software'
-    const v = raw.trim().toLowerCase()
-    if (v === 'none') return 'none'
-    if (v === 'hardware') return 'hardware'
-    // default / unknown => software (XON/XOFF)
+    if (!raw) {
+        // Default assumption for Win98 printer COM ports: software XON/XOFF.
+        return 'software'
+    }
+    const v = raw.trim().toUpperCase()
+    if (v === 'NONE') return 'none'
+    if (v === 'HARDWARE') return 'hardware'
+    if (v === 'SOFTWARE') return 'software'
+    // Fallback to a safe/explicit default
     return 'software'
 }
 

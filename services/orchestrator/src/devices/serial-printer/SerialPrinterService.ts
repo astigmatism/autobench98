@@ -1,5 +1,3 @@
-// services/orchestrator/src/core/adapters/serial-printer/SerialPrinterService.ts
-
 import { SerialPort } from 'serialport'
 import {
     type SerialPrinterConfig,
@@ -222,10 +220,10 @@ export class SerialPrinterService {
 
         const baudRate = this.deviceBaudRate || this.config.baudRate
 
-        // Map our abstract flowControl config to serialport options
-        const flowControl = this.config.flowControl ?? 'software'
-        const useXonXoff = flowControl === 'software'
-        const useRtsCts = flowControl === 'hardware'
+        // Flow control wiring based on config
+        const flowControl = this.config.flowControl ?? 'none'
+        const useSoftwareFlow = flowControl === 'software'
+        const useHardwareFlow = flowControl === 'hardware'
 
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
@@ -235,13 +233,21 @@ export class SerialPrinterService {
                 dataBits: 8,
                 parity: 'none',
                 stopBits: 1,
-                // Flow control:
-                //  - Win98 COM properties are typically set to XON/XOFF for printers.
-                //  - Matching here avoids the driver treating XON/XOFF bytes
-                //    as magic and silently dropping them in the TTY layer.
-                xon: useXonXoff,
-                xoff: useXonXoff,
-                rtscts: useRtsCts,
+                /**
+                 * Flow control:
+                 *  - software: XON/XOFF (xon/xoff=true, rtscts=false)
+                 *  - hardware: RTS/CTS (rtscts=true, xon/xoff=false)
+                 *  - none:     all disabled
+                 *
+                 * IMPORTANT:
+                 * Win98 printer COM ports are often configured with XON/XOFF.
+                 * If we don't mirror that here on Linux, long jobs can silently
+                 * drop bytes when buffers overflow, which looks exactly like
+                 * your "missing middle pages" symptom.
+                 */
+                xon: useSoftwareFlow,
+                xoff: useSoftwareFlow,
+                rtscts: useHardwareFlow,
             })
 
             const onOpen = () => {
@@ -452,7 +458,7 @@ export class SerialPrinterService {
         const durationMs = now - createdAt
         const platform = process.platform
         const idleFlushMs = this.config.idleFlushMs ?? 0
-        const flowControl = this.config.flowControl ?? 'software'
+        const flowControl = this.config.flowControl ?? 'none'
 
         console.log(
             [
