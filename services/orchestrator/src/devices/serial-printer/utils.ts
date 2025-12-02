@@ -3,6 +3,7 @@
 import type {
     SerialPrinterConfig,
     SerialPrinterReconnectPolicy,
+    SerialPrinterFlowControl,
 } from './types.js'
 
 export const DEFAULT_PREVIEW_CHARS = 160
@@ -60,6 +61,22 @@ function resolveLineEndingEnv(): '\n' | '\r\n' {
     return '\r\n'
 }
 
+function resolveFlowControlEnv(): SerialPrinterFlowControl {
+    const raw = readStringEnv('SERIAL_PRINTER_FLOW_CONTROL')
+    if (!raw) {
+        // Win98 default expectation: XON/XOFF enabled.
+        return 'software'
+    }
+
+    const v = raw.trim().toLowerCase()
+    if (v === 'none') return 'none'
+    if (v === 'hardware' || v === 'rtscts') return 'hardware'
+    if (v === 'software' || v === 'xonxoff' || v === 'xon/xoff') return 'software'
+
+    // Fallback: be explicit and safe.
+    return 'software'
+}
+
 function buildReconnectPolicyFromEnv(): SerialPrinterReconnectPolicy {
     const enabled = readBoolEnv('SERIAL_PRINTER_RECONNECT_ENABLED', true)
     const maxAttempts = readIntEnv('SERIAL_PRINTER_RECONNECT_MAX_ATTEMPTS', 5)
@@ -95,6 +112,7 @@ export function buildSerialPrinterConfigFromEnv(
     const maxQueuedJobs = readIntEnv('SERIAL_PRINTER_MAX_QUEUED_JOBS', 32)
     const lineEnding = resolveLineEndingEnv()
     const reconnect = buildReconnectPolicyFromEnv()
+    const flowControl = resolveFlowControlEnv()
 
     return {
         portPath,
@@ -103,5 +121,6 @@ export function buildSerialPrinterConfigFromEnv(
         idleFlushMs: idleFlushMs > 0 ? idleFlushMs : 500,
         maxQueuedJobs: maxQueuedJobs > 0 ? maxQueuedJobs : 32,
         reconnect,
+        flowControl,
     }
 }

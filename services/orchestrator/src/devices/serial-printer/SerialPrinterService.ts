@@ -222,6 +222,10 @@ export class SerialPrinterService {
 
         const baudRate = this.deviceBaudRate || this.config.baudRate
 
+        // Flow control → low-level flags
+        const useSoftwareFlow = this.config.flowControl === 'software'
+        const useHardwareFlow = this.config.flowControl === 'hardware'
+
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
                 path,
@@ -230,12 +234,21 @@ export class SerialPrinterService {
                 dataBits: 8,
                 parity: 'none',
                 stopBits: 1,
-                // ❌ Do NOT enable software flow control unless both sides agree.
-                // Win98 COM ports for printers are typically configured with no
-                // XON/XOFF. Enabling it here can cause data bytes to be treated
-                // as flow-control and dropped by the stack/driver.
-                xon: false,
-                xoff: false,
+                /**
+                 * Flow control mapping:
+                 *
+                 * - 'none'     → all false
+                 * - 'software' → xon/xoff true (Win98 default)
+                 * - 'hardware' → rtscts true
+                 *
+                 * We never mix both at once. This keeps Linux/macOS behavior
+                 * aligned with what the Win98 COM port is actually configured
+                 * to use.
+                 */
+                xon: useSoftwareFlow,
+                xoff: useSoftwareFlow,
+                xany: false,
+                rtscts: useHardwareFlow,
             })
 
             const onOpen = () => {
@@ -447,15 +460,12 @@ export class SerialPrinterService {
         const platform = process.platform
         const idleFlushMs = this.config.idleFlushMs ?? 0
 
-        // This gives you one concise line per job to compare between macOS/Linux
-        // and between "good" and "bad" runs, without dumping full text.
-        // Example pattern to grep for:
-        //   SERIAL PRINTER JOB DEBUG
         console.log(
             [
                 'SERIAL PRINTER JOB DEBUG',
                 `jobId=${jobId}`,
                 `platform=${platform}`,
+                `flowControl=${this.config.flowControl}`,
                 `idleFlushMs=${idleFlushMs}`,
                 `durationMs=${durationMs}`,
                 `chunks=${this.currentJobChunkCount}`,

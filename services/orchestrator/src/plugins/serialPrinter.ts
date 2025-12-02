@@ -135,6 +135,10 @@ const serialPrinterPlugin: FastifyPluginAsync = async (app: FastifyInstance) => 
 
     const spConfig = buildSerialPrinterConfigFromEnv(discoveredPort)
 
+    logPlugin.info(
+        `serial-printer config portPath=${spConfig.portPath || '<none>'} baudRate=${spConfig.baudRate} idleFlushMs=${spConfig.idleFlushMs} maxQueuedJobs=${spConfig.maxQueuedJobs} flowControl=${spConfig.flowControl}`
+    )
+
     const loggerSink = new SerialPrinterLoggerEventSink(app)
     const stateAdapter = new SerialPrinterStateAdapter()
 

@@ -14,7 +14,7 @@ export interface SerialPrinterJob {
     createdAt: number
     /** When the job was finalized and enqueued (ms since epoch) */
     completedAt: number
-    /** Raw bytes as UTF-8 decoded text (we assume printer sends text for now) */
+    /** Raw bytes as text (decoded 1:1 from the serial stream) */
     raw: string
     /** Human-readable preview (truncated) */
     preview: string
@@ -32,6 +32,15 @@ export interface SerialPrinterReconnectPolicy {
     maxDelayMs: number
 }
 
+/**
+ * Flow control policy for the serial printer link.
+ *
+ * - 'none'     → no flow control flags enabled
+ * - 'software' → XON/XOFF (xon/xoff = true)
+ * - 'hardware' → RTS/CTS (rtscts = true)
+ */
+export type SerialPrinterFlowControl = 'none' | 'software' | 'hardware'
+
 export interface SerialPrinterConfig {
     /** OS device path (e.g., /dev/ttyUSB0 or /dev/tty.usbserial-XXXX) */
     portPath: string
@@ -45,6 +54,11 @@ export interface SerialPrinterConfig {
     maxQueuedJobs: number
     /** Reconnection policy when the device disappears or open fails */
     reconnect: SerialPrinterReconnectPolicy
+    /**
+     * Flow control mode for the serial link.
+     * Typically 'software' (XON/XOFF) for Win98 COM ports talking to printers.
+     */
+    flowControl: SerialPrinterFlowControl
 }
 
 export interface SerialPrinterStats {
@@ -84,7 +98,7 @@ export interface SerialPrinterJobChunkEvent extends SerialPrinterEventBase {
     kind: 'job-chunk'
     /** Logical job id for this print */
     jobId: number
-    /** Text for this chunk (UTF-8 decoded) */
+    /** Text for this chunk */
     text: string
     /** Number of bytes in this chunk */
     bytes: number
