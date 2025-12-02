@@ -466,16 +466,42 @@ function finalizeFinishedJobIfReady() {
 }
 
 /**
- * Hydrate local completedJobs from server-side history whenever it changes.
+ * Hydrate / merge local completedJobs from server-side history whenever it changes.
+ * - Server history is authoritative for canonically completed jobs.
+ * - We exclude the *currently active* job (streaming) from the completed list.
+ * - We preserve any locally finalized jobs that are not yet present in history.
  */
 watch(
     () => printer.value.history,
     (history) => {
-        if (!history) return
-        completedJobs.value = history.map(h => ({
-            id: h.id,
-            text: h.text,
-        }))
+        if (!history) {
+            completedJobs.value = []
+            return
+        }
+
+        const activeId = currentJobId.value
+        const base: CompletedJobView[] = []
+
+        // Start from server history (excluding active job if present)
+        for (const h of history) {
+            if (activeId != null && h.id === activeId) continue
+            base.push({ id: h.id, text: h.text })
+        }
+
+        // Merge in any local completed jobs that aren't in server history yet
+        for (const local of completedJobs.value) {
+            if (!base.some(b => b.id === local.id)) {
+                base.push({ id: local.id, text: local.text })
+            }
+        }
+
+        // Apply historyLimit / maxRecentJobs cap
+        const cap = printer.value.historyLimit || printer.value.maxRecentJobs || 20
+        if (base.length > cap) {
+            completedJobs.value = base.slice(base.length - cap)
+        } else {
+            completedJobs.value = base
+        }
     },
     { immediate: true, deep: true }
 )
