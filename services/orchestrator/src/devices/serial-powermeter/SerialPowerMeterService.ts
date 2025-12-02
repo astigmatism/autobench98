@@ -403,21 +403,25 @@ export class SerialPowerMeterService {
     }
 
     private async initializeWattsUpDevice(): Promise<void> {
-        // Match the MJS probe behavior:
+        // Align with the reference Python implementation:
         // 1) Version query
-        // 2) Set INTERNAL mode with configured interval
-        // 3) Set output handling
+        // 2) Set INTERNAL mode ("I") with configured interval
+        // 3) Set output handling (default FULLHANDLING = 2)
         //
         // We keep small sleeps between commands to avoid overrunning the device.
         await this.writeCommand('#V,3;')
         await this.sleep(200)
 
         const intervalSec = this.config.samplingIntervalSec ?? 1
-        const modeCmd = `#L,W,3,E,,${intervalSec};`
+
+        // Python example: #L,W,3,I,,<interval>;
+        const internalModeChar = 'I'
+        const modeCmd = `#L,W,3,${internalModeChar},,${intervalSec};`
         await this.writeCommand(modeCmd)
         await this.sleep(200)
 
-        const fullHandling = this.config.fullHandling ?? 3
+        // Python example uses FULLHANDLING = 2
+        const fullHandling = this.config.fullHandling ?? 2
         const outCmd = `#O,W,1,${fullHandling};`
         await this.writeCommand(outCmd)
         await this.sleep(200)
@@ -473,6 +477,36 @@ export class SerialPowerMeterService {
                     line: trimmed,
                 })
             } else {
+                // Attempt to detect and recover "headerless" WattsUp data frames.
+                //
+                // The device sometimes appears to output CSV bodies that look
+                // like valid #d payloads but without the leading "#d,".
+                // When a line:
+                //   - is comma-separated
+                //   - has at least a handful of fields
+                //   - each field is numeric / "_" / "-" (optionally ending with ';')
+                // we treat it as a candidate frame body and synthesize a #d header.
+                const csvParts = trimmed.split(',')
+                const enoughFields = csvParts.length >= 5
+
+                const looksNumericOrPlaceholder = csvParts.every(part => {
+                    const withoutTerminator = part.replace(/;$/, '')
+                    if (!withoutTerminator) return true // allow empty
+                    if (withoutTerminator === '_' || withoutTerminator === '-') return true
+                    return /^-?\d+(\.\d+)?$/.test(withoutTerminator)
+                })
+
+                if (enoughFields && looksNumericOrPlaceholder && trimmed.endsWith(';')) {
+                    const synthetic = `#d,${trimmed}`
+                    try {
+                        this.handleDataFrame(synthetic)
+                        // Treat as successfully handled data; no unknown-line noise.
+                        continue
+                    } catch {
+                        // Fall through to unknown-line handling below.
+                    }
+                }
+
                 // Unknown/non-# line from the meter:
                 //  - Still emit the structured meter-unknown-line event
                 //  - Also emit a recoverable-error so downstream logging can
@@ -511,7 +545,7 @@ export class SerialPowerMeterService {
 
             // If we've gone too long without a good sample, or the consecutive
             // failures are excessive, treat this as an effective disconnect and
-            // let normal reconnect logic handle it.
+            // let normal reconnect logic take over.
             const lastSampleAt = this.stats.lastSampleAt
             const tooLongSinceGoodSample =
                 lastSampleAt != null && now - lastSampleAt > this.parseFailureWindowMs
