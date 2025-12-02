@@ -210,6 +210,12 @@ export class SerialPrinterService {
 
         const baudRate = this.deviceBaudRate || this.config.baudRate
 
+        // Basic cross-platform heuristics:
+        // - macOS has historically behaved well with software flow control enabled.
+        // - On Linux/others, we disable XON/XOFF to avoid driver-specific
+        //   line-discipline quirks that can affect buffering/burst shape.
+        const isMac = process.platform === 'darwin'
+
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
                 path,
@@ -218,8 +224,8 @@ export class SerialPrinterService {
                 dataBits: 8,
                 parity: 'none',
                 stopBits: 1,
-                xon: true,
-                xoff: true,
+                xon: isMac,
+                xoff: isMac,
             })
 
             const onOpen = () => {
@@ -235,7 +241,9 @@ export class SerialPrinterService {
 
                 // Attach data/error handlers only after successful open
                 port.on('data', (chunk: Buffer) => {
-                    this.handleData(chunk.toString('utf8'))
+                    // Win9x RAW/text output is byte-oriented; use ASCII to avoid
+                    // any multibyte UTF-8 surprises and to mirror the power meter.
+                    this.handleData(chunk.toString('ascii'))
                 })
 
                 port.on('error', (err: Error) => {
