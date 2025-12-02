@@ -61,33 +61,11 @@ export class SerialPrinterService {
     private currentJobId: number | null = null
     private currentJobStartedAt: number | null = null
 
-    /**
-     * Effective idle flush used for job segmentation.
-     *
-     * - Base value comes from config.idleFlushMs.
-     * - On Linux we enforce a slightly larger minimum to accommodate
-     *   more bursty / buffered delivery from the USB–serial stack,
-     *   which can otherwise cause a single print to be split into
-     *   multiple jobs compared to macOS.
-     */
-    private readonly effectiveIdleFlushMs: number
-
     constructor(config: SerialPrinterConfig, deps: SerialPrinterServiceDeps) {
         this.config = config
         this.deps = deps
         // Use config baud as default; discovery may override per-device
         this.deviceBaudRate = config.baudRate
-
-        const baseIdle = this.config.idleFlushMs ?? 1000
-        if (process.platform === 'linux') {
-            // Linux drivers tend to batch/flush in larger bursts, so give
-            // them a bit more slack to keep a single Win98 print as one job.
-            // If you really want a smaller value on Linux, you can still
-            // raise idleFlushMs in config above this floor.
-            this.effectiveIdleFlushMs = Math.max(baseIdle, 4000)
-        } else {
-            this.effectiveIdleFlushMs = baseIdle
-        }
     }
 
     /* ---------------------------------------------------------------------- */
@@ -232,12 +210,6 @@ export class SerialPrinterService {
 
         const baudRate = this.deviceBaudRate || this.config.baudRate
 
-        // Basic cross-platform heuristics:
-        // - macOS has historically behaved well with software flow control enabled.
-        // - On Linux/others, we disable XON/XOFF to avoid driver-specific
-        //   line-discipline quirks that can affect buffering/burst shape.
-        const isMac = process.platform === 'darwin'
-
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
                 path,
@@ -246,8 +218,12 @@ export class SerialPrinterService {
                 dataBits: 8,
                 parity: 'none',
                 stopBits: 1,
-                xon: isMac,
-                xoff: isMac,
+                // ❌ Do NOT enable software flow control unless both sides agree.
+                // Win98 COM ports for printers are typically configured with no
+                // XON/XOFF. Enabling it here can cause data bytes to be treated
+                // as flow-control and dropped by the stack/driver.
+                xon: false,
+                xoff: false,
             })
 
             const onOpen = () => {
@@ -263,9 +239,11 @@ export class SerialPrinterService {
 
                 // Attach data/error handlers only after successful open
                 port.on('data', (chunk: Buffer) => {
-                    // Win9x RAW/text output is byte-oriented; use ASCII to avoid
-                    // any multibyte UTF-8 surprises and to mirror the power meter.
-                    this.handleData(chunk.toString('ascii'))
+                    // Preserve 8-bit values as-is; latin1 is a 1:1 mapping for
+                    // bytes 0x00–0xFF into Unicode code points. This avoids the
+                    // lossy behavior of 'ascii' and surprises of 'utf8' on
+                    // arbitrary RAW/text print streams from Win98.
+                    this.handleData(chunk.toString('latin1'))
                 })
 
                 port.on('error', (err: Error) => {
@@ -390,11 +368,11 @@ export class SerialPrinterService {
 
     private scheduleIdleFlush(): void {
         this.clearIdleTimer()
-        if (!this.effectiveIdleFlushMs || this.effectiveIdleFlushMs <= 0) return
+        if (!this.config.idleFlushMs || this.config.idleFlushMs <= 0) return
 
         this.idleTimer = setTimeout(() => {
             this.finalizeJob()
-        }, this.effectiveIdleFlushMs)
+        }, this.config.idleFlushMs)
     }
 
     private clearIdleTimer(): void {
@@ -437,11 +415,7 @@ export class SerialPrinterService {
             preview,
         }
 
-        // 🔍 DEBUG: log the full raw job so we can verify completeness.
-        // This will be noisy, but it's intentionally "messy" for debugging.
-        // You can search for "SERIAL PRINTER JOB RAW" in the orchestrator logs.
-        // Length check helps compare with what Windows 98 sends.
-        // If this matches your Notepad doc, backend capture is good.
+        // Optional debug (commented out by default):
         console.log('================= SERIAL PRINTER JOB RAW START =================')
         console.log(`Job ID: ${jobId}`)
         console.log(`Raw length (chars): ${job.raw.length}`)
