@@ -246,6 +246,7 @@ import { computed, ref, watch } from 'vue'
 import { useMirror } from '@/stores/mirror'
 
 /* Chart.js / vue-chartjs setup */
+import 'chartjs-adapter-luxon'
 import { Line } from 'vue-chartjs'
 import {
     Chart as ChartJS,
@@ -253,9 +254,11 @@ import {
     PointElement,
     LinearScale,
     CategoryScale,
+    TimeScale,
     Tooltip,
     Legend,
-    type ChartOptions
+    type ChartOptions,
+    type ChartData
 } from 'chart.js'
 
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend)
@@ -672,21 +675,31 @@ function niceCeil(value: number): number {
     return niceNorm * magnitude
 }
 
-const chartData = computed(() => ({
-    labels: chartLabels.value,
-    datasets: [
-        {
-            label: 'Watts',
-            data: chartDatasetData.value,
-            borderColor: '#ef4444',
-            backgroundColor: 'rgba(239, 68, 68, 0.12)',
-            pointRadius: 0,
-            pointHitRadius: 4,
-            borderWidth: 1.5,
-            tension: 0.15
-        }
-    ]
-}))
+const chartData = computed<ChartData<'line'>>(() => {
+    const pts = chartPointsRaw.value
+
+    return {
+        // labels are optional when using {x, y} data, Chart.js reads x directly
+        labels: [],
+
+        datasets: [
+            {
+                label: 'Watts',
+                data: pts.map(p => ({
+                    x: p.t,         // epoch ms
+                    y: p.watts,
+                })),
+                fill: false,
+                borderColor: '#ef4444',
+                backgroundColor: '#ef4444',
+                tension: 0.15,
+                pointRadius: 0,
+                pointHitRadius: 6,
+                borderWidth: 1.5,
+            },
+        ],
+    }
+})
 
 const chartOptions = computed<ChartOptions<'line'>>(() => {
     const max = chartMaxWatts.value
@@ -704,21 +717,29 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     label(context: any) {
                         const v = context.parsed.y
                         return `${v.toFixed(2)} W`
-                    }
-                }
-            }
+                    },
+                },
+            },
         },
         scales: {
             x: {
-                type: 'category',
+                type: 'time',          // ⬅ important
+                time: {
+                    unit: 'second',    // or 'minute' if you prefer less noise
+                    displayFormats: {
+                        second: 'HH:mm:ss',
+                        minute: 'HH:mm:ss',
+                    },
+                    tooltipFormat: 'HH:mm:ss',
+                },
                 ticks: {
-                    maxTicksLimit: 5,
                     color: '#6b7280',
-                    autoSkip: true
+                    maxRotation: 0,
+                    autoSkip: true,
                 },
                 grid: {
-                    color: 'rgba(229, 231, 235, 0.7)'
-                }
+                    color: 'rgba(229, 231, 235, 0.7)',
+                },
             },
             y: {
                 beginAtZero: true,
@@ -727,21 +748,20 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     color: '#6b7280',
                     callback(value: any) {
                         return `${value} W`
-                    }
+                    },
                 },
                 grid: {
-                    color: 'rgba(229, 231, 235, 0.7)'
-                }
-            }
+                    color: 'rgba(229, 231, 235, 0.7)',
+                },
+            },
         },
         elements: {
             line: {
-                // this is the important bit:
-                cubicInterpolationMode: 'default', // or 'monotone'
+                cubicInterpolationMode: 'default',
                 tension: 0.15,
-                borderWidth: 1.5
-            }
-        }
+                borderWidth: 1.5,
+            },
+        },
     }
 })
 
