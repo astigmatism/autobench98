@@ -311,10 +311,12 @@
                         />
 
                         <!-- Watts line -->
-                        <polyline
+                       <polyline
                             v-if="chartPathPoints.length > 1"
                             class="chart-line"
                             :points="chartPathPoints"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
                         />
                     </svg>
                 </div>
@@ -1241,8 +1243,10 @@ const showAdvanced = ref(false)
 
 .chart-line {
     fill: none;
-    stroke: #ef4444; /* red line as requested */
-    stroke-width: 0.6; /* thinner line */
+    stroke: #ef4444;      /* red line */
+    stroke-width: 0.4;    /* thinner than 0.6 / 0.9 */
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
 /* SVG tick text */
