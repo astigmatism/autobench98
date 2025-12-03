@@ -86,7 +86,7 @@ export class SerialPowerMeterService {
         this.maxConsecutiveParseFailures =
             Number.isFinite(maxFailNum) && maxFailNum > 0
                 ? maxFailNum
-                : 10
+                : 30 // was 10; relax to be less sensitive to short bursts
 
         // ---- Failure window ms (env override with heuristic fallback) -----
         const windowRaw = process.env.SERIAL_PM_PARSE_FAILURE_WINDOW_MS
@@ -95,10 +95,10 @@ export class SerialPowerMeterService {
         if (Number.isFinite(windowNum) && windowNum > 0) {
             this.parseFailureWindowMs = windowNum
         } else {
-            // Heuristic: ~2x the time it would take to see
-            // maxConsecutiveParseFailures samples, clamped to [10s, 60s].
-            const heuristic = intervalSec * 1000 * this.maxConsecutiveParseFailures * 2
-            this.parseFailureWindowMs = Math.max(10_000, Math.min(60_000, heuristic))
+            // Heuristic (relaxed): ~3x the time it would take to see
+            // maxConsecutiveParseFailures samples, clamped to [60s, 300s].
+            const heuristic = intervalSec * 1000 * this.maxConsecutiveParseFailures * 3
+            this.parseFailureWindowMs = Math.max(60_000, Math.min(300_000, heuristic))
         }
     }
 
@@ -419,14 +419,19 @@ export class SerialPowerMeterService {
             return
         }
 
-        this.readBuffer += chunk
-        this.stats.bytesReceived += chunk.length
+        // Strip NULs at the chunk level so they don't poison splitting/parsing.
+        const cleanedChunk = chunk.replace(/\u0000+/g, '')
+
+        this.readBuffer += cleanedChunk
+        this.stats.bytesReceived += cleanedChunk.length
 
         const lines = this.readBuffer.split(/\r?\n/)
         this.readBuffer = lines.pop() ?? ''
 
         for (const line of lines) {
-            const trimmed = line.trim()
+            // Also strip any trailing NULs that slipped through and then trim.
+            const sanitized = line.replace(/\u0000+$/g, '')
+            const trimmed = sanitized.trim()
             if (!trimmed) continue
 
             if (trimmed.startsWith('#d')) {
@@ -458,7 +463,7 @@ export class SerialPowerMeterService {
                     try {
                         this.handleDataFrame(synthetic)
                         continue
-                    } catch (err) {
+                    } catch {
                         // console.log(
                         //     '[powermeter:debug] handleDataFrame threw on synthetic frame:',
                         //     (err as Error)?.message ?? err
@@ -468,17 +473,24 @@ export class SerialPowerMeterService {
 
                 const now = Date.now()
 
+                // Treat very small junk lines as harmless "noise":
+                // - still emit meter-unknown-line for observability
+                // - but do NOT emit a recoverable-error.
+                const isTinyJunk = trimmed.length < 8 || csvParts.length <= 3
+
                 this.deps.events.publish({
                     kind: 'meter-unknown-line',
                     at: now,
                     line: trimmed,
                 })
 
-                this.deps.events.publish({
-                    kind: 'recoverable-error',
-                    at: now,
-                    error: `Unknown line from power meter: "${trimmed}"`,
-                })
+                if (!isTinyJunk) {
+                    this.deps.events.publish({
+                        kind: 'recoverable-error',
+                        at: now,
+                        error: `Unknown line from power meter: "${trimmed}"`,
+                    })
+                }
             }
         }
     }
@@ -501,14 +513,20 @@ export class SerialPowerMeterService {
             const tooLongSinceGoodSample =
                 lastSampleAt != null && now - lastSampleAt > this.parseFailureWindowMs
 
-            if (
-                this.consecutiveParseFailures >= this.maxConsecutiveParseFailures ||
-                tooLongSinceGoodSample
-            ) {
+            const hitConsecutiveThreshold =
+                this.consecutiveParseFailures >= this.maxConsecutiveParseFailures
+
+            if (hitConsecutiveThreshold || tooLongSinceGoodSample) {
+                const deltaMs = lastSampleAt != null ? now - lastSampleAt : null
+
+                const reason = hitConsecutiveThreshold
+                    ? `consecutiveFailures=${this.consecutiveParseFailures} >= maxConsecutiveParseFailures=${this.maxConsecutiveParseFailures}`
+                    : `tooLongSinceGoodSample: deltaMs=${deltaMs} > parseFailureWindowMs=${this.parseFailureWindowMs}`
+
                 this.deps.events.publish({
                     kind: 'recoverable-error',
                     at: now,
-                    error: 'Too many invalid WattsUp frames; treating meter as disconnected',
+                    error: `Too many invalid WattsUp frames; treating meter as disconnected (${reason})`,
                 })
 
                 void this.handlePortError(
