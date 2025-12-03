@@ -615,11 +615,11 @@ export class SerialPowerMeterService {
                 // - but do NOT emit a recoverable-error.
                 const isTinyJunk = trimmed.length < 8 || csvParts.length <= 3
 
-                this.deps.events.publish({
-                    kind: 'meter-unknown-line',
-                    at: now,
-                    line: trimmed,
-                })
+                // this.deps.events.publish({
+                //     kind: 'meter-unknown-line',
+                //     at: now,
+                //     line: trimmed,
+                // })
 
                 if (!isTinyJunk) {
                     this.deps.events.publish({

@@ -180,10 +180,10 @@
                         </div>
                     </div>
 
-                    <!-- Histogram advanced options (x-axis & resolution) -->
+                    <!-- Chart advanced options (x-axis window & resolution) -->
                     <div class="histogram-advanced-settings">
                         <div class="histogram-settings-title">
-                            Histogram settings
+                            Chart settings
                         </div>
                         <div class="histogram-settings-grid">
                             <label class="histogram-setting">
@@ -197,10 +197,10 @@
                             </label>
                             <label class="histogram-setting">
                                 <span class="setting-label">Resolution</span>
-                                <select v-model.number="histogramBucketCount">
-                                    <option :value="20">Coarse (20 bars)</option>
-                                    <option :value="40">Medium (40 bars)</option>
-                                    <option :value="80">Fine (80 bars)</option>
+                                <select v-model.number="histogramMaxPoints">
+                                    <option :value="40">Coarse (up to 40 pts)</option>
+                                    <option :value="80">Medium (up to 80 pts)</option>
+                                    <option :value="160">Fine (up to 160 pts)</option>
                                 </select>
                             </label>
                             <div class="histogram-setting hint">
@@ -211,58 +211,122 @@
                 </div>
             </transition>
 
-            <!-- WATTS HISTOGRAM (visible in both basic & advanced views) -->
+            <!-- WATTS LINE CHART (visible in both basic & advanced views) -->
             <div class="histogram-panel">
                 <div class="histogram-header">
                     <div class="histogram-title">Watts History</div>
                     <div class="histogram-subtitle">
                         {{ histogramWindowLabel }}
-                        <span v-if="histogramMaxWatts > 0">
-                            • Peak ~ {{ histogramMaxWatts.toFixed(1) }} W
+                        <span v-if="chartHasData">
+                            • Low ~ {{ chartMinDisplay.toFixed(1) }} W
+                            • High ~ {{ chartMaxDisplay.toFixed(1) }} W
                         </span>
                     </div>
                 </div>
 
                 <div
-                    v-if="histogramBuckets.length === 0 || histogramMaxWatts === 0"
+                    v-if="!chartHasData"
                     class="histogram-empty"
                 >
-                    Waiting for enough samples to build a histogram…
+                    Waiting for enough samples to build a chart…
                 </div>
 
                 <div v-else class="histogram-chart-container">
                     <svg
                         class="histogram-chart"
-                        viewBox="0 0 100 40"
+                        viewBox="0 0 100 60"
                         preserveAspectRatio="none"
                         aria-hidden="true"
                     >
-                        <!-- X-axis baseline -->
-                        <line
-                            x1="0"
-                            y1="40"
-                            x2="100"
-                            y2="40"
-                            class="histogram-axis"
+                        <!-- White background -->
+                        <rect x="0" y="0" width="100" height="60" class="chart-bg" />
+
+                        <!-- Inner plot area background -->
+                        <rect
+                            :x="chartPadding.left"
+                            :y="chartPadding.top"
+                            :width="chartInnerWidth"
+                            :height="chartInnerHeight"
+                            class="chart-inner-bg"
                         />
-                        <!-- Bars -->
-                        <g>
-                            <rect
-                                v-for="(bucket, idx) in histogramBuckets"
-                                :key="idx"
-                                class="histogram-bar"
-                                :x="bucketX(idx, histogramBuckets.length)"
-                                :width="bucketWidth(histogramBuckets.length)"
-                                :y="bucketY(bucket.maxWatts)"
-                                :height="bucketHeight(bucket.maxWatts)"
+
+                        <!-- Grid lines (horizontal) -->
+                        <g class="grid-lines">
+                            <line
+                                v-for="tick in yTicks"
+                                :key="'y-'+tick.value"
+                                :x1="chartPadding.left"
+                                :x2="chartPadding.left + chartInnerWidth"
+                                :y1="tick.y"
+                                :y2="tick.y"
+                                class="grid-line"
                             />
                         </g>
-                    </svg>
-                </div>
 
-                <div class="histogram-footer">
-                    <span class="axis-label">Time (most recent on the right)</span>
-                    <span class="axis-label">Watts (auto-scaled to current peak)</span>
+                        <!-- Grid lines (vertical) -->
+                        <g class="grid-lines">
+                            <line
+                                v-for="tick in xTicks"
+                                :key="'x-'+tick.label"
+                                :x1="tick.x"
+                                :x2="tick.x"
+                                :y1="chartPadding.top"
+                                :y2="chartPadding.top + chartInnerHeight"
+                                class="grid-line"
+                            />
+                        </g>
+
+                        <!-- Axes -->
+                        <line
+                            :x1="chartPadding.left"
+                            :y1="chartPadding.top + chartInnerHeight"
+                            :x2="chartPadding.left + chartInnerWidth"
+                            :y2="chartPadding.top + chartInnerHeight"
+                            class="axis-line"
+                        />
+                        <line
+                            :x1="chartPadding.left"
+                            :y1="chartPadding.top"
+                            :x2="chartPadding.left"
+                            :y2="chartPadding.top + chartInnerHeight"
+                            class="axis-line"
+                        />
+
+                        <!-- Watts line -->
+                        <polyline
+                            v-if="chartPathPoints.length > 1"
+                            class="chart-line"
+                            :points="chartPathPoints"
+                        />
+                    </svg>
+
+                    <!-- Axis labels (outside the SVG for clarity) -->
+                    <div class="chart-axis-labels">
+                        <div class="y-axis-label">Watts</div>
+                        <div class="x-axis-label">Time (most recent on the right)</div>
+                    </div>
+
+                    <!-- Tick labels -->
+                    <div class="chart-tick-labels">
+                        <div class="y-ticks">
+                            <div
+                                v-for="tick in yTicks"
+                                :key="'y-label-'+tick.value"
+                                class="y-tick-label"
+                            >
+                                {{ tick.label }}
+                            </div>
+                        </div>
+                        <div class="x-ticks">
+                            <div
+                                v-for="tick in xTicks"
+                                :key="'x-label-'+tick.label"
+                                class="x-tick-label"
+                            >
+                                {{ tick.label }}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -543,13 +607,8 @@ function addSampleToRecorder(sample: PowerSample) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Watts histogram (client-side only)                                        */
+/*  Watts history (client-side only)                                          */
 /* -------------------------------------------------------------------------- */
-
-/**
- * We maintain a rolling in-memory history of watts samples.
- * This never leaves the browser and is discarded on refresh.
- */
 
 type WattsHistorySample = {
     t: number // epoch ms
@@ -564,8 +623,8 @@ const wattsHistory = ref<WattsHistorySample[]>([])
 // User-adjustable x-axis window (seconds). Default: 60s.
 const histogramWindowSec = ref(60)
 
-// User-adjustable resolution (# of buckets across x-axis)
-const histogramBucketCount = ref(40)
+// User-adjustable max # of points for the line (downsampling)
+const histogramMaxPoints = ref(80)
 
 // Helper: push latest watts sample into history, pruning old entries.
 function addSampleToHistory(sample: PowerSample) {
@@ -582,7 +641,6 @@ function addSampleToHistory(sample: PowerSample) {
 
         while (firstIdx < len) {
             const entry = history[firstIdx]
-            // Extra guard keeps TS happy and protects against weird states
             if (!entry || entry.t >= cutoff) break
             firstIdx++
         }
@@ -593,57 +651,6 @@ function addSampleToHistory(sample: PowerSample) {
     }
 }
 
-type HistogramBucket = {
-    start: number
-    end: number
-    maxWatts: number
-}
-
-const histogramBuckets = computed<HistogramBucket[]>(() => {
-    const now = Date.now()
-    const windowMs = histogramWindowSec.value * 1000
-
-    if (windowMs <= 0 || histogramBucketCount.value <= 0) {
-        return []
-    }
-
-    const from = now - windowMs
-    const samples = wattsHistory.value.filter(s => s.t >= from && s.t <= now)
-    if (samples.length === 0) return []
-
-    const bucketCount = histogramBucketCount.value
-    const bucketWidth = windowMs / bucketCount
-
-    const buckets: HistogramBucket[] = []
-    for (let i = 0; i < bucketCount; i++) {
-        const start = from + i * bucketWidth
-        const end = start + bucketWidth
-        buckets.push({ start, end, maxWatts: 0 })
-    }
-
-    for (const s of samples) {
-        const idx = Math.min(
-            bucketCount - 1,
-            Math.max(0, Math.floor((s.t - from) / bucketWidth))
-        )
-
-        const b = buckets[idx]
-        if (!b) continue   // <-- keeps TS happy and protects at runtime
-
-        b.maxWatts = Math.max(b.maxWatts, s.watts)
-    }
-
-    return buckets
-})
-
-const histogramMaxWatts = computed(() => {
-    if (!histogramBuckets.value.length) return 0
-    return histogramBuckets.value.reduce(
-        (max, b) => (b.maxWatts > max ? b.maxWatts : max),
-        0
-    )
-})
-
 const histogramWindowLabel = computed(() => {
     const sec = histogramWindowSec.value
     if (sec < 60) return `Last ${sec} seconds`
@@ -651,38 +658,196 @@ const histogramWindowLabel = computed(() => {
     return `Last ${minutes} minute${minutes === 1 ? '' : 's'}`
 })
 
-// SVG helpers – map bucket index & value into viewBox coordinates
-function bucketWidth(count: number): number {
-    if (count <= 0) return 0
-    const gap = 0.5 // small gap between bars (in viewBox units)
-    return 100 / count - gap
+/* -------------------------------------------------------------------------- */
+/*  Line chart projection                                                     */
+/* -------------------------------------------------------------------------- */
+
+type ChartPoint = {
+    t: number
+    watts: number
 }
 
-function bucketX(index: number, count: number): number {
-    if (count <= 0) return 0
-    const totalWidth = 100
-    const per = totalWidth / count
-    return index * per
+// Inner chart padding (matches SVG viewBox 0..100 x 0..60)
+const chartPadding = {
+    top: 6,
+    right: 4,
+    bottom: 12,
+    left: 10
+} as const
+
+const chartInnerWidth = computed(() => 100 - chartPadding.left - chartPadding.right)
+const chartInnerHeight = computed(() => 60 - chartPadding.top - chartPadding.bottom)
+
+// Points in the current window (downsampled to maxPoints)
+const chartPointsRaw = computed<ChartPoint[]>(() => {
+    const now = Date.now()
+    const windowMs = histogramWindowSec.value * 1000
+    if (windowMs <= 0) return []
+
+    const from = now - windowMs
+    const samples = wattsHistory.value.filter(s => s.t >= from && s.t <= now)
+    if (samples.length === 0) return []
+
+    const maxPoints = Math.max(10, histogramMaxPoints.value || 80)
+    if (samples.length <= maxPoints) {
+        return samples.map(s => ({ t: s.t, watts: s.watts }))
+    }
+
+    // Simple downsampling: pick every Nth point
+    const step = Math.ceil(samples.length / maxPoints)
+    const result: ChartPoint[] = []
+    for (let i = 0; i < samples.length; i += step) {
+        const s = samples[i]
+        if (!s) continue        // <-- eliminates the undefined warning
+        result.push({ t: s.t, watts: s.watts })
+    }
+    return result
+})
+
+const chartHasData = computed(() => chartPointsRaw.value.length > 1)
+
+const chartMaxWatts = computed(() => {
+    if (!chartPointsRaw.value.length) return 0
+    return chartPointsRaw.value.reduce(
+        (max, p) => (p.watts > max ? p.watts : max),
+        0
+    )
+})
+
+// For display we keep y-min pinned to 0 for intuitive visuals
+const chartMinWatts = computed(() => 0)
+
+const chartMinDisplay = computed(() => {
+    const pts = chartPointsRaw.value
+    if (pts.length === 0) return 0
+
+    const [first, ...rest] = pts
+    // extra guard, though length check guarantees `first`
+    if (!first) return 0
+
+    let min = first.watts
+    for (const p of rest) {
+        if (p.watts < min) {
+            min = p.watts
+        }
+    }
+
+    return min
+})
+
+const chartMaxDisplay = computed(() => chartMaxWatts.value)
+
+// Map time and watts into chart coordinates
+function timeToX(t: number, from: number, windowMs: number): number {
+    const innerWidth = chartInnerWidth.value
+    if (windowMs <= 0) return chartPadding.left
+    const frac = (t - from) / windowMs
+    return chartPadding.left + innerWidth * Math.min(Math.max(frac, 0), 1)
 }
 
-function bucketY(maxWatts: number): number {
-    const max = histogramMaxWatts.value
-    if (max <= 0) return 40
-    const norm = Math.min(1, maxWatts / max)
-    const barHeight = norm * 36 // leave some padding at the top
-    return 40 - barHeight
+function wattsToY(watts: number, min: number, max: number): number {
+    const innerHeight = chartInnerHeight.value
+    if (max <= min) return chartPadding.top + innerHeight
+    const frac = (watts - min) / (max - min)
+    const clamped = Math.min(Math.max(frac, 0), 1)
+    return chartPadding.top + innerHeight * (1 - clamped)
 }
 
-function bucketHeight(maxWatts: number): number {
-    const max = histogramMaxWatts.value
-    if (max <= 0) return 0
-    const norm = Math.min(1, maxWatts / max)
-    return norm * 36
+// Polyline points string
+const chartPathPoints = computed(() => {
+    const points = chartPointsRaw.value
+    if (points.length === 0) return ''
+
+    const now = Date.now()
+    const windowMs = histogramWindowSec.value * 1000
+    const from = now - windowMs
+
+    const minY = chartMinWatts.value
+    // Make the top a "nice" rounded value above max
+    const rawMax = chartMaxWatts.value
+    if (rawMax <= 0) return ''
+
+    const niceMax = niceCeil(rawMax)
+    return points
+        .map(p => {
+            const x = timeToX(p.t, from, windowMs)
+            const y = wattsToY(p.watts, minY, niceMax)
+            return `${x},${y}`
+        })
+        .join(' ')
+})
+
+// Y-axis ticks
+type YTick = { value: number; label: string; y: number }
+
+const yTicks = computed<YTick[]>(() => {
+    const rawMax = chartMaxWatts.value
+    if (rawMax <= 0) return []
+
+    const min = chartMinWatts.value
+    const max = niceCeil(rawMax)
+    const tickCount = 4
+    const step = (max - min) / (tickCount - 1)
+
+    const ticks: YTick[] = []
+    for (let i = 0; i < tickCount; i++) {
+        const value = min + step * i
+        const y = wattsToY(value, min, max)
+        const label =
+            max <= 10
+                ? value.toFixed(1)
+                : value.toFixed(0)
+        ticks.push({ value, label, y })
+    }
+    return ticks
+})
+
+// X-axis ticks
+type XTick = { label: string; x: number }
+
+const xTicks = computed<XTick[]>(() => {
+    const now = Date.now()
+    const windowMs = histogramWindowSec.value * 1000
+    if (windowMs <= 0) return []
+
+    const from = now - windowMs
+    const tickCount = 4
+    const ticks: XTick[] = []
+
+    for (let i = 0; i < tickCount; i++) {
+        const frac = i / (tickCount - 1)
+        const t = from + frac * windowMs
+        const x = timeToX(t, from, windowMs)
+
+        let label: string
+        if (i === tickCount - 1) {
+            label = 'Now'
+        } else {
+            const secondsAgo = Math.round((now - t) / 1000)
+            label = `-${secondsAgo}s`
+        }
+
+        ticks.push({ label, x })
+    }
+
+    return ticks
+})
+
+function niceCeil(value: number): number {
+    if (value <= 0) return 1
+    const magnitude = Math.pow(10, Math.floor(Math.log10(value)))
+    const normalized = value / magnitude
+    let niceNorm: number
+    if (normalized <= 1) niceNorm = 1
+    else if (normalized <= 2) niceNorm = 2
+    else if (normalized <= 5) niceNorm = 5
+    else niceNorm = 10
+    return niceNorm * magnitude
 }
 
 /**
  * Whenever `latest` changes:
- *  - Always add to watts history (for histogram).
+ *  - Always add to watts history (for chart).
  *  - If recording, also fold into stats.
  */
 watch(
@@ -690,7 +855,7 @@ watch(
     (val) => {
         if (!val) return
 
-        // Histogram history is independent of recording
+        // Historical chart is independent of recording
         addSampleToHistory(val)
 
         if (recState.value !== 'recording') return
@@ -1017,18 +1182,19 @@ const showAdvanced = ref(false)
     background: #020617;
 }
 
-/* Histogram panel */
+/* Chart panel */
 .histogram-panel {
     margin-top: 6px;
     padding: 8px;
     border-radius: 6px;
-    border: 1px dashed #1f2937;
-    background: #020617;
+    border: 1px dashed #d1d5db;
+    background: #ffffff;
     display: flex;
     flex-direction: column;
     gap: 6px;
     font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
         sans-serif;
+    color: #111827;
 }
 
 .histogram-header {
@@ -1057,7 +1223,7 @@ const showAdvanced = ref(false)
 
 .histogram-chart-container {
     width: 100%;
-    height: 80px;
+    height: 120px;
 }
 
 .histogram-chart {
@@ -1066,26 +1232,71 @@ const showAdvanced = ref(false)
     display: block;
 }
 
-/* Histogram SVG styles */
-.histogram-axis {
+/* Chart SVG styles */
+.chart-bg {
+    fill: #ffffff;
+}
+
+.chart-inner-bg {
+    fill: #f9fafb;
+}
+
+.axis-line {
     stroke: #374151;
     stroke-width: 0.5;
 }
 
-.histogram-bar {
-    fill: #22c55e;
-    opacity: 0.85;
+.grid-lines .grid-line {
+    stroke: #e5e7eb;
+    stroke-width: 0.4;
 }
 
-/* Footer labels */
-.histogram-footer {
+.chart-line {
+    fill: none;
+    stroke: #ef4444; /* red line as requested */
+    stroke-width: 0.9;
+}
+
+/* Axis labels (outside SVG) */
+.chart-axis-labels {
     display: flex;
     justify-content: space-between;
+    margin-top: 4px;
     font-size: 0.7rem;
-    opacity: 0.7;
+    opacity: 0.8;
 }
 
-/* Histogram advanced settings (advanced view only) */
+.chart-tick-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    font-size: 0.7rem;
+}
+
+.chart-tick-labels .y-ticks {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    opacity: 0.8;
+}
+
+.chart-tick-labels .x-ticks {
+    display: flex;
+    justify-content: space-between;
+    flex: 1;
+    gap: 4px;
+    opacity: 0.8;
+}
+
+.y-tick-label {
+    font-variant-numeric: tabular-nums;
+}
+
+.x-tick-label {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Chart advanced settings (advanced view only) */
 .histogram-advanced-settings {
     margin-top: 4px;
     padding: 8px;
@@ -1096,6 +1307,7 @@ const showAdvanced = ref(false)
     flex-direction: column;
     gap: 6px;
     font-size: 0.78rem;
+    color: #e5e7eb;
 }
 
 .histogram-settings-title {
@@ -1136,6 +1348,12 @@ const showAdvanced = ref(false)
     font-size: 0.78rem;
 }
 
+/* Footer labels */
+.axis-label {
+    font-size: 0.7rem;
+    opacity: 0.7;
+}
+
 /* Responsive: stack metrics if narrow */
 @media (max-width: 720px) {
     .current-grid {
@@ -1155,6 +1373,10 @@ const showAdvanced = ref(false)
     .histogram-header {
         flex-direction: column;
         align-items: flex-start;
+    }
+
+    .chart-tick-labels .x-ticks {
+        justify-content: space-between;
     }
 }
 </style>
