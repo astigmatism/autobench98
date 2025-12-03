@@ -537,11 +537,6 @@ export class SerialPowerMeterService {
             return
         }
 
-        // Debug: log chunk for visibility when enabled
-        if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
-            console.log('[powermeter:debug] chunk', chunk)
-        }
-
         // Strip NULs at the chunk level so they don't poison splitting/parsing.
         const cleanedChunk = chunk.replace(/\u0000+/g, '')
 
@@ -556,6 +551,10 @@ export class SerialPowerMeterService {
             const sanitized = line.replace(/\u0000+$/g, '')
             const trimmed = sanitized.trim()
             if (!trimmed) continue
+
+            if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
+                console.log('[powermeter:debug] raw line', JSON.stringify(trimmed))
+            }
 
             if (trimmed.startsWith('#d')) {
                 // Canonical WattsUp frame:
