@@ -553,7 +553,8 @@ export class SerialPowerMeterService {
             if (!trimmed) continue
 
             if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
-                console.log('[powermeter:debug] raw line', JSON.stringify(trimmed))
+                const nowIso = () => new Date().toISOString()
+                console.log(`[powermeter:debug] ${nowIso()} raw line`, JSON.stringify(trimmed))
             }
 
             if (trimmed.startsWith('#d')) {
