@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import { SerialPort } from 'serialport'
 import {
     type PowerMeterConfig,
@@ -552,7 +553,6 @@ export class SerialPowerMeterService {
             if (!trimmed) continue
 
             if (trimmed.startsWith('#d')) {
-                // console.log('[powermeter:debug] raw data frame:', trimmed)
                 this.handleDataFrame(trimmed)
             } else if (trimmed.startsWith('#')) {
                 this.deps.events.publish({
@@ -574,17 +574,11 @@ export class SerialPowerMeterService {
                 if (enoughFields && looksNumericOrPlaceholder && trimmed.endsWith(';')) {
                     const synthetic = `#d,${trimmed}`
 
-                    // console.log('[powermeter:debug] headerless candidate:', trimmed)
-                    // console.log('[powermeter:debug] synthetic frame:', synthetic)
-
                     try {
                         this.handleDataFrame(synthetic)
                         continue
                     } catch {
-                        // console.log(
-                        //     '[powermeter:debug] handleDataFrame threw on synthetic frame:',
-                        //     (err as Error)?.message ?? err
-                        // )
+                        // Swallow and treat as unknown junk below.
                     }
                 }
 
@@ -681,13 +675,18 @@ export class SerialPowerMeterService {
             return
         }
 
-        // We successfully parsed a sample, so reset both failure counters.
+        // ✅ Successfully parsed sample
         this.consecutiveParseFailures = 0
         this.invalidFramesSinceLastGoodSample = 0
 
         const nowSample = now
         this.stats.totalSamples += 1
         this.stats.lastSampleAt = nowSample
+
+        // Debug: log parsed sample for visibility when enabled
+        if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
+            console.log('[powermeter:debug] parsed sample', sample)
+        }
 
         // Maintain bounded recent sample buffer
         this.recentSamples.push(sample)
