@@ -19,6 +19,27 @@ interface SerialPowerMeterServiceDeps {
 }
 
 /**
+ * Internal per-recorder quality tracking.
+ *
+ * This lives alongside RecorderInstance rather than inside it so we
+ * don’t change the recorder contract or utils.ts patterns.
+ */
+interface RecorderQualityStats {
+    /** When this recorder was started (ms since epoch). */
+    startedAt: number
+    /** When this recorder was ended (ms since epoch), set at endRecording. */
+    endedAt: number | null
+    /** Number of successfully parsed samples while this recorder was active. */
+    goodSamples: number
+    /** Number of parse failures / bad frames while this recorder was active. */
+    badFrames: number
+    /** Timestamp of last good sample routed to this recorder. */
+    lastGoodSampleAt: number | null
+    /** Largest gap between successive good samples while active (ms). */
+    maxGapMs: number
+}
+
+/**
  * SerialPowerMeterService
  *
  * - Attaches to a WattsUp? PRO serial device when a compatible path is discovered.
@@ -59,6 +80,13 @@ export class SerialPowerMeterService {
     private recorders = new Map<string, RecorderInstance>()
 
     /**
+     * Per-recorder quality metadata keyed by recorderId.
+     * This is intentionally separate from RecorderInstance to respect
+     * the utils.ts / types.ts separation.
+     */
+    private recorderQuality = new Map<string, RecorderQualityStats>()
+
+    /**
      * Guardrails for unparseable data:
      *
      * - We treat repeated invalid frames as a sign that the device is unhealthy
@@ -73,6 +101,15 @@ export class SerialPowerMeterService {
     private consecutiveParseFailures = 0
     private readonly maxConsecutiveParseFailures: number
     private readonly parseFailureWindowMs: number
+
+    /**
+     * Whether to actually perform a "soft disconnect" (close + reconnect)
+     * when guardrails for invalid frames are tripped.
+     *
+     * Controlled by SERIAL_PM_ENABLE_SOFT_DISCONNECT; defaults to false so
+     * benchmarks rely on per-run quality rather than port churn.
+     */
+    private readonly enableSoftDisconnect: boolean
 
     constructor(config: PowerMeterConfig, deps: SerialPowerMeterServiceDeps) {
         this.config = config
@@ -100,6 +137,15 @@ export class SerialPowerMeterService {
             const heuristic = intervalSec * 1000 * this.maxConsecutiveParseFailures * 3
             this.parseFailureWindowMs = Math.max(60_000, Math.min(300_000, heuristic))
         }
+
+        // ---- Soft disconnect enable flag ----------------------------------
+        const softRaw = process.env.SERIAL_PM_ENABLE_SOFT_DISCONNECT
+        if (softRaw == null || softRaw === '') {
+            this.enableSoftDisconnect = false
+        } else {
+            const v = softRaw.toLowerCase()
+            this.enableSoftDisconnect = v === 'true' || v === '1' || v === 'yes'
+        }
     }
 
     /* ---------------------------------------------------------------------- */
@@ -115,6 +161,7 @@ export class SerialPowerMeterService {
     public async stop(): Promise<void> {
         this.clearReconnectTimer()
         this.recorders.clear()
+        this.recorderQuality.clear()
         await this.closePort('explicit-close')
         this.state = { phase: 'disconnected' }
         this.deviceId = null
@@ -214,6 +261,16 @@ export class SerialPowerMeterService {
         const inst = createRecorder(recorderId, options)
         this.recorders.set(recorderId, inst)
 
+        const quality: RecorderQualityStats = {
+            startedAt: now,
+            endedAt: null,
+            goodSamples: 0,
+            badFrames: 0,
+            lastGoodSampleAt: null,
+            maxGapMs: 0,
+        }
+        this.recorderQuality.set(recorderId, quality)
+
         this.deps.events.publish({
             kind: 'recording-started',
             at: now,
@@ -224,12 +281,61 @@ export class SerialPowerMeterService {
 
     public endRecording(recorderId: string): PowerRecordingSummary | null {
         const inst = this.recorders.get(recorderId)
+        const quality = this.recorderQuality.get(recorderId)
         if (!inst) return null
 
         this.recorders.delete(recorderId)
+        this.recorderQuality.delete(recorderId)
+
+        const now = Date.now()
+        if (quality) {
+            quality.endedAt = now
+        }
 
         const summary = inst.finish()
-        const now = Date.now()
+
+        // If we have quality stats, attach a derived quality block
+        if (quality) {
+            const intervalSec = this.config.samplingIntervalSec ?? 1
+            const intervalMs = Math.max(1, intervalSec * 1000)
+
+            const startedAt = quality.startedAt
+            const endedAt = quality.endedAt ?? now
+            const durationMs = Math.max(0, endedAt - startedAt)
+
+            const expectedSamples = Math.max(1, Math.round(durationMs / intervalMs))
+            const goodSamples = quality.goodSamples
+            const badFrames = quality.badFrames
+
+            const goodSampleRatio = goodSamples / expectedSamples
+            const badFrameRatio = badFrames / expectedSamples
+            const maxGapMs = quality.maxGapMs
+
+            // Simple heuristic verdict:
+            //  - good:     dense stream, low bad frame ratio, small gaps
+            //  - degraded: usable but noticeable gaps or errors
+            //  - poor:     too many gaps or bad frames to trust
+            let verdict: 'good' | 'degraded' | 'poor' = 'good'
+
+            if (goodSampleRatio < 0.9 || badFrameRatio > 0.1 || maxGapMs > 10_000) {
+                verdict = 'poor'
+            } else if (goodSampleRatio < 0.98 || badFrameRatio > 0.02 || maxGapMs > 3_000) {
+                verdict = 'degraded'
+            }
+
+            ;(summary as any).quality = {
+                startedAt,
+                endedAt,
+                durationMs,
+                expectedSamples,
+                goodSamples,
+                badFrames,
+                goodSampleRatio,
+                badFrameRatio,
+                maxGapMs,
+                verdict,
+            }
+        }
 
         this.deps.events.publish({
             kind: 'recording-finished',
@@ -246,6 +352,7 @@ export class SerialPowerMeterService {
         if (!inst) return
 
         this.recorders.delete(recorderId)
+        this.recorderQuality.delete(recorderId)
 
         this.deps.events.publish({
             kind: 'recording-cancelled',
@@ -502,6 +609,11 @@ export class SerialPowerMeterService {
         if (!sample) {
             this.consecutiveParseFailures += 1
 
+            // Count this as a bad frame for all active recorders
+            for (const stats of this.recorderQuality.values()) {
+                stats.badFrames += 1
+            }
+
             this.stats.lastErrorAt = now
             this.deps.events.publish({
                 kind: 'recoverable-error',
@@ -523,15 +635,24 @@ export class SerialPowerMeterService {
                     ? `consecutiveFailures=${this.consecutiveParseFailures} >= maxConsecutiveParseFailures=${this.maxConsecutiveParseFailures}`
                     : `tooLongSinceGoodSample: deltaMs=${deltaMs} > parseFailureWindowMs=${this.parseFailureWindowMs}`
 
-                this.deps.events.publish({
-                    kind: 'recoverable-error',
-                    at: now,
-                    error: `Too many invalid WattsUp frames; treating meter as disconnected (${reason})`,
-                })
+                if (this.enableSoftDisconnect) {
+                    this.deps.events.publish({
+                        kind: 'recoverable-error',
+                        at: now,
+                        error: `Too many invalid WattsUp frames; treating meter as disconnected (${reason}, soft disconnect enabled)`,
+                    })
 
-                void this.handlePortError(
-                    new Error('Too many invalid WattsUp data frames (soft disconnect)')
-                )
+                    void this.handlePortError(
+                        new Error('Too many invalid WattsUp data frames (soft disconnect)')
+                    )
+                } else {
+                    // Log that we hit guardrails but are intentionally *not* bouncing the port.
+                    this.deps.events.publish({
+                        kind: 'recoverable-error',
+                        at: now,
+                        error: `Too many invalid WattsUp frames (${reason}); soft disconnect disabled, keeping port open`,
+                    })
+                }
             }
 
             return
@@ -543,13 +664,29 @@ export class SerialPowerMeterService {
         this.stats.totalSamples += 1
         this.stats.lastSampleAt = nowSample
 
+        // Maintain bounded recent sample buffer
         this.recentSamples.push(sample)
         if (this.recentSamples.length > this.config.maxRecentSamples) {
             this.recentSamples.splice(0, this.recentSamples.length - this.config.maxRecentSamples)
         }
 
-        for (const inst of this.recorders.values()) {
+        // Feed all active recorders and update their quality stats
+        for (const [recorderId, inst] of this.recorders.entries()) {
             inst.addSample(sample)
+
+            const stats = this.recorderQuality.get(recorderId)
+            if (!stats) continue
+
+            stats.goodSamples += 1
+
+            if (stats.lastGoodSampleAt != null) {
+                const gap = nowSample - stats.lastGoodSampleAt
+                if (gap > stats.maxGapMs) {
+                    stats.maxGapMs = gap
+                }
+            }
+
+            stats.lastGoodSampleAt = nowSample
         }
 
         this.deps.events.publish({

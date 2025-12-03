@@ -65,6 +65,33 @@ export interface PowerRecorderOptions {
     meta?: Record<string, unknown>
 }
 
+/**
+ * Per-recording quality metrics, computed at endRecording.
+ */
+export interface PowerRecordingQuality {
+    startedAt: number
+    endedAt: number
+    /** Duration of the recording in milliseconds. */
+    durationMs: number
+    /**
+     * Expected samples based on configured samplingIntervalSec and duration.
+     * Always >= 1.
+     */
+    expectedSamples: number
+    /** Number of successfully parsed samples during this recording. */
+    goodSamples: number
+    /** Number of bad frames / parse failures during this recording. */
+    badFrames: number
+    /** goodSamples / expectedSamples, in [0, 1]. */
+    goodSampleRatio: number
+    /** badFrames / expectedSamples, in [0, 1]. */
+    badFrameRatio: number
+    /** Largest observed gap between successive good samples, in ms. */
+    maxGapMs: number
+    /** High-level verdict for this recording. */
+    verdict: 'good' | 'degraded' | 'poor'
+}
+
 export interface PowerRecordingSummary {
     recorderId: string
     startedAt: string
@@ -92,6 +119,12 @@ export interface PowerRecordingSummary {
     missingIntervals?: number
 
     meta?: Record<string, unknown>
+
+    /**
+     * Optional per-recording quality metrics. Populated by
+     * SerialPowerMeterService.endRecording when available.
+     */
+    quality?: PowerRecordingQuality
 }
 
 /* -------------------------------------------------------------------------- */
