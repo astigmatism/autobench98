@@ -614,19 +614,14 @@ export class SerialPowerMeterService {
                 stats.badFrames += 1
             }
 
-            this.stats.lastErrorAt = now
-            this.deps.events.publish({
-                kind: 'recoverable-error',
-                at: now,
-                error: `Failed to parse WattsUp data frame (consecutiveFailures=${this.consecutiveParseFailures})`,
-            })
-
             const lastSampleAt = this.stats.lastSampleAt
             const tooLongSinceGoodSample =
                 lastSampleAt != null && now - lastSampleAt > this.parseFailureWindowMs
 
             const hitConsecutiveThreshold =
                 this.consecutiveParseFailures >= this.maxConsecutiveParseFailures
+
+            this.stats.lastErrorAt = now
 
             if (hitConsecutiveThreshold || tooLongSinceGoodSample) {
                 const reasons: string[] = []
@@ -658,13 +653,20 @@ export class SerialPowerMeterService {
                         new Error('Too many invalid WattsUp data frames (soft disconnect)')
                     )
                 } else {
-                    // Log that we hit guardrails but are intentionally *not* bouncing the port.
                     this.deps.events.publish({
                         kind: 'recoverable-error',
                         at: now,
                         error: `Invalid WattsUp data guardrail tripped (${reasonSummary}); soft disconnect ${softFlag}, keeping port open`,
                     })
                 }
+            } else {
+                // Only log the simple per-frame parse error when guardrails
+                // are NOT tripped; this avoids paired logs that look contradictory.
+                this.deps.events.publish({
+                    kind: 'recoverable-error',
+                    at: now,
+                    error: `Failed to parse WattsUp data frame (consecutiveFailures=${this.consecutiveParseFailures})`,
+                })
             }
 
             return
