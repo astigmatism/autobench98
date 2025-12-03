@@ -232,130 +232,91 @@
                 </div>
 
                 <div v-else class="histogram-chart-container">
-                    <div class="histogram-chart-shell">
-                        <div class="histogram-y-labels">
-                            <div
-                                v-for="tick in yTicks"
-                                :key="'y-label-'+tick.value"
-                                class="y-tick-label"
-                            >
-                                {{ tick.label }}
-                            </div>
-                            <div class="y-axis-caption">Watts</div>
-                        </div>
+                    <svg
+                        class="histogram-chart"
+                        viewBox="0 0 100 60"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                    >
+                        <!-- White background -->
+                        <rect x="0" y="0" width="100" height="60" class="chart-bg" />
 
-                        <div class="histogram-chart-container">
-                            <svg
-                                class="histogram-chart"
-                                viewBox="0 0 100 60"
-                                preserveAspectRatio="none"
-                                aria-hidden="true"
-                            >
-                                <!-- White background -->
-                                <rect x="0" y="0" width="100" height="60" class="chart-bg" />
+                        <!-- Inner plot area background -->
+                        <rect
+                            :x="chartPadding.left"
+                            :y="chartPadding.top"
+                            :width="chartInnerWidth"
+                            :height="chartInnerHeight"
+                            class="chart-inner-bg"
+                        />
 
-                                <!-- Inner plot area background -->
-                                <rect
-                                    :x="chartPadding.left"
-                                    :y="chartPadding.top"
-                                    :width="chartInnerWidth"
-                                    :height="chartInnerHeight"
-                                    class="chart-inner-bg"
-                                />
-
-                                <!-- Grid lines (horizontal) -->
-                                <g class="grid-lines">
-                                    <line
-                                        v-for="tick in yTicks"
-                                        :key="'y-'+tick.value"
-                                        :x1="chartPadding.left"
-                                        :x2="chartPadding.left + chartInnerWidth"
-                                        :y1="tick.y"
-                                        :y2="tick.y"
-                                        class="grid-line"
-                                    />
-                                </g>
-
-                                <!-- Grid lines (vertical) -->
-                                <g class="grid-lines">
-                                    <line
-                                        v-for="tick in xTicks"
-                                        :key="'x-'+tick.label"
-                                        :x1="tick.x"
-                                        :x2="tick.x"
-                                        :y1="chartPadding.top"
-                                        :y2="chartPadding.top + chartInnerHeight"
-                                        class="grid-line"
-                                    />
-                                </g>
-
-                                <!-- Axes -->
+                        <!-- Horizontal grid + Y tick labels -->
+                        <g class="grid-lines">
+                            <g v-for="tick in yTicks" :key="'y-'+tick.value">
                                 <line
                                     :x1="chartPadding.left"
-                                    :y1="chartPadding.top + chartInnerHeight"
                                     :x2="chartPadding.left + chartInnerWidth"
-                                    :y2="chartPadding.top + chartInnerHeight"
-                                    class="axis-line"
+                                    :y1="tick.y"
+                                    :y2="tick.y"
+                                    class="grid-line"
                                 />
-                                <line
-                                    :x1="chartPadding.left"
-                                    :y1="chartPadding.top"
-                                    :x2="chartPadding.left"
-                                    :y2="chartPadding.top + chartInnerHeight"
-                                    class="axis-line"
-                                />
-
-                                <!-- Watts line -->
-                                <polyline
-                                    v-if="chartPathPoints.length > 1"
-                                    class="chart-line"
-                                    :points="chartPathPoints"
-                                />
-                            </svg>
-
-                            <div class="histogram-x-labels">
-                                <div
-                                    v-for="tick in xTicks"
-                                    :key="'x-label-'+tick.label"
-                                    class="x-tick-label"
+                                <text
+                                    class="y-tick-text"
+                                    :x="chartPadding.left - 2"
+                                    :y="tick.y"
+                                    text-anchor="end"
+                                    dominant-baseline="middle"
                                 >
                                     {{ tick.label }}
-                                </div>
-                            </div>
+                                </text>
+                            </g>
+                        </g>
 
-                            <div class="x-axis-caption">
-                                Time (most recent on the right)
-                            </div>
-                        </div>
-                    </div>
+                        <!-- Vertical grid + X tick labels -->
+                        <g class="grid-lines">
+                            <g v-for="tick in xTicks" :key="'x-'+tick.label">
+                                <line
+                                    :x1="tick.x"
+                                    :x2="tick.x"
+                                    :y1="chartPadding.top"
+                                    :y2="chartPadding.top + chartInnerHeight"
+                                    class="grid-line"
+                                />
+                                <text
+                                    class="x-tick-text"
+                                    :x="tick.x"
+                                    :y="chartPadding.top + chartInnerHeight + 3"
+                                    text-anchor="middle"
+                                    dominant-baseline="hanging"
+                                >
+                                    {{ tick.label }}
+                                </text>
+                            </g>
+                        </g>
 
-                    <!-- Axis labels (outside the SVG for clarity) -->
-                    <div class="chart-axis-labels">
-                        <div class="y-axis-label">Watts</div>
-                        <div class="x-axis-label">Time (most recent on the right)</div>
-                    </div>
+                        <!-- Axes -->
+                        <line
+                            :x1="chartPadding.left"
+                            :y1="chartPadding.top + chartInnerHeight"
+                            :x2="chartPadding.left + chartInnerWidth"
+                            :y2="chartPadding.top + chartInnerHeight"
+                            class="axis-line"
+                        />
+                        <line
+                            :x1="chartPadding.left"
+                            :y1="chartPadding.top"
+                            :x2="chartPadding.left"
+                            :y2="chartPadding.top + chartInnerHeight"
+                            class="axis-line"
+                        />
 
-                    <!-- Tick labels -->
-                    <div class="chart-tick-labels">
-                        <div class="y-ticks">
-                            <div
-                                v-for="tick in yTicks"
-                                :key="'y-label-'+tick.value"
-                                class="y-tick-label"
-                            >
-                                {{ tick.label }}
-                            </div>
-                        </div>
-                        <div class="x-ticks">
-                            <div
-                                v-for="tick in xTicks"
-                                :key="'x-label-'+tick.label"
-                                class="x-tick-label"
-                            >
-                                {{ tick.label }}
-                            </div>
-                        </div>
-                    </div>
+                        <!-- Watts line -->
+                        <polyline
+                            v-if="chartPathPoints.length > 1"
+                            class="chart-line"
+                            :points="chartPathPoints"
+                        />
+                    </svg>
                 </div>
             </div>
         </div>
@@ -701,7 +662,7 @@ const chartPadding = {
     top: 6,
     right: 4,
     bottom: 12,
-    left: 10
+    left: 12
 } as const
 
 const chartInnerWidth = computed(() => 100 - chartPadding.left - chartPadding.right)
@@ -727,7 +688,7 @@ const chartPointsRaw = computed<ChartPoint[]>(() => {
     const result: ChartPoint[] = []
     for (let i = 0; i < samples.length; i += step) {
         const s = samples[i]
-        if (!s) continue        // <-- eliminates the undefined warning
+        if (!s) continue
         result.push({ t: s.t, watts: s.watts })
     }
     return result
@@ -751,7 +712,6 @@ const chartMinDisplay = computed(() => {
     if (pts.length === 0) return 0
 
     const [first, ...rest] = pts
-    // extra guard, though length check guarantees `first`
     if (!first) return 0
 
     let min = first.watts
@@ -792,7 +752,6 @@ const chartPathPoints = computed(() => {
     const from = now - windowMs
 
     const minY = chartMinWatts.value
-    // Make the top a "nice" rounded value above max
     const rawMax = chartMaxWatts.value
     if (rawMax <= 0) return ''
 
@@ -1272,57 +1231,25 @@ const showAdvanced = ref(false)
 
 .axis-line {
     stroke: #374151;
-    stroke-width: 0.5;
+    stroke-width: 0.4;
 }
 
 .grid-lines .grid-line {
     stroke: #e5e7eb;
-    stroke-width: 0.4;
+    stroke-width: 0.35;
 }
 
 .chart-line {
     fill: none;
     stroke: #ef4444; /* red line as requested */
-    stroke-width: 0.9;
+    stroke-width: 0.6; /* thinner line */
 }
 
-/* Axis labels (outside SVG) */
-.chart-axis-labels {
-    display: flex;
-    justify-content: space-between;
-    margin-top: 4px;
-    font-size: 0.7rem;
-    opacity: 0.8;
-}
-
-.chart-tick-labels {
-    display: flex;
-    justify-content: space-between;
-    margin-top: 4px;
-    font-size: 0.7rem;
-}
-
-.chart-tick-labels .y-ticks {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    opacity: 0.8;
-}
-
-.chart-tick-labels .x-ticks {
-    display: flex;
-    justify-content: space-between;
-    flex: 1;
-    gap: 4px;
-    opacity: 0.8;
-}
-
-.y-tick-label {
-    font-variant-numeric: tabular-nums;
-}
-
-.x-tick-label {
-    font-variant-numeric: tabular-nums;
+/* SVG tick text */
+.y-tick-text,
+.x-tick-text {
+    font-size: 2.2px; /* tiny in viewBox units */
+    fill: #6b7280;
 }
 
 /* Chart advanced settings (advanced view only) */
@@ -1377,12 +1304,6 @@ const showAdvanced = ref(false)
     font-size: 0.78rem;
 }
 
-/* Footer labels */
-.axis-label {
-    font-size: 0.7rem;
-    opacity: 0.7;
-}
-
 /* Responsive: stack metrics if narrow */
 @media (max-width: 720px) {
     .current-grid {
@@ -1402,10 +1323,6 @@ const showAdvanced = ref(false)
     .histogram-header {
         flex-direction: column;
         align-items: flex-start;
-    }
-
-    .chart-tick-labels .x-ticks {
-        justify-content: space-between;
     }
 }
 </style>
