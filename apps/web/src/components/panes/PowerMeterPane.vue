@@ -261,7 +261,7 @@ import {
     type ChartData
 } from 'chart.js'
 
-ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend)
+ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, TimeScale, Tooltip, Legend)
 
 /**
  * Pane context — same pattern as logs pane.
@@ -647,21 +647,6 @@ const chartMinDisplay = computed(() => {
 })
 
 const chartMaxDisplay = computed(() => chartMaxWatts.value)
-
-/* Labels and dataset for Chart.js */
-
-const chartLabels = computed(() => {
-    const now = Date.now()
-    return chartPointsRaw.value.map(p => {
-        const secondsAgo = Math.round((now - p.t) / 1000)
-        if (secondsAgo <= 0) return 'Now'
-        return `-${secondsAgo}s`
-    })
-})
-
-const chartDatasetData = computed(() =>
-    chartPointsRaw.value.map(p => p.watts)
-)
 
 function niceCeil(value: number): number {
     if (value <= 0) return 1
