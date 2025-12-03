@@ -537,6 +537,11 @@ export class SerialPowerMeterService {
             return
         }
 
+        // Debug: log chunk for visibility when enabled
+        if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
+            console.log('[powermeter:debug] chunk', chunk)
+        }
+
         // Strip NULs at the chunk level so they don't poison splitting/parsing.
         const cleanedChunk = chunk.replace(/\u0000+/g, '')
 
@@ -553,32 +558,53 @@ export class SerialPowerMeterService {
             if (!trimmed) continue
 
             if (trimmed.startsWith('#d')) {
+                // Canonical WattsUp frame:
+                //   "#d,-,18,610,1186,545,45,_,_,_,610,_,_,_,_,_,94,_,_,_,_;"
                 this.handleDataFrame(trimmed)
-            } else if (trimmed.startsWith('#')) {
-                this.deps.events.publish({
-                    kind: 'meter-control-line',
-                    at: Date.now(),
-                    line: trimmed,
-                })
             } else {
                 const csvParts = trimmed.split(',')
-                const enoughFields = csvParts.length >= 5
 
-                const looksNumericOrPlaceholder = csvParts.every(part => {
-                    const withoutTerminator = part.replace(/;$/, '')
-                    if (!withoutTerminator) return true
-                    if (withoutTerminator === '_' || withoutTerminator === '-') return true
-                    return /^-?\d+(\.\d+)?$/.test(withoutTerminator)
-                })
+                // Helper: strict "integer-ish" check used for key numeric fields.
+                const isIntLike = (value: string | undefined): boolean => {
+                    if (value == null) return false
+                    const withoutTerminator = value.replace(/;$/, '')
+                    if (withoutTerminator === '' || withoutTerminator === '_' || withoutTerminator === '-') {
+                        return false
+                    }
+                    return /^-?\d+$/.test(withoutTerminator)
+                }
 
-                if (enoughFields && looksNumericOrPlaceholder && trimmed.endsWith(';')) {
+                const looksLikeBareWattsUpRow = (() => {
+                    // A valid frame example:
+                    //   "-,18,610,1186,545,45,_,_,_,610,_,_,_,_,_,94,_,_,_,_;"
+                    //
+                    // When headerless, we expect:
+                    //   - A trailing ';'
+                    //   - At least ~20 fields
+                    //   - Numeric index at [1]
+                    //   - Numeric watts/volts/amps at [2],[3],[4] after header injection
+                    //     (i.e., original positions [2],[3],[4],[5] in the bare row)
+                    if (!trimmed.endsWith(';')) return false
+                    if (csvParts.length < 18) return false
+
+                    // index, watts_raw, volts_raw, amps_raw should all be integer-like
+                    return (
+                        isIntLike(csvParts[1]) && // sample index
+                        isIntLike(csvParts[2]) && // watts_raw
+                        isIntLike(csvParts[3]) && // volts_raw
+                        isIntLike(csvParts[4])    // amps_raw
+                    )
+                })()
+
+                if (looksLikeBareWattsUpRow) {
+                    // Promote a bare data row to a synthetic "#d,..." frame.
                     const synthetic = `#d,${trimmed}`
 
                     try {
                         this.handleDataFrame(synthetic)
                         continue
                     } catch {
-                        // Swallow and treat as unknown junk below.
+                        // If parsing still fails, fall through and treat as junk.
                     }
                 }
 
@@ -682,11 +708,6 @@ export class SerialPowerMeterService {
         const nowSample = now
         this.stats.totalSamples += 1
         this.stats.lastSampleAt = nowSample
-
-        // Debug: log parsed sample for visibility when enabled
-        if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
-            console.log('[powermeter:debug] parsed sample', sample)
-        }
 
         // Maintain bounded recent sample buffer
         this.recentSamples.push(sample)
