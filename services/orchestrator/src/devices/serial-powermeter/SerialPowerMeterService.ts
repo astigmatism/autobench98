@@ -1,5 +1,3 @@
-/* eslint-disable no-console */
-
 import { SerialPort } from 'serialport'
 import {
     type PowerMeterConfig,
@@ -432,7 +430,7 @@ export class SerialPowerMeterService {
             if (!trimmed) continue
 
             if (trimmed.startsWith('#d')) {
-                console.log('[powermeter:debug] raw data frame:', trimmed)
+                // console.log('[powermeter:debug] raw data frame:', trimmed)
                 this.handleDataFrame(trimmed)
             } else if (trimmed.startsWith('#')) {
                 this.deps.events.publish({
@@ -454,17 +452,17 @@ export class SerialPowerMeterService {
                 if (enoughFields && looksNumericOrPlaceholder && trimmed.endsWith(';')) {
                     const synthetic = `#d,${trimmed}`
 
-                    console.log('[powermeter:debug] headerless candidate:', trimmed)
-                    console.log('[powermeter:debug] synthetic frame:', synthetic)
+                    // console.log('[powermeter:debug] headerless candidate:', trimmed)
+                    // console.log('[powermeter:debug] synthetic frame:', synthetic)
 
                     try {
                         this.handleDataFrame(synthetic)
                         continue
                     } catch (err) {
-                        console.log(
-                            '[powermeter:debug] handleDataFrame threw on synthetic frame:',
-                            (err as Error)?.message ?? err
-                        )
+                        // console.log(
+                        //     '[powermeter:debug] handleDataFrame threw on synthetic frame:',
+                        //     (err as Error)?.message ?? err
+                        // )
                     }
                 }
 
@@ -522,20 +520,6 @@ export class SerialPowerMeterService {
         }
 
         this.consecutiveParseFailures = 0
-
-        // TEMP debug for watts / volts / amps
-        try {
-            const debugWatts = (sample as any).watts
-            const debugVolts = (sample as any).volts
-            const debugAmps = (sample as any).amps
-
-            console.log(
-                '[powermeter:debug] sample parsed →',
-                `watts=${debugWatts} volts=${debugVolts} amps=${debugAmps}`
-            )
-        } catch (err) {
-            console.log('[powermeter:debug] failed to inspect PowerSample', err)
-        }
 
         const nowSample = now
         this.stats.totalSamples += 1
