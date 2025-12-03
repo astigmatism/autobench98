@@ -629,17 +629,29 @@ export class SerialPowerMeterService {
                 this.consecutiveParseFailures >= this.maxConsecutiveParseFailures
 
             if (hitConsecutiveThreshold || tooLongSinceGoodSample) {
-                const deltaMs = lastSampleAt != null ? now - lastSampleAt : null
+                const reasons: string[] = []
 
-                const reason = hitConsecutiveThreshold
-                    ? `consecutiveFailures=${this.consecutiveParseFailures} >= maxConsecutiveParseFailures=${this.maxConsecutiveParseFailures}`
-                    : `tooLongSinceGoodSample: deltaMs=${deltaMs} > parseFailureWindowMs=${this.parseFailureWindowMs}`
+                if (hitConsecutiveThreshold) {
+                    reasons.push(
+                        `consecutiveFailures=${this.consecutiveParseFailures} >= maxConsecutiveParseFailures=${this.maxConsecutiveParseFailures}`
+                    )
+                }
+
+                if (tooLongSinceGoodSample) {
+                    const deltaMs = lastSampleAt != null ? now - lastSampleAt : null
+                    reasons.push(
+                        `tooLongSinceGoodSample: deltaMs=${deltaMs} > parseFailureWindowMs=${this.parseFailureWindowMs}`
+                    )
+                }
+
+                const reasonSummary = reasons.join(' AND ')
+                const softFlag = this.enableSoftDisconnect ? 'enabled' : 'disabled'
 
                 if (this.enableSoftDisconnect) {
                     this.deps.events.publish({
                         kind: 'recoverable-error',
                         at: now,
-                        error: `Too many invalid WattsUp frames; treating meter as disconnected (${reason}, soft disconnect enabled)`,
+                        error: `Invalid WattsUp data guardrail tripped (${reasonSummary}); performing soft disconnect (soft disconnect ${softFlag})`,
                     })
 
                     void this.handlePortError(
@@ -650,7 +662,7 @@ export class SerialPowerMeterService {
                     this.deps.events.publish({
                         kind: 'recoverable-error',
                         at: now,
-                        error: `Too many invalid WattsUp frames (${reason}); soft disconnect disabled, keeping port open`,
+                        error: `Invalid WattsUp data guardrail tripped (${reasonSummary}); soft disconnect ${softFlag}, keeping port open`,
                     })
                 }
             }
