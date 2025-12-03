@@ -103,6 +103,13 @@ export class SerialPowerMeterService {
     private readonly parseFailureWindowMs: number
 
     /**
+     * Count of invalid frames seen since the last successfully parsed
+     * sample. This helps distinguish "no data at all" from "lots of junk"
+     * when the guardrail based on lastSampleAt fires.
+     */
+    private invalidFramesSinceLastGoodSample = 0
+
+    /**
      * Whether to actually perform a "soft disconnect" (close + reconnect)
      * when guardrails for invalid frames are tripped.
      *
@@ -167,6 +174,7 @@ export class SerialPowerMeterService {
         this.deviceId = null
         this.devicePath = null
         this.consecutiveParseFailures = 0
+        this.invalidFramesSinceLastGoodSample = 0
     }
 
     /** Current high-level state. */
@@ -240,6 +248,7 @@ export class SerialPowerMeterService {
 
         this.state = { phase: 'disconnected' }
         this.consecutiveParseFailures = 0
+        this.invalidFramesSinceLastGoodSample = 0
 
         this.deps.events.publish({
             kind: 'meter-device-lost',
@@ -381,6 +390,7 @@ export class SerialPowerMeterService {
 
         this.state = { phase: 'connecting' }
         this.consecutiveParseFailures = 0
+        this.invalidFramesSinceLastGoodSample = 0
 
         return new Promise<void>((resolve, reject) => {
             const port = new SerialPort({
@@ -608,11 +618,19 @@ export class SerialPowerMeterService {
 
         if (!sample) {
             this.consecutiveParseFailures += 1
+            this.invalidFramesSinceLastGoodSample += 1
 
             // Count this as a bad frame for all active recorders
             for (const stats of this.recorderQuality.values()) {
                 stats.badFrames += 1
             }
+
+            this.stats.lastErrorAt = now
+            this.deps.events.publish({
+                kind: 'recoverable-error',
+                at: now,
+                error: `Failed to parse WattsUp data frame (consecutiveFailures=${this.consecutiveParseFailures})`,
+            })
 
             const lastSampleAt = this.stats.lastSampleAt
             const tooLongSinceGoodSample =
@@ -621,58 +639,51 @@ export class SerialPowerMeterService {
             const hitConsecutiveThreshold =
                 this.consecutiveParseFailures >= this.maxConsecutiveParseFailures
 
-            this.stats.lastErrorAt = now
-
             if (hitConsecutiveThreshold || tooLongSinceGoodSample) {
-                const reasons: string[] = []
+                const deltaMs = lastSampleAt != null ? now - lastSampleAt : null
+
+                const parts: string[] = []
 
                 if (hitConsecutiveThreshold) {
-                    reasons.push(
+                    parts.push(
                         `consecutiveFailures=${this.consecutiveParseFailures} >= maxConsecutiveParseFailures=${this.maxConsecutiveParseFailures}`
                     )
                 }
 
-                if (tooLongSinceGoodSample) {
-                    const deltaMs = lastSampleAt != null ? now - lastSampleAt : null
-                    reasons.push(
-                        `tooLongSinceGoodSample: deltaMs=${deltaMs} > parseFailureWindowMs=${this.parseFailureWindowMs}`
+                if (tooLongSinceGoodSample && deltaMs != null) {
+                    parts.push(
+                        `tooLongSinceGoodSample: deltaMs=${deltaMs} > parseFailureWindowMs=${this.parseFailureWindowMs}, invalidFramesSinceLastGoodSample=${this.invalidFramesSinceLastGoodSample}`
                     )
                 }
 
-                const reasonSummary = reasons.join(' AND ')
-                const softFlag = this.enableSoftDisconnect ? 'enabled' : 'disabled'
+                const reason = parts.join('; ')
 
                 if (this.enableSoftDisconnect) {
                     this.deps.events.publish({
                         kind: 'recoverable-error',
                         at: now,
-                        error: `Invalid WattsUp data guardrail tripped (${reasonSummary}); performing soft disconnect (soft disconnect ${softFlag})`,
+                        error: `Invalid WattsUp data guardrail tripped (${reason}); treating meter as disconnected (soft disconnect enabled)`,
                     })
 
                     void this.handlePortError(
                         new Error('Too many invalid WattsUp data frames (soft disconnect)')
                     )
                 } else {
+                    // Log that we hit guardrails but are intentionally *not* bouncing the port.
                     this.deps.events.publish({
                         kind: 'recoverable-error',
                         at: now,
-                        error: `Invalid WattsUp data guardrail tripped (${reasonSummary}); soft disconnect ${softFlag}, keeping port open`,
+                        error: `Invalid WattsUp data guardrail tripped (${reason}); soft disconnect disabled, keeping port open`,
                     })
                 }
-            } else {
-                // Only log the simple per-frame parse error when guardrails
-                // are NOT tripped; this avoids paired logs that look contradictory.
-                this.deps.events.publish({
-                    kind: 'recoverable-error',
-                    at: now,
-                    error: `Failed to parse WattsUp data frame (consecutiveFailures=${this.consecutiveParseFailures})`,
-                })
             }
 
             return
         }
 
+        // We successfully parsed a sample, so reset both failure counters.
         this.consecutiveParseFailures = 0
+        this.invalidFramesSinceLastGoodSample = 0
 
         const nowSample = now
         this.stats.totalSamples += 1
@@ -726,6 +737,7 @@ export class SerialPowerMeterService {
         await this.closePort('io-error')
         this.state = { phase: 'disconnected' }
         this.consecutiveParseFailures = 0
+        this.invalidFramesSinceLastGoodSample = 0
 
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
@@ -753,6 +765,7 @@ export class SerialPowerMeterService {
         await this.closePort('io-error')
         this.state = { phase: 'disconnected' }
         this.consecutiveParseFailures = 0
+        this.invalidFramesSinceLastGoodSample = 0
 
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
