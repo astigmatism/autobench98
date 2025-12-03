@@ -224,101 +224,17 @@
                     </div>
                 </div>
 
-                <div
-                    v-if="!chartHasData"
-                    class="histogram-empty"
-                >
+                <div v-if="!chartHasData" class="histogram-empty">
                     Waiting for enough samples to build a chart…
                 </div>
 
                 <div v-else class="histogram-chart-container">
-                    <svg
+                    <!-- Chart.js line chart -->
+                    <Line
                         class="histogram-chart"
-                        viewBox="0 0 100 60"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                    >
-                        <!-- White background -->
-                        <rect x="0" y="0" width="100" height="60" class="chart-bg" />
-
-                        <!-- Inner plot area background -->
-                        <rect
-                            :x="chartPadding.left"
-                            :y="chartPadding.top"
-                            :width="chartInnerWidth"
-                            :height="chartInnerHeight"
-                            class="chart-inner-bg"
-                        />
-
-                        <!-- Horizontal grid + Y tick labels -->
-                        <g class="grid-lines">
-                            <g v-for="tick in yTicks" :key="'y-'+tick.value">
-                                <line
-                                    :x1="chartPadding.left"
-                                    :x2="chartPadding.left + chartInnerWidth"
-                                    :y1="tick.y"
-                                    :y2="tick.y"
-                                    class="grid-line"
-                                />
-                                <text
-                                    class="y-tick-text"
-                                    :x="chartPadding.left - 2"
-                                    :y="tick.y"
-                                    text-anchor="end"
-                                    dominant-baseline="middle"
-                                >
-                                    {{ tick.label }}
-                                </text>
-                            </g>
-                        </g>
-
-                        <!-- Vertical grid + X tick labels -->
-                        <g class="grid-lines">
-                            <g v-for="tick in xTicks" :key="'x-'+tick.label">
-                                <line
-                                    :x1="tick.x"
-                                    :x2="tick.x"
-                                    :y1="chartPadding.top"
-                                    :y2="chartPadding.top + chartInnerHeight"
-                                    class="grid-line"
-                                />
-                                <text
-                                    class="x-tick-text"
-                                    :x="tick.x"
-                                    :y="chartPadding.top + chartInnerHeight + 3"
-                                    text-anchor="middle"
-                                    dominant-baseline="hanging"
-                                >
-                                    {{ tick.label }}
-                                </text>
-                            </g>
-                        </g>
-
-                        <!-- Axes -->
-                        <line
-                            :x1="chartPadding.left"
-                            :y1="chartPadding.top + chartInnerHeight"
-                            :x2="chartPadding.left + chartInnerWidth"
-                            :y2="chartPadding.top + chartInnerHeight"
-                            class="axis-line"
-                        />
-                        <line
-                            :x1="chartPadding.left"
-                            :y1="chartPadding.top"
-                            :x2="chartPadding.left"
-                            :y2="chartPadding.top + chartInnerHeight"
-                            class="axis-line"
-                        />
-
-                        <!-- Watts line -->
-                       <polyline
-                            v-if="chartPathPoints.length > 1"
-                            class="chart-line"
-                            :points="chartPathPoints"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                        />
-                    </svg>
+                        :data="chartData"
+                        :options="chartOptions"
+                    />
                 </div>
             </div>
         </div>
@@ -328,6 +244,21 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useMirror } from '@/stores/mirror'
+
+/* Chart.js / vue-chartjs setup */
+import { Line } from 'vue-chartjs'
+import {
+    Chart as ChartJS,
+    LineElement,
+    PointElement,
+    LinearScale,
+    CategoryScale,
+    Tooltip,
+    Legend,
+    type ChartOptions
+} from 'chart.js'
+
+ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend)
 
 /**
  * Pane context — same pattern as logs pane.
@@ -651,7 +582,7 @@ const histogramWindowLabel = computed(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Line chart projection                                                     */
+/*  Line chart data for Chart.js                                              */
 /* -------------------------------------------------------------------------- */
 
 type ChartPoint = {
@@ -659,18 +590,7 @@ type ChartPoint = {
     watts: number
 }
 
-// Inner chart padding (matches SVG viewBox 0..100 x 0..60)
-const chartPadding = {
-    top: 6,
-    right: 4,
-    bottom: 12,
-    left: 12
-} as const
-
-const chartInnerWidth = computed(() => 100 - chartPadding.left - chartPadding.right)
-const chartInnerHeight = computed(() => 60 - chartPadding.top - chartPadding.bottom)
-
-// Points in the current window (downsampled to maxPoints)
+// Downsampled points in the current window
 const chartPointsRaw = computed<ChartPoint[]>(() => {
     const now = Date.now()
     const windowMs = histogramWindowSec.value * 1000
@@ -685,7 +605,6 @@ const chartPointsRaw = computed<ChartPoint[]>(() => {
         return samples.map(s => ({ t: s.t, watts: s.watts }))
     }
 
-    // Simple downsampling: pick every Nth point
     const step = Math.ceil(samples.length / maxPoints)
     const result: ChartPoint[] = []
     for (let i = 0; i < samples.length; i += step) {
@@ -705,123 +624,41 @@ const chartMaxWatts = computed(() => {
         0
     )
 })
-
-// For display we keep y-min pinned to 0 for intuitive visuals
-const chartMinWatts = computed(() => 0)
-
 const chartMinDisplay = computed(() => {
     const pts = chartPointsRaw.value
     if (pts.length === 0) return 0
 
-    const [first, ...rest] = pts
-    if (!first) return 0
+    // Initialize min using the first *existing* element we find.
+    // This avoids pts[0] access and prevents undefined warnings.
+    let min: number | null = null
 
-    let min = first.watts
-    for (const p of rest) {
-        if (p.watts < min) {
+    for (const p of pts) {
+        if (!p) continue               // plugin safety
+        if (min === null || p.watts < min) {
             min = p.watts
         }
     }
 
-    return min
+    // If something very strange happens, fall back to 0.
+    return min ?? 0
 })
 
 const chartMaxDisplay = computed(() => chartMaxWatts.value)
 
-// Map time and watts into chart coordinates
-function timeToX(t: number, from: number, windowMs: number): number {
-    const innerWidth = chartInnerWidth.value
-    if (windowMs <= 0) return chartPadding.left
-    const frac = (t - from) / windowMs
-    return chartPadding.left + innerWidth * Math.min(Math.max(frac, 0), 1)
-}
+/* Labels and dataset for Chart.js */
 
-function wattsToY(watts: number, min: number, max: number): number {
-    const innerHeight = chartInnerHeight.value
-    if (max <= min) return chartPadding.top + innerHeight
-    const frac = (watts - min) / (max - min)
-    const clamped = Math.min(Math.max(frac, 0), 1)
-    return chartPadding.top + innerHeight * (1 - clamped)
-}
-
-// Polyline points string
-const chartPathPoints = computed(() => {
-    const points = chartPointsRaw.value
-    if (points.length === 0) return ''
-
+const chartLabels = computed(() => {
     const now = Date.now()
-    const windowMs = histogramWindowSec.value * 1000
-    const from = now - windowMs
-
-    const minY = chartMinWatts.value
-    const rawMax = chartMaxWatts.value
-    if (rawMax <= 0) return ''
-
-    const niceMax = niceCeil(rawMax)
-    return points
-        .map(p => {
-            const x = timeToX(p.t, from, windowMs)
-            const y = wattsToY(p.watts, minY, niceMax)
-            return `${x},${y}`
-        })
-        .join(' ')
+    return chartPointsRaw.value.map(p => {
+        const secondsAgo = Math.round((now - p.t) / 1000)
+        if (secondsAgo <= 0) return 'Now'
+        return `-${secondsAgo}s`
+    })
 })
 
-// Y-axis ticks
-type YTick = { value: number; label: string; y: number }
-
-const yTicks = computed<YTick[]>(() => {
-    const rawMax = chartMaxWatts.value
-    if (rawMax <= 0) return []
-
-    const min = chartMinWatts.value
-    const max = niceCeil(rawMax)
-    const tickCount = 4
-    const step = (max - min) / (tickCount - 1)
-
-    const ticks: YTick[] = []
-    for (let i = 0; i < tickCount; i++) {
-        const value = min + step * i
-        const y = wattsToY(value, min, max)
-        const label =
-            max <= 10
-                ? value.toFixed(1)
-                : value.toFixed(0)
-        ticks.push({ value, label, y })
-    }
-    return ticks
-})
-
-// X-axis ticks
-type XTick = { label: string; x: number }
-
-const xTicks = computed<XTick[]>(() => {
-    const now = Date.now()
-    const windowMs = histogramWindowSec.value * 1000
-    if (windowMs <= 0) return []
-
-    const from = now - windowMs
-    const tickCount = 4
-    const ticks: XTick[] = []
-
-    for (let i = 0; i < tickCount; i++) {
-        const frac = i / (tickCount - 1)
-        const t = from + frac * windowMs
-        const x = timeToX(t, from, windowMs)
-
-        let label: string
-        if (i === tickCount - 1) {
-            label = 'Now'
-        } else {
-            const secondsAgo = Math.round((now - t) / 1000)
-            label = `-${secondsAgo}s`
-        }
-
-        ticks.push({ label, x })
-    }
-
-    return ticks
-})
+const chartDatasetData = computed(() =>
+    chartPointsRaw.value.map(p => p.watts)
+)
 
 function niceCeil(value: number): number {
     if (value <= 0) return 1
@@ -834,6 +671,79 @@ function niceCeil(value: number): number {
     else niceNorm = 10
     return niceNorm * magnitude
 }
+
+const chartData = computed(() => ({
+    labels: chartLabels.value,
+    datasets: [
+        {
+            label: 'Watts',
+            data: chartDatasetData.value,
+            borderColor: '#ef4444',
+            backgroundColor: 'rgba(239, 68, 68, 0.12)',
+            pointRadius: 0,
+            pointHitRadius: 4,
+            borderWidth: 1.5,
+            tension: 0.15
+        }
+    ]
+}))
+
+const chartOptions = computed<ChartOptions<'line'>>(() => {
+    const max = chartMaxWatts.value
+    const suggestedMax = max > 0 ? niceCeil(max) : undefined
+
+    return {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                intersect: false,
+                mode: 'index',
+                callbacks: {
+                    label(context: any) {
+                        const v = context.parsed.y
+                        return `${v.toFixed(2)} W`
+                    }
+                }
+            }
+        },
+        scales: {
+            x: {
+                type: 'category',
+                ticks: {
+                    maxTicksLimit: 5,
+                    color: '#6b7280',
+                    autoSkip: true
+                },
+                grid: {
+                    color: 'rgba(229, 231, 235, 0.7)'
+                }
+            },
+            y: {
+                beginAtZero: true,
+                suggestedMax,
+                ticks: {
+                    color: '#6b7280',
+                    callback(value: any) {
+                        return `${value} W`
+                    }
+                },
+                grid: {
+                    color: 'rgba(229, 231, 235, 0.7)'
+                }
+            }
+        },
+        elements: {
+            line: {
+                // this is the important bit:
+                cubicInterpolationMode: 'default', // or 'monotone'
+                tension: 0.15,
+                borderWidth: 1.5
+            }
+        }
+    }
+})
 
 /**
  * Whenever `latest` changes:
@@ -1211,6 +1121,7 @@ const showAdvanced = ref(false)
     padding: 12px 4px;
 }
 
+/* Chart.js canvas wrapper */
 .histogram-chart-container {
     width: 100%;
     height: 120px;
@@ -1219,41 +1130,6 @@ const showAdvanced = ref(false)
 .histogram-chart {
     width: 100%;
     height: 100%;
-    display: block;
-}
-
-/* Chart SVG styles */
-.chart-bg {
-    fill: #ffffff;
-}
-
-.chart-inner-bg {
-    fill: #f9fafb;
-}
-
-.axis-line {
-    stroke: #374151;
-    stroke-width: 0.4;
-}
-
-.grid-lines .grid-line {
-    stroke: #e5e7eb;
-    stroke-width: 0.35;
-}
-
-.chart-line {
-    fill: none;
-    stroke: #ef4444;      /* red line */
-    stroke-width: 0.4;    /* thinner than 0.6 / 0.9 */
-    stroke-linecap: round;
-    stroke-linejoin: round;
-}
-
-/* SVG tick text */
-.y-tick-text,
-.x-tick-text {
-    font-size: 2.2px; /* tiny in viewBox units */
-    fill: #6b7280;
 }
 
 /* Chart advanced settings (advanced view only) */
