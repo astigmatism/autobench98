@@ -163,7 +163,7 @@
                                             <span v-else>—</span>
                                         </div>
                                         <div class="stats-cell">
-                                            <span v-if="maxAmps != null">{{ maxAmps.toFixed(4) }} A</span>
+                                            <span v-if="maxAmps != null">{{ maxAmps != null ? maxAmps.toFixed(4) : '' }} A</span>
                                             <span v-else>—</span>
                                         </div>
                                     </div>
@@ -179,8 +179,92 @@
                             </template>
                         </div>
                     </div>
+
+                    <!-- Histogram advanced options (x-axis & resolution) -->
+                    <div class="histogram-advanced-settings">
+                        <div class="histogram-settings-title">
+                            Histogram settings
+                        </div>
+                        <div class="histogram-settings-grid">
+                            <label class="histogram-setting">
+                                <span class="setting-label">Time window</span>
+                                <select v-model.number="histogramWindowSec">
+                                    <option :value="30">Last 30 seconds</option>
+                                    <option :value="60">Last 1 minute</option>
+                                    <option :value="300">Last 5 minutes</option>
+                                    <option :value="900">Last 15 minutes</option>
+                                </select>
+                            </label>
+                            <label class="histogram-setting">
+                                <span class="setting-label">Resolution</span>
+                                <select v-model.number="histogramBucketCount">
+                                    <option :value="20">Coarse (20 bars)</option>
+                                    <option :value="40">Medium (40 bars)</option>
+                                    <option :value="80">Fine (80 bars)</option>
+                                </select>
+                            </label>
+                            <div class="histogram-setting hint">
+                                History is kept only in this browser tab and is lost on refresh.
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </transition>
+
+            <!-- WATTS HISTOGRAM (visible in both basic & advanced views) -->
+            <div class="histogram-panel">
+                <div class="histogram-header">
+                    <div class="histogram-title">Watts History</div>
+                    <div class="histogram-subtitle">
+                        {{ histogramWindowLabel }}
+                        <span v-if="histogramMaxWatts > 0">
+                            • Peak ~ {{ histogramMaxWatts.toFixed(1) }} W
+                        </span>
+                    </div>
+                </div>
+
+                <div
+                    v-if="histogramBuckets.length === 0 || histogramMaxWatts === 0"
+                    class="histogram-empty"
+                >
+                    Waiting for enough samples to build a histogram…
+                </div>
+
+                <div v-else class="histogram-chart-container">
+                    <svg
+                        class="histogram-chart"
+                        viewBox="0 0 100 40"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                    >
+                        <!-- X-axis baseline -->
+                        <line
+                            x1="0"
+                            y1="40"
+                            x2="100"
+                            y2="40"
+                            class="histogram-axis"
+                        />
+                        <!-- Bars -->
+                        <g>
+                            <rect
+                                v-for="(bucket, idx) in histogramBuckets"
+                                :key="idx"
+                                class="histogram-bar"
+                                :x="bucketX(idx, histogramBuckets.length)"
+                                :width="bucketWidth(histogramBuckets.length)"
+                                :y="bucketY(bucket.maxWatts)"
+                                :height="bucketHeight(bucket.maxWatts)"
+                            />
+                        </g>
+                    </svg>
+                </div>
+
+                <div class="histogram-footer">
+                    <span class="axis-label">Time (most recent on the right)</span>
+                    <span class="axis-label">Watts (auto-scaled to current peak)</span>
+                </div>
+            </div>
         </div>
     </div>
 </template>
@@ -458,13 +542,157 @@ function addSampleToRecorder(sample: PowerSample) {
     maxAmps.value = maxAmps.value == null ? sample.amps : Math.max(maxAmps.value, sample.amps)
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Watts histogram (client-side only)                                        */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Whenever `latest` changes and we're recording, fold it into the stats.
+ * We maintain a rolling in-memory history of watts samples.
+ * This never leaves the browser and is discarded on refresh.
+ */
+
+type WattsHistorySample = {
+    t: number // epoch ms
+    watts: number
+}
+
+// Maximum history window we ever care about (seconds)
+const HIST_MAX_WINDOW_SEC = 15 * 60 // 15 minutes
+
+const wattsHistory = ref<WattsHistorySample[]>([])
+
+// User-adjustable x-axis window (seconds). Default: 60s.
+const histogramWindowSec = ref(60)
+
+// User-adjustable resolution (# of buckets across x-axis)
+const histogramBucketCount = ref(40)
+
+// Helper: push latest watts sample into history, pruning old entries.
+function addSampleToHistory(sample: PowerSample) {
+    const t = Date.parse(sample.ts) || Date.now()
+    const cutoff = t - HIST_MAX_WINDOW_SEC * 1000
+
+    wattsHistory.value.push({ t, watts: sample.watts })
+
+    // Prune anything older than our maximum window
+    const history = wattsHistory.value
+    if (history.length > 0) {
+        let firstIdx = 0
+        const len = history.length
+
+        while (firstIdx < len) {
+            const entry = history[firstIdx]
+            // Extra guard keeps TS happy and protects against weird states
+            if (!entry || entry.t >= cutoff) break
+            firstIdx++
+        }
+
+        if (firstIdx > 0) {
+            history.splice(0, firstIdx)
+        }
+    }
+}
+
+type HistogramBucket = {
+    start: number
+    end: number
+    maxWatts: number
+}
+
+const histogramBuckets = computed<HistogramBucket[]>(() => {
+    const now = Date.now()
+    const windowMs = histogramWindowSec.value * 1000
+
+    if (windowMs <= 0 || histogramBucketCount.value <= 0) {
+        return []
+    }
+
+    const from = now - windowMs
+    const samples = wattsHistory.value.filter(s => s.t >= from && s.t <= now)
+    if (samples.length === 0) return []
+
+    const bucketCount = histogramBucketCount.value
+    const bucketWidth = windowMs / bucketCount
+
+    const buckets: HistogramBucket[] = []
+    for (let i = 0; i < bucketCount; i++) {
+        const start = from + i * bucketWidth
+        const end = start + bucketWidth
+        buckets.push({ start, end, maxWatts: 0 })
+    }
+
+    for (const s of samples) {
+        const idx = Math.min(
+            bucketCount - 1,
+            Math.max(0, Math.floor((s.t - from) / bucketWidth))
+        )
+
+        const b = buckets[idx]
+        if (!b) continue   // <-- keeps TS happy and protects at runtime
+
+        b.maxWatts = Math.max(b.maxWatts, s.watts)
+    }
+
+    return buckets
+})
+
+const histogramMaxWatts = computed(() => {
+    if (!histogramBuckets.value.length) return 0
+    return histogramBuckets.value.reduce(
+        (max, b) => (b.maxWatts > max ? b.maxWatts : max),
+        0
+    )
+})
+
+const histogramWindowLabel = computed(() => {
+    const sec = histogramWindowSec.value
+    if (sec < 60) return `Last ${sec} seconds`
+    const minutes = Math.round(sec / 60)
+    return `Last ${minutes} minute${minutes === 1 ? '' : 's'}`
+})
+
+// SVG helpers – map bucket index & value into viewBox coordinates
+function bucketWidth(count: number): number {
+    if (count <= 0) return 0
+    const gap = 0.5 // small gap between bars (in viewBox units)
+    return 100 / count - gap
+}
+
+function bucketX(index: number, count: number): number {
+    if (count <= 0) return 0
+    const totalWidth = 100
+    const per = totalWidth / count
+    return index * per
+}
+
+function bucketY(maxWatts: number): number {
+    const max = histogramMaxWatts.value
+    if (max <= 0) return 40
+    const norm = Math.min(1, maxWatts / max)
+    const barHeight = norm * 36 // leave some padding at the top
+    return 40 - barHeight
+}
+
+function bucketHeight(maxWatts: number): number {
+    const max = histogramMaxWatts.value
+    if (max <= 0) return 0
+    const norm = Math.min(1, maxWatts / max)
+    return norm * 36
+}
+
+/**
+ * Whenever `latest` changes:
+ *  - Always add to watts history (for histogram).
+ *  - If recording, also fold into stats.
  */
 watch(
     () => latest.value,
     (val) => {
         if (!val) return
+
+        // Histogram history is independent of recording
+        addSampleToHistory(val)
+
         if (recState.value !== 'recording') return
         addSampleToRecorder(val)
     }
@@ -789,6 +1017,125 @@ const showAdvanced = ref(false)
     background: #020617;
 }
 
+/* Histogram panel */
+.histogram-panel {
+    margin-top: 6px;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px dashed #1f2937;
+    background: #020617;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        sans-serif;
+}
+
+.histogram-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 0.78rem;
+}
+
+.histogram-title {
+    font-weight: 500;
+}
+
+.histogram-subtitle {
+    opacity: 0.7;
+    font-size: 0.75rem;
+}
+
+.histogram-empty {
+    font-size: 0.78rem;
+    opacity: 0.7;
+    text-align: center;
+    padding: 12px 4px;
+}
+
+.histogram-chart-container {
+    width: 100%;
+    height: 80px;
+}
+
+.histogram-chart {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* Histogram SVG styles */
+.histogram-axis {
+    stroke: #374151;
+    stroke-width: 0.5;
+}
+
+.histogram-bar {
+    fill: #22c55e;
+    opacity: 0.85;
+}
+
+/* Footer labels */
+.histogram-footer {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    opacity: 0.7;
+}
+
+/* Histogram advanced settings (advanced view only) */
+.histogram-advanced-settings {
+    margin-top: 4px;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid #1f2937;
+    background: #020617;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.78rem;
+}
+
+.histogram-settings-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.7;
+}
+
+.histogram-settings-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.histogram-setting {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.histogram-setting.hint {
+    opacity: 0.7;
+    max-width: 260px;
+}
+
+.setting-label {
+    opacity: 0.8;
+}
+
+.histogram-setting select {
+    min-width: 140px;
+    height: 26px;
+    border-radius: 4px;
+    border: 1px solid #374151;
+    background: #020617;
+    color: #e5e7eb;
+    font-size: 0.78rem;
+}
+
 /* Responsive: stack metrics if narrow */
 @media (max-width: 720px) {
     .current-grid {
@@ -798,6 +1145,16 @@ const showAdvanced = ref(false)
     .stats-header-row,
     .stats-body-row {
         grid-template-columns: 60px repeat(4, minmax(0, 1fr));
+    }
+
+    .histogram-settings-grid {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .histogram-header {
+        flex-direction: column;
+        align-items: flex-start;
     }
 }
 </style>
