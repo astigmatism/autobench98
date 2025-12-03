@@ -232,112 +232,102 @@
                 </div>
 
                 <div v-else class="histogram-chart-container">
-                    <svg
-                        class="histogram-chart"
-                        viewBox="0 0 100 60"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                    >
-                        <!-- White background -->
-                        <rect x="0" y="0" width="100" height="60" class="chart-bg" />
+                    <div class="histogram-chart-shell">
+                        <div class="histogram-y-labels">
+                            <div
+                                v-for="tick in yTicks"
+                                :key="'y-label-'+tick.value"
+                                class="y-tick-label"
+                            >
+                                {{ tick.label }}
+                            </div>
+                            <div class="y-axis-caption">Watts</div>
+                        </div>
 
-                        <!-- Inner plot area background -->
-                        <rect
-                            :x="chartPadding.left"
-                            :y="chartPadding.top"
-                            :width="chartInnerWidth"
-                            :height="chartInnerHeight"
-                            class="chart-inner-bg"
-                        />
+                        <div class="histogram-chart-container">
+                            <svg
+                                class="histogram-chart"
+                                viewBox="0 0 100 60"
+                                preserveAspectRatio="none"
+                                aria-hidden="true"
+                            >
+                                <!-- White background -->
+                                <rect x="0" y="0" width="100" height="60" class="chart-bg" />
 
-                        <!-- Grid lines (horizontal) + Y tick labels -->
-                        <g class="grid-lines">
-                            <g v-for="tick in yTicks" :key="'y-'+tick.value">
+                                <!-- Inner plot area background -->
+                                <rect
+                                    :x="chartPadding.left"
+                                    :y="chartPadding.top"
+                                    :width="chartInnerWidth"
+                                    :height="chartInnerHeight"
+                                    class="chart-inner-bg"
+                                />
+
+                                <!-- Grid lines (horizontal) -->
+                                <g class="grid-lines">
+                                    <line
+                                        v-for="tick in yTicks"
+                                        :key="'y-'+tick.value"
+                                        :x1="chartPadding.left"
+                                        :x2="chartPadding.left + chartInnerWidth"
+                                        :y1="tick.y"
+                                        :y2="tick.y"
+                                        class="grid-line"
+                                    />
+                                </g>
+
+                                <!-- Grid lines (vertical) -->
+                                <g class="grid-lines">
+                                    <line
+                                        v-for="tick in xTicks"
+                                        :key="'x-'+tick.label"
+                                        :x1="tick.x"
+                                        :x2="tick.x"
+                                        :y1="chartPadding.top"
+                                        :y2="chartPadding.top + chartInnerHeight"
+                                        class="grid-line"
+                                    />
+                                </g>
+
+                                <!-- Axes -->
                                 <line
                                     :x1="chartPadding.left"
+                                    :y1="chartPadding.top + chartInnerHeight"
                                     :x2="chartPadding.left + chartInnerWidth"
-                                    :y1="tick.y"
-                                    :y2="tick.y"
-                                    class="grid-line"
-                                />
-                                <text
-                                    class="y-tick-text"
-                                    :x="chartPadding.left - 1.5"
-                                    :y="tick.y + 1.5"
-                                    text-anchor="end"
-                                    alignment-baseline="middle"
-                                >
-                                    {{ tick.label }}
-                                </text>
-                            </g>
-                        </g>
-
-                        <!-- Grid lines (vertical) + X tick labels -->
-                        <g class="grid-lines">
-                            <g v-for="tick in xTicks" :key="'x-'+tick.label">
-                                <line
-                                    :x1="tick.x"
-                                    :x2="tick.x"
-                                    :y1="chartPadding.top"
                                     :y2="chartPadding.top + chartInnerHeight"
-                                    class="grid-line"
+                                    class="axis-line"
                                 />
-                                <text
-                                    class="x-tick-text"
-                                    :x="tick.x"
-                                    :y="chartPadding.top + chartInnerHeight + 5"
-                                    text-anchor="middle"
-                                    alignment-baseline="hanging"
+                                <line
+                                    :x1="chartPadding.left"
+                                    :y1="chartPadding.top"
+                                    :x2="chartPadding.left"
+                                    :y2="chartPadding.top + chartInnerHeight"
+                                    class="axis-line"
+                                />
+
+                                <!-- Watts line -->
+                                <polyline
+                                    v-if="chartPathPoints.length > 1"
+                                    class="chart-line"
+                                    :points="chartPathPoints"
+                                />
+                            </svg>
+
+                            <div class="histogram-x-labels">
+                                <div
+                                    v-for="tick in xTicks"
+                                    :key="'x-label-'+tick.label"
+                                    class="x-tick-label"
                                 >
                                     {{ tick.label }}
-                                </text>
-                            </g>
-                        </g>
+                                </div>
+                            </div>
 
-                        <!-- Axes -->
-                        <line
-                            :x1="chartPadding.left"
-                            :y1="chartPadding.top + chartInnerHeight"
-                            :x2="chartPadding.left + chartInnerWidth"
-                            :y2="chartPadding.top + chartInnerHeight"
-                            class="axis-line"
-                        />
-                        <line
-                            :x1="chartPadding.left"
-                            :y1="chartPadding.top"
-                            :x2="chartPadding.left"
-                            :y2="chartPadding.top + chartInnerHeight"
-                            class="axis-line"
-                        />
-
-                        <!-- Axis titles -->
-                        <text
-                            class="y-axis-title"
-                            :x="chartPadding.left - 7"
-                            :y="chartPadding.top + chartInnerHeight / 2"
-                            text-anchor="middle"
-                            alignment-baseline="middle"
-                            transform="rotate(-90,  {{ chartPadding.left - 7 }}, {{ chartPadding.top + chartInnerHeight / 2 }})"
-                        >
-                            Watts
-                        </text>
-                        <text
-                            class="x-axis-title"
-                            :x="chartPadding.left + chartInnerWidth / 2"
-                            :y="chartPadding.top + chartInnerHeight + 10"
-                            text-anchor="middle"
-                            alignment-baseline="hanging"
-                        >
-                            Time (most recent on the right)
-                        </text>
-
-                        <!-- Watts line -->
-                        <polyline
-                            v-if="chartPathPoints.length > 1"
-                            class="chart-line"
-                            :points="chartPathPoints"
-                        />
-                    </svg>
+                            <div class="x-axis-caption">
+                                Time (most recent on the right)
+                            </div>
+                        </div>
+                    </div>
 
                     <!-- Axis labels (outside the SVG for clarity) -->
                     <div class="chart-axis-labels">
