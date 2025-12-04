@@ -680,7 +680,32 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
     return {
         responsive: true,
         maintainAspectRatio: false,
-        parsing: false, // <-- IMPORTANT for {x,y} data
+        parsing: false,
+
+        // 🔇 Disable “grow from zero” animation on each update
+        animation: {
+            duration: 0,
+        },
+        transitions: {
+            active: {
+                animation: {
+                    duration: 0,
+                },
+            },
+            show: {
+                animations: {
+                    x: { duration: 0 },
+                    y: { duration: 0 },
+                },
+            },
+            hide: {
+                animations: {
+                    x: { duration: 0 },
+                    y: { duration: 0 },
+                },
+            },
+        },
+
         plugins: {
             legend: { display: false },
             tooltip: {
@@ -703,16 +728,12 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     color: '#6b7280',
                     maxRotation: 0,
                     autoSkip: true,
-                    // Aim for ~6 ticks across the window
                     stepSize: windowSec / 6,
                     callback(value: any) {
                         const v =
                             typeof value === 'string' ? Number(value) : (value as number)
 
-                        // Close enough to zero => "now"
-                        if (Math.abs(v) < 0.0001) {
-                            return 'now'
-                        }
+                        if (Math.abs(v) < 0.0001) return 'now'
 
                         const totalSeconds = Math.abs(Math.round(v))
                         const minutes = Math.floor(totalSeconds / 60)
