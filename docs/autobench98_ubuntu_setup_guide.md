@@ -12,6 +12,15 @@ All commands are tested directly on Ubuntu Desktop 24.04 LTS.
 
 ### 1.1 Update and install essentials
 
+## Remove BRLTTY to prevent FTDI interference
+Some Ubuntu installs include `brltty`, which can interfere with FTDI USB‑serial devices (e.g., WattsUp meters).
+Disable it to prevent data stalls:
+```bash
+sudo apt remove --purge brltty
+sudo apt autoremove --purge
+```
+Unplug/replug devices afterward.
+
 ```bash
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y curl wget git vim net-tools htop byobu openssh-server lsof ffmpeg build-essential python3 make g++
