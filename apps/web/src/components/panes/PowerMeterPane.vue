@@ -189,41 +189,16 @@
             <!-- WATTS LINE CHART (visible in both basic & advanced views) -->
             <div class="histogram-panel">
                 <div class="histogram-header">
-                    <div class="histogram-title-group">
-                        <div class="histogram-title">Watts History</div>
-
-                        <!-- Compact live metrics -->
-                        <div class="live-metrics">
-                            <div class="live-metric">
-                                <span class="live-metric-label">W</span>
-                                <span class="live-metric-value">
-                                    <span v-if="latest">{{ latest.watts.toFixed(2) }}</span>
-                                    <span v-else>—</span>
-                                </span>
-                            </div>
-                            <div class="live-metric">
-                                <span class="live-metric-label">A</span>
-                                <span class="live-metric-value">
-                                    <span v-if="latest">{{ latest.amps.toFixed(4) }}</span>
-                                    <span v-else>—</span>
-                                </span>
-                            </div>
-                            <div class="live-metric">
-                                <span class="live-metric-label">V</span>
-                                <span class="live-metric-value">
-                                    <span v-if="latest">{{ latest.volts.toFixed(2) }}</span>
-                                    <span v-else>—</span>
-                                </span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="histogram-subtitle">
-                        {{ histogramWindowLabel }}
-                        <span v-if="chartHasData">
-                            • Low ~ {{ chartMinDisplay.toFixed(1) }} W
-                            • High ~ {{ chartMaxDisplay.toFixed(1) }} W
-                        </span>
+                    <div class="histogram-title">Watts History</div>
+                    <div class="histogram-current">
+                        <template v-if="latest">
+                            {{ latest.watts.toFixed(2) }} W •
+                            {{ latest.amps.toFixed(4) }} A •
+                            {{ latest.volts.toFixed(2) }} V
+                        </template>
+                        <template v-else>
+                            —
+                        </template>
                     </div>
                 </div>
 
@@ -238,6 +213,15 @@
                         :data="chartData"
                         :options="chartOptions"
                     />
+                </div>
+
+                <!-- Bottom-right: window + low/high -->
+                <div class="histogram-subtitle">
+                    {{ histogramWindowLabel }}
+                    <span v-if="chartHasData">
+                        • Low ~ {{ chartMinDisplay.toFixed(1) }} W
+                        • High ~ {{ chartMaxDisplay.toFixed(1) }} W
+                    </span>
                 </div>
             </div>
         </div>
@@ -635,17 +619,15 @@ const chartMinDisplay = computed(() => {
     if (pts.length === 0) return 0
 
     // Initialize min using the first *existing* element we find.
-    // This avoids pts[0] access and prevents undefined warnings.
     let min: number | null = null
 
     for (const p of pts) {
-        if (!p) continue               // plugin safety
+        if (!p) continue
         if (min === null || p.watts < min) {
             min = p.watts
         }
     }
 
-    // If something very strange happens, fall back to 0.
     return min ?? 0
 })
 
@@ -667,14 +649,12 @@ const chartData = computed<ChartData<'line'>>(() => {
     const pts = chartPointsRaw.value
 
     return {
-        // labels are optional when using {x, y} data, Chart.js reads x directly
         labels: [],
-
         datasets: [
             {
                 label: 'Watts',
                 data: pts.map(p => ({
-                    x: p.t,         // epoch ms
+                    x: p.t,
                     y: p.watts,
                 })),
                 fill: false,
@@ -711,9 +691,9 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
         },
         scales: {
             x: {
-                type: 'time',          // ⬅ important
+                type: 'time',
                 time: {
-                    unit: 'second',    // or 'minute' if you prefer less noise
+                    unit: 'second',
                     displayFormats: {
                         second: 'HH:mm:ss',
                         minute: 'HH:mm:ss',
@@ -763,7 +743,6 @@ watch(
     (val) => {
         if (!val) return
 
-        // Historical chart is independent of recording
         addSampleToHistory(val)
 
         if (recState.value !== 'recording') return
@@ -842,8 +821,7 @@ const showAdvanced = ref(false)
     gap: 8px;
 }
 
-/* When advanced view is open, allow vertical scrolling so the
-   expanded content can be fully accessed even in short panes. */
+/* When advanced view is open, allow vertical scrolling */
 .panel--scrollable {
     overflow-y: auto;
 }
@@ -1073,53 +1051,29 @@ const showAdvanced = ref(false)
 .histogram-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
     font-size: 0.78rem;
-}
-
-.histogram-title-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
 }
 
 .histogram-title {
     font-weight: 500;
 }
 
-/* Compact live metrics row */
-.live-metrics {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.72rem;
-}
-
-.live-metric {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
-    padding: 2px 6px;
-    border-radius: 999px;
-    border: 1px solid #e5e7eb;
-    background: #f9fafb;
+/* Simple inline current readings (top-right) */
+.histogram-current {
+    font-size: 0.75rem;
     font-variant-numeric: tabular-nums;
+    opacity: 0.85;
 }
 
-.live-metric-label {
-    opacity: 0.7;
-    text-transform: uppercase;
-}
-
-.live-metric-value {
-    font-weight: 500;
-}
-
+/* Subtitle at the bottom-right under the chart/x-axis */
 .histogram-subtitle {
     opacity: 0.7;
     font-size: 0.75rem;
     text-align: right;
+    align-self: flex-end;
+    margin-top: 4px;
 }
 
 .histogram-empty {
@@ -1211,6 +1165,7 @@ const showAdvanced = ref(false)
 
     .histogram-subtitle {
         text-align: left;
+        align-self: flex-start;
     }
 }
 </style>
