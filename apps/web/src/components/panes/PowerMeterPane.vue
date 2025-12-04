@@ -192,9 +192,9 @@
                     <div class="histogram-title">Watts History</div>
                     <div class="histogram-current">
                         <template v-if="latest">
-                            {{ latest.volts.toFixed(2) }} V •
-                            {{ latest.amps.toFixed(4) }} A •
-                            {{ latest.watts.toFixed(2) }} W
+                            <!-- {{ latest.volts.toFixed(2) }} V •
+                            {{ latest.amps.toFixed(4) }} A • -->
+                            Currently: {{ latest.watts.toFixed(2) }} W
                         </template>
                         <template v-else>
                             —
@@ -533,8 +533,8 @@ const HIST_MAX_WINDOW_SEC = 15 * 60 // 15 minutes
 
 const wattsHistory = ref<WattsHistorySample[]>([])
 
-// User-adjustable x-axis window (seconds). Default: 60s.
-const histogramWindowSec = ref(60)
+// User-adjustable x-axis window (seconds). Default: 300s.
+const histogramWindowSec = ref(300)
 
 // User-adjustable max # of points for the line (downsampling)
 const histogramMaxPoints = ref(80)
