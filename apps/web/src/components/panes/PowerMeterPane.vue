@@ -586,13 +586,8 @@ const chartPointsRaw = computed<ChartPoint[]>(() => {
     const samples = wattsHistory.value.filter(s => s.t >= from && s.t <= now)
     if (samples.length === 0) return []
 
-    const maxPoints = Math.max(10, histogramMaxPoints.value || 80)
-    const downsampled =
-        samples.length <= maxPoints
-            ? samples
-            : samples.filter((_, idx) => idx % Math.ceil(samples.length / maxPoints) === 0)
-
-    return downsampled.map(s => {
+    // No downsampling — keep every sample within the window
+    return samples.map(s => {
         const dtSec = (s.t - now) / 1000 // negative or 0
         return {
             x: dtSec,
