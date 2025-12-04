@@ -593,7 +593,7 @@ const chartPointsRaw = computed<ChartPoint[]>(() => {
         }))
 })
 
-const chartHasData = computed(() => chartPointsRaw.value.length > 1)
+const chartHasData = computed(() => chartPointsRaw.value.length > 0)
 
 const chartMaxWatts = computed(() => {
     if (!chartPointsRaw.value.length) return 0
