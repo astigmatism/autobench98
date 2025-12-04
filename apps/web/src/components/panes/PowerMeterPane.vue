@@ -573,9 +573,8 @@ const histogramWindowLabel = computed(() => {
 /* -------------------------------------------------------------------------- */
 
 type ChartPoint = {
-    t: number
+    x: number  // seconds ago, negative to 0
     watts: number
-    x: number
 }
 
 const chartPointsRaw = computed<ChartPoint[]>(() => {
@@ -584,13 +583,22 @@ const chartPointsRaw = computed<ChartPoint[]>(() => {
     if (windowMs <= 0) return []
 
     const from = now - windowMs
-    return wattsHistory.value
-        .filter(s => s.t >= from && s.t <= now)
-        .map(s => ({
-            t: s.t,
+    const samples = wattsHistory.value.filter(s => s.t >= from && s.t <= now)
+    if (samples.length === 0) return []
+
+    const maxPoints = Math.max(10, histogramMaxPoints.value || 80)
+    const downsampled =
+        samples.length <= maxPoints
+            ? samples
+            : samples.filter((_, idx) => idx % Math.ceil(samples.length / maxPoints) === 0)
+
+    return downsampled.map(s => {
+        const dtSec = (s.t - now) / 1000 // negative or 0
+        return {
+            x: dtSec,
             watts: s.watts,
-            x: s.t,
-        }))
+        }
+    })
 })
 
 const chartHasData = computed(() => chartPointsRaw.value.length > 0)
@@ -641,7 +649,6 @@ const chartData = computed<ChartData<'line'>>(() => {
         datasets: [
             {
                 label: 'Watts',
-                // NOTE: Chart.js will read x/y directly because we turn off parsing in options
                 data: pts.map(p => ({
                     x: p.x,
                     y: p.watts,
@@ -668,7 +675,7 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
         maintainAspectRatio: false,
         parsing: false,
 
-        // 🔇 Disable “grow from zero” animation on each update
+        // Disable grow-from-zero animations
         animation: {
             duration: 0,
         },
@@ -716,8 +723,7 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     autoSkip: true,
                     stepSize: windowSec / 6,
                     callback(value: any) {
-                        const v =
-                            typeof value === 'string' ? Number(value) : (value as number)
+                        const v = typeof value === 'string' ? Number(value) : (value as number)
 
                         if (Math.abs(v) < 0.0001) return 'now'
 
