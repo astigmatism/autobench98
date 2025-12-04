@@ -415,7 +415,16 @@ export class SerialPowerMeterService {
                 })
 
                 port.on('data', (chunk: Buffer) => {
-                    this.handleData(chunk.toString('ascii'))
+                    try {
+                        this.handleData(chunk.toString('ascii'))
+                    } catch (err) {
+                        const e = err as Error
+                        console.error('[powermeter:fatal] exception in handleData:', e?.message, e?.stack)
+                        // Re-emit as a port error so our existing error path runs
+                        void this.handlePortError(
+                            new Error(`handleData exception: ${e?.message ?? String(e)}`)
+                        )
+                    }
                 })
 
                 port.on('error', (err: Error) => {
