@@ -192,9 +192,9 @@
                     <div class="histogram-title">Watts History</div>
                     <div class="histogram-current">
                         <template v-if="latest">
-                            {{ latest.watts.toFixed(2) }} W •
+                            {{ latest.volts.toFixed(2) }} V •
                             {{ latest.amps.toFixed(4) }} A •
-                            {{ latest.volts.toFixed(2) }} V
+                            {{ latest.watts.toFixed(2) }} W
                         </template>
                         <template v-else>
                             —
