@@ -573,38 +573,24 @@ const histogramWindowLabel = computed(() => {
 /* -------------------------------------------------------------------------- */
 
 type ChartPoint = {
-    x: number   // seconds into the past (negative)
+    t: number
     watts: number
+    x: number
 }
 
-// Downsampled points in the current window
 const chartPointsRaw = computed<ChartPoint[]>(() => {
     const now = Date.now()
     const windowMs = histogramWindowSec.value * 1000
     if (windowMs <= 0) return []
 
     const from = now - windowMs
-    const samples = wattsHistory.value.filter(s => s.t >= from && s.t <= now)
-    if (samples.length === 0) return []
-
-    const maxPoints = Math.max(10, histogramMaxPoints.value || 80)
-    const toPoint = (s: WattsHistorySample): ChartPoint => ({
-        x: (s.t - now) / 1000, // seconds ago (negative)
-        watts: s.watts,
-    })
-
-    if (samples.length <= maxPoints) {
-        return samples.map(toPoint)
-    }
-
-    const step = Math.ceil(samples.length / maxPoints)
-    const result: ChartPoint[] = []
-    for (let i = 0; i < samples.length; i += step) {
-        const s = samples[i]
-        if (!s) continue
-        result.push(toPoint(s))
-    }
-    return result
+    return wattsHistory.value
+        .filter(s => s.t >= from && s.t <= now)
+        .map(s => ({
+            t: s.t,
+            watts: s.watts,
+            x: s.t,
+        }))
 })
 
 const chartHasData = computed(() => chartPointsRaw.value.length > 1)
