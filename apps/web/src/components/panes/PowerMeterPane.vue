@@ -699,7 +699,7 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     autoSkip: true,
                     // try to get ~6 ticks across the window
                     stepSize: windowSec / 6,
-                    callback(value: any, index: number, ticks: any[]) {
+                    callback(value: any, _index: number, _ticks: any[]) {
                         const v = typeof value === 'string' ? Number(value) : (value as number)
 
                         // Right-most tick (0) => "now"
