@@ -26,31 +26,6 @@
                 </span>
             </div>
 
-            <!-- BASIC VIEW: latest readings tiles -->
-            <div v-if="!showAdvanced" class="current-grid">
-                <div class="metric">
-                    <div class="metric-label">Watts</div>
-                    <div class="metric-value">
-                        <span v-if="latest">{{ latest.watts.toFixed(2) }}</span>
-                        <span v-else>—</span>
-                    </div>
-                </div>
-                <div class="metric">
-                    <div class="metric-label">Amps</div>
-                    <div class="metric-value">
-                        <span v-if="latest">{{ latest.amps.toFixed(4) }}</span>
-                        <span v-else>—</span>
-                    </div>
-                </div>
-                <div class="metric">
-                    <div class="metric-label">Volts</div>
-                    <div class="metric-value">
-                        <span v-if="latest">{{ latest.volts.toFixed(2) }}</span>
-                        <span v-else>—</span>
-                    </div>
-                </div>
-            </div>
-
             <!-- ADVANCED VIEW: recording controls + compact stats table -->
             <transition name="slide-fade">
                 <div
@@ -214,7 +189,32 @@
             <!-- WATTS LINE CHART (visible in both basic & advanced views) -->
             <div class="histogram-panel">
                 <div class="histogram-header">
-                    <div class="histogram-title">Watts History</div>
+                    <!-- Left: live current readings -->
+                    <div class="histogram-current-readings">
+                        <div class="reading">
+                            <span class="reading-label">Watts</span>
+                            <span class="reading-value">
+                                <span v-if="latest">{{ latest.watts.toFixed(2) }}</span>
+                                <span v-else>—</span>
+                            </span>
+                        </div>
+                        <div class="reading">
+                            <span class="reading-label">Amps</span>
+                            <span class="reading-value">
+                                <span v-if="latest">{{ latest.amps.toFixed(4) }}</span>
+                                <span v-else>—</span>
+                            </span>
+                        </div>
+                        <div class="reading">
+                            <span class="reading-label">Volts</span>
+                            <span class="reading-value">
+                                <span v-if="latest">{{ latest.volts.toFixed(2) }}</span>
+                                <span v-else>—</span>
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Right: window + low/high summary -->
                     <div class="histogram-subtitle">
                         {{ histogramWindowLabel }}
                         <span v-if="chartHasData">
@@ -253,7 +253,6 @@ import {
     LineElement,
     PointElement,
     LinearScale,
-    CategoryScale,
     TimeScale,
     Tooltip,
     Legend,
@@ -261,7 +260,7 @@ import {
     type ChartData
 } from 'chart.js'
 
-ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, TimeScale, Tooltip, Legend)
+ChartJS.register(LineElement, PointElement, LinearScale, TimeScale, Tooltip, Legend)
 
 /**
  * Pane context — same pattern as logs pane.
@@ -632,17 +631,15 @@ const chartMinDisplay = computed(() => {
     if (pts.length === 0) return 0
 
     // Initialize min using the first *existing* element we find.
-    // This avoids pts[0] access and prevents undefined warnings.
     let min: number | null = null
 
     for (const p of pts) {
-        if (!p) continue               // plugin safety
+        if (!p) continue
         if (min === null || p.watts < min) {
             min = p.watts
         }
     }
 
-    // If something very strange happens, fall back to 0.
     return min ?? 0
 })
 
@@ -664,9 +661,7 @@ const chartData = computed<ChartData<'line'>>(() => {
     const pts = chartPointsRaw.value
 
     return {
-        // labels are optional when using {x, y} data, Chart.js reads x directly
         labels: [],
-
         datasets: [
             {
                 label: 'Watts',
@@ -708,9 +703,10 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
         },
         scales: {
             x: {
-                type: 'time',          // ⬅ important
+                type: 'time',
                 time: {
-                    unit: 'second',    // or 'minute' if you prefer less noise
+                    unit: 'second',
+                    // displayFormats are mostly ignored because we fully override via ticks.callback
                     displayFormats: {
                         second: 'HH:mm:ss',
                         minute: 'HH:mm:ss',
@@ -721,6 +717,42 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     color: '#6b7280',
                     maxRotation: 0,
                     autoSkip: true,
+
+                    callback(value, index, ticks) {
+                        // Ensure ticks exist and the last tick is usable
+                        if (!Array.isArray(ticks) || ticks.length === 0) {
+                            return '';
+                        }
+
+                        const lastTick = ticks[ticks.length - 1];
+                        if (!lastTick || typeof lastTick.value !== 'number') {
+                            return '';
+                        }
+
+                        const lastValue = lastTick.value; // safe: lastTick.value is a number
+
+                        // Convert current tick value safely
+                        const v = (typeof value === 'number') ? value : Number(value);
+                        if (!Number.isFinite(v)) return '';
+
+                        // Right-most tick → label as "Now"
+                        if (index === ticks.length - 1) {
+                            return 'Now';
+                        }
+
+                        // Difference in seconds from this tick to the "Now" tick
+                        const diffMs = lastValue - v;
+                        if (!Number.isFinite(diffMs)) return '';
+
+                        const diffSec = Math.max(0, Math.round(diffMs / 1000));
+                        const minutes = Math.floor(diffSec / 60);
+                        const seconds = diffSec % 60;
+
+                        const mm = String(minutes);
+                        const ss = String(seconds).padStart(2, '0');
+
+                        return `${mm}:${ss}`;
+                    }
                 },
                 grid: {
                     color: 'rgba(229, 231, 235, 0.7)',
@@ -918,41 +950,6 @@ const showAdvanced = ref(false)
     background: #ef4444;
 }
 
-/* Current readings grid */
-.current-panel {
-    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
-        sans-serif;
-}
-
-.current-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-}
-
-.metric {
-    background: #020617;
-    border-radius: 6px;
-    padding: 8px;
-    border: 1px solid #111827;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.metric-label {
-    font-size: 0.78rem;
-    opacity: 0.7;
-}
-
-.metric-value {
-    display: flex;
-    align-items: baseline;
-    gap: 4px;
-    font-size: 1.1rem;
-    font-variant-numeric: tabular-nums;
-}
-
 /* Advanced section */
 .advanced-section {
     display: flex;
@@ -1105,18 +1102,38 @@ const showAdvanced = ref(false)
 .histogram-header {
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
     font-size: 0.78rem;
 }
 
-.histogram-title {
+/* Live readings in header */
+.histogram-current-readings {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 0.78rem;
+}
+
+.reading {
+    display: inline-flex;
+    gap: 4px;
+    align-items: baseline;
+}
+
+.reading-label {
+    opacity: 0.7;
+}
+
+.reading-value {
+    font-variant-numeric: tabular-nums;
     font-weight: 500;
 }
 
 .histogram-subtitle {
     opacity: 0.7;
     font-size: 0.75rem;
+    text-align: right;
 }
 
 .histogram-empty {
@@ -1189,25 +1206,15 @@ const showAdvanced = ref(false)
     font-size: 0.78rem;
 }
 
-/* Responsive: stack metrics if narrow */
+/* Responsive: stack / wrap readings nicely */
 @media (max-width: 720px) {
-    .current-grid {
-        grid-template-columns: minmax(0, 1fr);
-    }
-
-    .stats-header-row,
-    .stats-body-row {
-        grid-template-columns: 60px repeat(4, minmax(0, 1fr));
-    }
-
-    .histogram-settings-grid {
-        flex-direction: column;
-        align-items: flex-start;
-    }
-
     .histogram-header {
         flex-direction: column;
         align-items: flex-start;
+    }
+
+    .histogram-subtitle {
+        text-align: left;
     }
 }
 </style>
