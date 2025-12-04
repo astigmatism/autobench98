@@ -573,7 +573,7 @@ const histogramWindowLabel = computed(() => {
 /* -------------------------------------------------------------------------- */
 
 type ChartPoint = {
-    t: number
+    x: number   // seconds into the past (negative)
     watts: number
 }
 
@@ -588,8 +588,13 @@ const chartPointsRaw = computed<ChartPoint[]>(() => {
     if (samples.length === 0) return []
 
     const maxPoints = Math.max(10, histogramMaxPoints.value || 80)
+    const toPoint = (s: WattsHistorySample): ChartPoint => ({
+        x: (s.t - now) / 1000, // seconds ago (negative)
+        watts: s.watts,
+    })
+
     if (samples.length <= maxPoints) {
-        return samples.map(s => ({ t: s.t, watts: s.watts }))
+        return samples.map(toPoint)
     }
 
     const step = Math.ceil(samples.length / maxPoints)
@@ -597,7 +602,7 @@ const chartPointsRaw = computed<ChartPoint[]>(() => {
     for (let i = 0; i < samples.length; i += step) {
         const s = samples[i]
         if (!s) continue
-        result.push({ t: s.t, watts: s.watts })
+        result.push(toPoint(s))
     }
     return result
 })
@@ -611,6 +616,7 @@ const chartMaxWatts = computed(() => {
         0
     )
 })
+
 const chartMinDisplay = computed(() => {
     const pts = chartPointsRaw.value
     if (pts.length === 0) return 0
@@ -643,16 +649,15 @@ function niceCeil(value: number): number {
 
 const chartData = computed<ChartData<'line'>>(() => {
     const pts = chartPointsRaw.value
-    const now = Date.now()
 
     return {
         labels: [],
         datasets: [
             {
                 label: 'Watts',
+                // NOTE: Chart.js will read x/y directly because we turn off parsing in options
                 data: pts.map(p => ({
-                    // seconds offset into the past (negative)
-                    x: (p.t - now) / 1000,
+                    x: p.x,
                     y: p.watts,
                 })),
                 fill: false,
@@ -675,6 +680,7 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
     return {
         responsive: true,
         maintainAspectRatio: false,
+        parsing: false, // <-- IMPORTANT for {x,y} data
         plugins: {
             legend: { display: false },
             tooltip: {
@@ -697,13 +703,14 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     color: '#6b7280',
                     maxRotation: 0,
                     autoSkip: true,
-                    // try to get ~6 ticks across the window
+                    // Aim for ~6 ticks across the window
                     stepSize: windowSec / 6,
-                    callback(value: any, _index: number, _ticks: any[]) {
-                        const v = typeof value === 'string' ? Number(value) : (value as number)
+                    callback(value: any) {
+                        const v =
+                            typeof value === 'string' ? Number(value) : (value as number)
 
-                        // Right-most tick (0) => "now"
-                        if (Math.abs(v) < 0.0001 || v === 0) {
+                        // Close enough to zero => "now"
+                        if (Math.abs(v) < 0.0001) {
                             return 'now'
                         }
 
