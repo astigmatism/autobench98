@@ -192,8 +192,7 @@
                     <div class="histogram-title">Watts History</div>
                     <div class="histogram-current">
                         <template v-if="latest">
-                            <!-- {{ latest.volts.toFixed(2) }} V •
-                            {{ latest.amps.toFixed(4) }} A • -->
+                            <!-- volts / amps commented out per your last version -->
                             Currently: {{ latest.watts.toFixed(2) }} W
                         </template>
                         <template v-else>
@@ -673,6 +672,12 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
     const max = chartMaxWatts.value
     const suggestedMax = max > 0 ? niceCeil(max) : undefined
 
+    // Fix x-axis window to [now - histogramWindowSec, now]
+    const now = Date.now()
+    const windowMs = histogramWindowSec.value * 1000
+    const minX = now - windowMs
+    const maxX = now
+
     return {
         responsive: true,
         maintainAspectRatio: false,
@@ -692,10 +697,11 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
         scales: {
             x: {
                 type: 'time',
+                min: minX,
+                max: maxX,
                 time: {
                     unit: 'second',
-                    // We’re overriding the tick labels, so these formats
-                    // are mostly for tooltip behavior now.
+                    // formats mainly used for tooltips now
                     displayFormats: {
                         second: 'HH:mm:ss',
                         minute: 'HH:mm:ss',
@@ -707,18 +713,16 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     maxRotation: 0,
                     autoSkip: true,
                     callback(value: any, index: number, ticks: any[]) {
-                        // Right-most tick => "now"
                         const lastIndex = ticks.length - 1
                         if (index === lastIndex) {
                             return 'now'
                         }
 
-                        // Other ticks => "m:ss" ago
                         const numeric =
                             typeof value === 'string' ? Number(value) : (value as number)
 
-                        const now = Date.now()
-                        const diffMs = Math.max(0, now - numeric)
+                        const nowMs = Date.now()
+                        const diffMs = Math.max(0, nowMs - numeric)
                         const diffSec = Math.round(diffMs / 1000)
 
                         const minutes = Math.floor(diffSec / 60)
