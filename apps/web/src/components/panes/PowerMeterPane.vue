@@ -192,7 +192,6 @@
                     <div class="histogram-title">Watts History</div>
                     <div class="histogram-current">
                         <template v-if="latest">
-                            <!-- volts / amps commented out per your last version -->
                             Currently: {{ latest.watts.toFixed(2) }} W
                         </template>
                         <template v-else>
@@ -240,14 +239,13 @@ import {
     PointElement,
     LinearScale,
     CategoryScale,
-    TimeScale,
     Tooltip,
     Legend,
     type ChartOptions,
     type ChartData
 } from 'chart.js'
 
-ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, TimeScale, Tooltip, Legend)
+ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend)
 
 /**
  * Pane context — same pattern as logs pane.
@@ -617,7 +615,6 @@ const chartMinDisplay = computed(() => {
     const pts = chartPointsRaw.value
     if (pts.length === 0) return 0
 
-    // Initialize min using the first *existing* element we find.
     let min: number | null = null
 
     for (const p of pts) {
@@ -646,6 +643,7 @@ function niceCeil(value: number): number {
 
 const chartData = computed<ChartData<'line'>>(() => {
     const pts = chartPointsRaw.value
+    const now = Date.now()
 
     return {
         labels: [],
@@ -653,7 +651,8 @@ const chartData = computed<ChartData<'line'>>(() => {
             {
                 label: 'Watts',
                 data: pts.map(p => ({
-                    x: p.t,
+                    // seconds offset into the past (negative)
+                    x: (p.t - now) / 1000,
                     y: p.watts,
                 })),
                 fill: false,
@@ -671,12 +670,7 @@ const chartData = computed<ChartData<'line'>>(() => {
 const chartOptions = computed<ChartOptions<'line'>>(() => {
     const max = chartMaxWatts.value
     const suggestedMax = max > 0 ? niceCeil(max) : undefined
-
-    // Fix x-axis window to [now - histogramWindowSec, now]
-    const now = Date.now()
-    const windowMs = histogramWindowSec.value * 1000
-    const minX = now - windowMs
-    const maxX = now
+    const windowSec = histogramWindowSec.value
 
     return {
         responsive: true,
@@ -696,37 +690,26 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
         },
         scales: {
             x: {
-                type: 'time',
-                min: minX,
-                max: maxX,
-                time: {
-                    unit: 'second',
-                    // formats mainly used for tooltips now
-                    displayFormats: {
-                        second: 'HH:mm:ss',
-                        minute: 'HH:mm:ss',
-                    },
-                    tooltipFormat: 'HH:mm:ss',
-                },
+                type: 'linear',
+                min: -windowSec,
+                max: 0,
                 ticks: {
                     color: '#6b7280',
                     maxRotation: 0,
                     autoSkip: true,
+                    // try to get ~6 ticks across the window
+                    stepSize: windowSec / 6,
                     callback(value: any, index: number, ticks: any[]) {
-                        const lastIndex = ticks.length - 1
-                        if (index === lastIndex) {
+                        const v = typeof value === 'string' ? Number(value) : (value as number)
+
+                        // Right-most tick (0) => "now"
+                        if (Math.abs(v) < 0.0001 || v === 0) {
                             return 'now'
                         }
 
-                        const numeric =
-                            typeof value === 'string' ? Number(value) : (value as number)
-
-                        const nowMs = Date.now()
-                        const diffMs = Math.max(0, nowMs - numeric)
-                        const diffSec = Math.round(diffMs / 1000)
-
-                        const minutes = Math.floor(diffSec / 60)
-                        const seconds = diffSec % 60
+                        const totalSeconds = Math.abs(Math.round(v))
+                        const minutes = Math.floor(totalSeconds / 60)
+                        const seconds = totalSeconds % 60
 
                         return `${minutes}:${seconds.toString().padStart(2, '0')}`
                     },
