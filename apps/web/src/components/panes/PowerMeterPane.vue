@@ -694,6 +694,8 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                 type: 'time',
                 time: {
                     unit: 'second',
+                    // We’re overriding the tick labels, so these formats
+                    // are mostly for tooltip behavior now.
                     displayFormats: {
                         second: 'HH:mm:ss',
                         minute: 'HH:mm:ss',
@@ -704,6 +706,26 @@ const chartOptions = computed<ChartOptions<'line'>>(() => {
                     color: '#6b7280',
                     maxRotation: 0,
                     autoSkip: true,
+                    callback(value: any, index: number, ticks: any[]) {
+                        // Right-most tick => "now"
+                        const lastIndex = ticks.length - 1
+                        if (index === lastIndex) {
+                            return 'now'
+                        }
+
+                        // Other ticks => "m:ss" ago
+                        const numeric =
+                            typeof value === 'string' ? Number(value) : (value as number)
+
+                        const now = Date.now()
+                        const diffMs = Math.max(0, now - numeric)
+                        const diffSec = Math.round(diffMs / 1000)
+
+                        const minutes = Math.floor(diffSec / 60)
+                        const seconds = diffSec % 60
+
+                        return `${minutes}:${seconds.toString().padStart(2, '0')}`
+                    },
                 },
                 grid: {
                     color: 'rgba(229, 231, 235, 0.7)',
