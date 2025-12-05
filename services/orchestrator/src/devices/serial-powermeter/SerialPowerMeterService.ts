@@ -119,11 +119,24 @@ export class SerialPowerMeterService {
      */
     private readonly enableSoftDisconnect: boolean
 
+    /**
+     * Expected interval between samples in ms, derived from samplingIntervalSec.
+     * Used only for logging / observability (no behavioral guardrails).
+     */
+    private readonly expectedSampleIntervalMs: number
+
+    /**
+     * Background timer used to detect "missing" samples relative to the expected
+     * interval and emit warning logs (when SERIAL_PM_DEBUG_FRAMES is enabled).
+     */
+    private gapMonitorTimer: NodeJS.Timeout | null = null
+
     constructor(config: PowerMeterConfig, deps: SerialPowerMeterServiceDeps) {
         this.config = config
         this.deps = deps
 
         const intervalSec = this.config.samplingIntervalSec ?? 1
+        this.expectedSampleIntervalMs = Math.max(1, intervalSec * 1000)
 
         // ---- Max consecutive failures (env override with sane default) ----
         const maxFailRaw = process.env.SERIAL_PM_MAX_PARSE_FAILURES
@@ -168,6 +181,7 @@ export class SerialPowerMeterService {
 
     public async stop(): Promise<void> {
         this.clearReconnectTimer()
+        this.stopGapMonitor()
         this.recorders.clear()
         this.recorderQuality.clear()
         await this.closePort('explicit-close')
@@ -245,6 +259,7 @@ export class SerialPowerMeterService {
         if (this.deviceId !== args.id) return
 
         this.clearReconnectTimer()
+        this.stopGapMonitor()
         await this.closePort('device-lost')
 
         this.state = { phase: 'disconnected' }
@@ -447,6 +462,10 @@ export class SerialPowerMeterService {
                         kind: 'meter-streaming-started',
                         at: Date.now(),
                     })
+
+                    // Start the gap monitor once we are streaming.
+                    this.startGapMonitor()
+
                     resolve()
                 } catch (err: any) {
                     await this.handlePortError(err instanceof Error ? err : new Error(String(err)))
@@ -882,6 +901,50 @@ export class SerialPowerMeterService {
 
         return candidate
     }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Gap monitor (logging only, no behavior changes)                       */
+    /* ---------------------------------------------------------------------- */
+
+    private startGapMonitor(): void {
+        if (this.gapMonitorTimer) return
+
+        // Check roughly once per second, but never more often than 500ms.
+        const tickMs = Math.max(500, this.expectedSampleIntervalMs)
+
+        this.gapMonitorTimer = setInterval(() => {
+            // Only emit any logs when frame debug is enabled.
+            if (process.env.SERIAL_PM_DEBUG_FRAMES !== 'true') return
+
+            const last = this.stats.lastSampleAt
+            if (last == null) return
+
+            const now = Date.now()
+            const ageMs = now - last
+
+            // Consider "missing" when we've gone more than 2x the expected interval
+            // without seeing a sample.
+            const thresholdMs = this.expectedSampleIntervalMs * 2
+            if (ageMs <= thresholdMs) return
+
+            const approxMissing = Math.floor(ageMs / this.expectedSampleIntervalMs)
+
+            console.warn(
+                `[powermeter:warn] ${new Date().toISOString()} suspected missing power meter samples: ` +
+                `lastSampleAgeMs=${ageMs} expectedIntervalMs=${this.expectedSampleIntervalMs} ` +
+                `approxMissing=${approxMissing}`
+            )
+        }, tickMs)
+    }
+
+    private stopGapMonitor(): void {
+        if (this.gapMonitorTimer) {
+            clearInterval(this.gapMonitorTimer)
+            this.gapMonitorTimer = null
+        }
+    }
+
+    /* ---------------------------------------------------------------------- */
 
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms))
