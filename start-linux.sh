@@ -6,10 +6,10 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
 
-log()  { printf "\033[1;36m[autobench98]\033[0m %s\n" "$*"; }
+log() { printf "\033[1;36m[autobench98]\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m[autobench98]\033[0m %s\n" "$*"; }
-err()  { printf "\033[1;31m[autobench98]\033[0m %s\n" "$*\n" >&2; }
-die()  { err "$1"; exit 1; }
+err() { printf "\033[1;31m[autobench98]\033[0m %s\n" "$*\n" >&2; }
+die() { err "$1"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing '$1'. Please install it."; }
 
 # Kill a whole process group (children too)
@@ -89,26 +89,38 @@ else
 fi
 
 # --- ensure wattsup binary is executable -------------------------------------
-# SERIAL_PM_WATTSUP_PATH should point to the wattsup binary, relative to repo
-# root or as an absolute path. Example:
-#   SERIAL_PM_WATTSUP_PATH=vendor/wattsup/linux-amd64/wattsup
-# If unset, we fall back to that default.
-WATTSUP_PATH="${SERIAL_PM_WATTSUP_PATH:-vendor/wattsup/linux-amd64/wattsup}"
+# We do NOT rewrite SERIAL_PM_WATTSUP_PATH; we just honor it and make sure the
+# file it points to is executable (if it exists).
+#
+# IMPORTANT: Node's orchestrator process runs with:
+#   cwd = services/orchestrator
+# so relative paths in SERIAL_PM_WATTSUP_PATH are interpreted from there.
+if [[ -n "${SERIAL_PM_WATTSUP_PATH:-}" ]]; then
+  log "SERIAL_PM_WATTSUP_PATH => ${SERIAL_PM_WATTSUP_PATH}"
 
-case "$WATTSUP_PATH" in
-  /*)  WATTSUP_BIN="$WATTSUP_PATH" ;;   # absolute path
-  *)   WATTSUP_BIN="./$WATTSUP_PATH" ;; # repo-relative
-esac
+  ORCH_DIR="${script_dir}/services/orchestrator"
 
-if [[ -f "$WATTSUP_BIN" ]]; then
-  if chmod +x "$WATTSUP_BIN" 2>/dev/null; then
-    log "WattsUp binary => $WATTSUP_BIN (chmod +x ok)"
+  if [[ "${SERIAL_PM_WATTSUP_PATH}" = /* ]]; then
+    # Absolute path, use as-is
+    WU_PATH="${SERIAL_PM_WATTSUP_PATH}"
   else
-    warn "Unable to chmod +x $WATTSUP_BIN (check permissions)"
+    # Relative path, interpret as if from services/orchestrator
+    WU_PATH="${ORCH_DIR}/${SERIAL_PM_WATTSUP_PATH}"
+  fi
+
+  if [[ -f "$WU_PATH" ]]; then
+    if [[ ! -x "$WU_PATH" ]]; then
+      log "Making WattsUp binary executable: $WU_PATH"
+      chmod +x "$WU_PATH" || die "Failed to chmod +x $WU_PATH"
+    else
+      log "WattsUp binary already executable: $WU_PATH"
+    fi
+  else
+    warn "WattsUp binary not found at: $WU_PATH"
+    warn "SerialPowerMeterService will fail unless this file exists."
   fi
 else
-  warn "WattsUp binary not found at '$WATTSUP_BIN'"
-  warn "SERIAL_PM_WATTSUP_PATH='${SERIAL_PM_WATTSUP_PATH:-<unset>}'"
+  warn "SERIAL_PM_WATTSUP_PATH is not set. Orchestrator will fall back to 'wattsup' on \$PATH."
 fi
 
 # --- host-friendly defaults ---------------------------------------------------
@@ -121,9 +133,9 @@ fi
 
 mkdir -p "$DATA_DIR"
 
-log "DATA_DIR      => $DATA_DIR"
-log "Orchestrator  => http://localhost:${API_PORT}"
-log "Sidecar       => http://localhost:${SIDECAR_PORT}"
+log "DATA_DIR => $DATA_DIR"
+log "Orchestrator => http://localhost:${API_PORT}"
+log "Sidecar      => http://localhost:${SIDECAR_PORT}"
 
 # --- serial access hint (Linux permissions) -----------------------------------
 # Many distros require your user in 'dialout' (Deb/Ubuntu) or 'uucp'/'tty' (Arch/Alpine).
@@ -190,7 +202,7 @@ sleep 0.2
 log "Starting orchestrator (host)"
 (
   cd services/orchestrator
-  export DATA_DIR SERIAL_SUMMARY_MS SERIAL_PM_WATTSUP_PATH
+  export DATA_DIR SERIAL_SUMMARY_MS
   exec npx tsx src/server.ts
 ) &
 ORCH_PID=$!
