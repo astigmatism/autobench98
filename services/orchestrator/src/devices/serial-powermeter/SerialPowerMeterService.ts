@@ -18,6 +18,7 @@ import {
 import {
     createRecorder,
     type RecorderInstance,
+    parseWattsUpCsvRow,
 } from './utils.js'
 
 interface SerialPowerMeterServiceDeps {
@@ -386,6 +387,8 @@ export class SerialPowerMeterService {
         })
 
         child.stdout.on('data', (chunk: Buffer) => {
+            // Track raw bytes received for stats/diagnostics.
+            this.stats.bytesReceived += chunk.length
             this.handleStdoutData(chunk.toString('utf8'))
         })
 
@@ -525,10 +528,17 @@ export class SerialPowerMeterService {
             if (!trimmed) continue
 
             // Header line (first line from wattsup) – capture field order.
+            // Example:
+            //   W, V, A, WH, Cost, WH/Mo, Cost/Mo, Wmax, Vmax, Amax, ...
             if (/^\s*W\s*,\s*V\s*,\s*A\b/i.test(trimmed)) {
                 this.headerFields = trimmed.split(',').map(h => h.trim())
-                // Optional: control-line event if you ever want it.
-                // this.deps.events.publish({ kind: 'meter-control-line', at: Date.now(), line: trimmed })
+
+                this.deps.events.publish({
+                    kind: 'meter-control-line',
+                    at: Date.now(),
+                    line: trimmed,
+                })
+
                 continue
             }
 
@@ -539,15 +549,26 @@ export class SerialPowerMeterService {
                 )
             }
 
-            const sample = this.parseWattsUpCsvLine(trimmed)
+            // Use the shared CSV parser from utils.ts, which matches the
+            // wattsup CLI field ordering you showed:
+            // W, V, A, WH, Cost, WH/Mo, Cost/Mo, Wmax, ...
+            const sample = parseWattsUpCsvRow(trimmed)
             if (!sample) {
                 // Single-row parse failure; logged for observability only.
                 this.stats.lastErrorAt = Date.now()
+
                 this.deps.events.publish({
                     kind: 'recoverable-error',
                     at: this.stats.lastErrorAt,
                     error: `Failed to parse wattsup CSV row: "${trimmed}"`,
                 })
+
+                this.deps.events.publish({
+                    kind: 'meter-unknown-line',
+                    at: this.stats.lastErrorAt,
+                    line: trimmed,
+                })
+
                 // Count as a bad frame for any active recorders.
                 for (const stats of this.recorderQuality.values()) {
                     stats.badFrames += 1
@@ -596,66 +617,6 @@ export class SerialPowerMeterService {
                 sample,
             })
         }
-    }
-
-    private parseWattsUpCsvLine(line: string): PowerSample | null {
-        if (!this.headerFields) return null
-
-        const parts = line.split(',').map(p => p.trim())
-        if (parts.length < 3) {
-            return null
-        }
-
-        const get = (name: string): string | undefined => {
-            const idx = this.headerFields!.findIndex(
-                h => h.toLowerCase() === name.toLowerCase()
-            )
-            if (idx < 0 || idx >= parts.length) return undefined
-            return parts[idx]
-        }
-
-        const wattsStr = get('W')
-        const voltsStr = get('V')
-        const ampsStr = get('A')
-
-        if (!wattsStr || !voltsStr || !ampsStr) return null
-
-        const watts = Number(wattsStr)
-        const volts = Number(voltsStr)
-        const amps = Number(ampsStr)
-
-        if (Number.isNaN(watts) || Number.isNaN(volts) || Number.isNaN(amps)) {
-            return null
-        }
-
-        const whRawStr = get('WH')
-        const wmaxStr = get('Wmax')
-        const pfStr = get('PF')
-
-        const whRaw = this.safeNumber(whRawStr)
-        const wattsAltRaw = this.safeNumber(wmaxStr)
-        const powerFactorRaw = this.safeNumber(pfStr)
-
-        const ts = new Date().toISOString()
-
-        const sample: PowerSample = {
-            ts,
-            watts,
-            volts,
-            amps,
-            whRaw,
-            wattsAltRaw,
-            powerFactorRaw,
-            rawLine: line,
-        }
-
-        return sample
-    }
-
-    private safeNumber(value: string | undefined): number | null {
-        if (value == null || value === '' || value === '_' || value === '-') return null
-        const n = Number(value)
-        return Number.isNaN(n) ? null : n
     }
 
     /* ---------------------------------------------------------------------- */
@@ -792,11 +753,5 @@ export class SerialPowerMeterService {
             clearInterval(this.gapMonitorTimer)
             this.gapMonitorTimer = null
         }
-    }
-
-    /* ---------------------------------------------------------------------- */
-
-    private sleep(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms))
     }
 }
