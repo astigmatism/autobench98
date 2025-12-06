@@ -4,7 +4,7 @@ import {
     spawn,
     type ChildProcessByStdio,
 } from 'node:child_process'
-import type { Readable } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
 
 import {
     type PowerMeterConfig,
@@ -72,7 +72,7 @@ export class SerialPowerMeterService {
     private devicePath: string | null = null
 
     /** Child process running the wattsup binary. */
-    private child: ChildProcessByStdio<null, Readable, Readable> | null = null
+    private child: ChildProcessByStdio<Writable, Readable, Readable> | null = null
     private reconnectAttempts = 0
 
     // Chunk → line buffering of stdout:
@@ -373,7 +373,7 @@ export class SerialPowerMeterService {
         ]
 
         const child = spawn(this.wattsupBinaryPath, args, {
-            stdio: ['ignore', 'pipe', 'pipe'],
+            stdio: ['pipe', 'pipe', 'pipe'],
         })
 
         this.child = child
