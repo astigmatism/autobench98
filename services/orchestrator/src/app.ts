@@ -96,9 +96,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(atlonaControllerPlugin)
 
     // Serial discovery plugin
-    void app.register(serialPlugin, {
-        logPrefix: 'serial'
-    })
+    // void app.register(serialPlugin, {
+    //     logPrefix: 'serial'
+    // })
 
     // Power meter + serial printer
     void app.register(powerMeterPlugin)
