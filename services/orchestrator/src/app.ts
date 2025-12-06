@@ -82,6 +82,11 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     // CORS
     void app.register(cors, { origin: true })
 
+    // 🔑 SERIAL DISCOVERY FIRST so its onReady gating runs before others
+    void app.register(serialPlugin, {
+        logPrefix: 'serial'
+    })
+
     // File uploads for /api/layouts/import
     void app.register(fastifyMultipart, {
         attachFieldsToBody: true,
@@ -91,11 +96,6 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     // WebSocket + layouts routes
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
-
-    // Serial discovery plugin
-    void app.register(serialPlugin, {
-        logPrefix: 'serial'
-    })
 
     // 🔹 Atlona controller plugin (creates app.atlonaController and state fanout)
     void app.register(atlonaControllerPlugin)
