@@ -101,8 +101,8 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(atlonaControllerPlugin)
 
     // Power meter + serial printer
-    // void app.register(powerMeterPlugin)
-    // void app.register(serialPrinterPlugin)
+    void app.register(powerMeterPlugin)
+    void app.register(serialPrinterPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
