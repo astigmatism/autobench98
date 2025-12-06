@@ -92,17 +92,17 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
 
+    // Serial discovery plugin
+    void app.register(serialPlugin, {
+         logPrefix: 'serial'
+    })
+
     // 🔹 Atlona controller plugin (creates app.atlonaController and state fanout)
     void app.register(atlonaControllerPlugin)
 
-    // Serial discovery plugin
-    // void app.register(serialPlugin, {
-    //     logPrefix: 'serial'
-    // })
-
     // Power meter + serial printer
     void app.register(powerMeterPlugin)
-    void app.register(serialPrinterPlugin)
+    // void app.register(serialPrinterPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
