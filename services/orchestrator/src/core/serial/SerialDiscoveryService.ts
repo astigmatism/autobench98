@@ -426,53 +426,71 @@ export class SerialDiscoveryService extends TypedEmitter {
     baud: number,
     fromActive: boolean
   ): Promise<void> {
-    if (fromActive) {
-      const { port, parser } = await this.openPort(
-        path,
-        matched.baudRate ?? baud,
-        this.options.identify.parserDelimiter ?? '\r\n'
-      )
+    // Device kinds that have dedicated services which will own the port.
+    const serviceOwnedKinds = new Set<string>([
+      'serial.powermeter',
+      'serial.printer',
+      'arduino.atlonacontroller',
+    ])
 
-      const completion = this.options.identify.completion
-      if (completion) {
-        try {
-          await this.writeLine(
-            port,
-            `${completion}${this.options.identify.writeLineEnding ?? '\n'}`
-          )
-        } catch {
-          // non-fatal
+    const isServiceOwned = serviceOwnedKinds.has(matched.kind)
+
+    // Discovery keeps *only non-service* devices open.
+    const keepOpen =
+      isServiceOwned
+        ? false
+        : fromActive
+          ? true
+          : matched.keepOpenOnStatic === true
+
+    if (keepOpen) {
+        if (fromActive) {
+            const { port, parser } = await this.openPort(
+                path,
+                matched.baudRate ?? baud,
+                this.options.identify.parserDelimiter ?? '\r\n'
+            )
+
+            const completion = this.options.identify.completion
+            if (completion) {
+                try {
+                    await this.writeLine(
+                        port,
+                        `${completion}${this.options.identify.writeLineEnding ?? '\n'}`
+                    )
+                } catch {
+                    // non-fatal
+                }
+            }
+
+            this.openPorts.set(path, port)
+            this.parsers.set(path, parser)
+        } else {
+            const { port, parser } = await this.openPort(
+                path,
+                matched.baudRate ?? baud,
+                this.options.identify.parserDelimiter ?? '\r\n'
+            )
+            this.openPorts.set(path, port)
+            this.parsers.set(path, parser)
         }
-      }
-
-      this.openPorts.set(path, port)
-      this.parsers.set(path, parser)
     } else {
-      if (matched.keepOpenOnStatic) {
-        const { port, parser } = await this.openPort(
-          path,
-          matched.baudRate ?? baud,
-          this.options.identify.parserDelimiter ?? '\r\n'
-        )
-        this.openPorts.set(path, port)
-        this.parsers.set(path, parser)
-      } else {
+        // Probe-and-release: make sure we don't hold the FD.
         await this.safeClose(path)
-      }
     }
 
     this.claimedPaths.add(path)
     this.emit('device:identified', {
-      id,
-      path,
-      vid,
-      pid,
-      kind: matched.kind,
-      baudRate: matched.baudRate ?? baud
+        id,
+        path,
+        vid,
+        pid,
+        kind: matched.kind,
+        baudRate: matched.baudRate ?? baud,
     })
     this.emitLog(
-      'info',
-      `identified path=${path} kind=${matched.kind} mode=${fromActive ? 'active' : 'static'} baud=${matched.baudRate ?? baud}`
+        'info',
+        `identified path=${path} kind=${matched.kind} mode=${fromActive ? 'active' : 'static'} baud=${matched.baudRate ?? baud}`
     )
   }
 

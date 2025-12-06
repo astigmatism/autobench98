@@ -372,7 +372,6 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
     }
   })
 
-  // ---------------------- non-blocking startup gating ------------------------
   app.addHook('onReady', async () => {
     const identifyDefaults: IdentifyConfig = {
       request: 'identify',
@@ -398,24 +397,56 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
       `timeoutMs=${startupTimeoutMs}`
     )
 
-    // Start discovery; returns quickly (non-blocking).
+    // Start discovery; returns quickly.
     await discovery.start(options)
 
-    // Background gating loop – does NOT block Fastify start.
-    void (async () => {
-      const start = Date.now()
-      let elapsed = 0
+    // 🔑 Gating loop is now *in-line* and blocks onReady until satisfied or timeout.
+    const startTs = Date.now()
 
-      while (true) {
-        elapsed = Date.now() - start
+    while (true) {
+      const elapsed = Date.now() - startTs
+      const status = getDeviceStatus()
 
-        const status = getDeviceStatus()
+      if (status.ready) {
+        log.info(
+          `startup scan satisfied after ${elapsed}ms devices=${status.devices.length} ` +
+          `byStatus=${JSON.stringify(status.byStatus)}`
+        )
 
-        if (status.ready) {
-          log.info(
-            `startup scan satisfied after ${elapsed}ms devices=${status.devices.length} ` +
-            `byStatus=${JSON.stringify(status.byStatus)}`
-          )
+        const summaryEvery = effective.summaryIntervalMs
+        if (summaryEvery && summaryEvery > 0) {
+          const ms = Math.max(1000, summaryEvery)
+          summaryTimer = setInterval(() => { logSummary('interval') }, ms)
+          setTimeout(() => logSummary('startup'), 1000)
+        }
+        break
+      }
+
+      if (elapsed >= startupTimeoutMs) {
+        const candidates = status.devices
+          .filter(d => d.status === 'identifying' || d.status === 'ready')
+          .map(d => ({
+            idToken: d.idToken ?? '(none)',
+            kind: d.kind,
+            status: d.status,
+            path: d.path,
+            vid: d.vid, pid: d.pid, baud: d.baudRate
+          }))
+
+        if (candidates.length > 0) {
+          log.warn(`startup candidates: ${JSON.stringify(candidates)}`)
+        }
+
+        const ids = status.missing.map(m => m.id).join(',')
+        const msg = `startup requirement not met; missing ids=[${ids}]`
+
+        if (failOnMissing) {
+          log.error(msg)
+          try { await discovery.stop() } catch { /* ignore */ }
+          // 🔴 Instead of process.exit(1), throw to let Fastify/server.ts handle it.
+          throw new Error(msg)
+        } else {
+          log.warn(msg)
 
           const summaryEvery = effective.summaryIntervalMs
           if (summaryEvery && summaryEvery > 0) {
@@ -425,46 +456,10 @@ export default fp<SerialPluginOptions>(async function serialPlugin(app: FastifyI
           }
           break
         }
-
-        if (elapsed >= startupTimeoutMs) {
-          const candidates = status.devices
-            .filter(d => d.status === 'identifying' || d.status === 'ready')
-            .map(d => ({
-              idToken: d.idToken ?? '(none)',
-              kind: d.kind,
-              status: d.status,
-              path: d.path,
-              vid: d.vid, pid: d.pid, baud: d.baudRate
-            }))
-
-          if (candidates.length > 0) {
-            log.warn(`startup candidates: ${JSON.stringify(candidates)}`)
-          }
-
-          const ids = status.missing.map(m => m.id).join(',')
-          const msg = `startup requirement not met; missing ids=[${ids}]`
-
-          if (failOnMissing) {
-            log.error(msg)
-            try { await discovery.stop() } catch { /* ignore */ }
-            // Hard fail – outer supervisor (or you) will decide what to do.
-            process.exit(1)
-          } else {
-            log.warn(msg)
-
-            const summaryEvery = effective.summaryIntervalMs
-            if (summaryEvery && summaryEvery > 0) {
-              const ms = Math.max(1000, summaryEvery)
-              summaryTimer = setInterval(() => { logSummary('interval') }, ms)
-              setTimeout(() => logSummary('startup'), 1000)
-            }
-          }
-          break
-        }
-
-        await sleep(100)
       }
-    })()
+
+      await sleep(100)
+    }
   })
 
   // ---------------------- app.onClose cleanup --------------------------------
