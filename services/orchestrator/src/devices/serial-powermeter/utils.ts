@@ -8,45 +8,45 @@ import {
 } from './types.js'
 
 /* -------------------------------------------------------------------------- */
-/*  Frame parsing                                                             */
+/*  CSV row parsing (wattsup CLI)                                            */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Parse a WattsUp "#d,..." data frame into a PowerSample.
+ * Parse a wattsup CLI CSV data row (NOT a "#d" frame) into a PowerSample.
  *
- * Expected layout (from wattsup.py + observed data):
- *   0: "#d"
- *   1: "-"
- *   2: sample index
- *   3: watts_raw   (W = raw / 10)
- *   4: volts_raw   (V = raw / 10)
- *   5: amps_raw    (A = raw / 1000)
- *   6: whRaw       (cumulative energy - semantics TBD)
- *  10: wattsAltRaw (additional W-ish value)
- *  16: powerFactorRaw (PF * 100)
+ * Expected header (for reference):
+ *   W, V, A, WH, Cost, WH/Mo, Cost/Mo, Wmax, Vmax, Amax,
+ *   Wmin, Vmin, Amin, PF, DC, PC, Hz, VA
+ *
+ * We currently map:
+ *   - W  -> watts
+ *   - V  -> volts
+ *   - A  -> amps
+ *   - WH -> whRaw
+ *   - Wmax -> wattsAltRaw
+ *   - PF -> powerFactorRaw
+ *
+ * Additional fields are available in the raw CSV line if you want to
+ * expand PowerSample later.
  */
-export function parseWattsUpFrame(line: string): PowerSample | null {
-    const fields = line.split(',')
+export function parseWattsUpCsvRow(line: string): PowerSample | null {
+    const parts = line.split(',').map(p => p.trim())
 
-    if (fields.length < 6) {
+    if (parts.length < 3) {
         return null
     }
 
-    const wattsRaw = Number(fields[3])
-    const voltsRaw = Number(fields[4])
-    const ampsRaw = Number(fields[5])
+    const watts = safeNumber(parts[0])
+    const volts = safeNumber(parts[1])
+    const amps = safeNumber(parts[2])
 
-    if (Number.isNaN(wattsRaw) || Number.isNaN(voltsRaw) || Number.isNaN(ampsRaw)) {
+    if (watts == null || volts == null || amps == null) {
         return null
     }
 
-    const watts = wattsRaw / 10
-    const volts = voltsRaw / 10
-    const amps = ampsRaw / 1000
-
-    const whRaw = safeNumber(fields[6])
-    const wattsAltRaw = safeNumber(fields[10])
-    const pfRaw = safeNumber(fields[16])
+    const whRaw = safeNumber(parts[3])
+    const wattsAltRaw = safeNumber(parts[7]) // Wmax
+    const powerFactorRaw = safeNumber(parts[13]) // PF
 
     const ts = new Date().toISOString()
 
@@ -57,7 +57,7 @@ export function parseWattsUpFrame(line: string): PowerSample | null {
         amps,
         whRaw,
         wattsAltRaw,
-        powerFactorRaw: pfRaw,
+        powerFactorRaw,
         rawLine: line,
     }
 }
@@ -182,7 +182,6 @@ export function createRecorder(
  * Expected env vars (see .env.example):
  *   - SERIAL_PM_SAMPLING_INTERVAL_SEC
  *   - SERIAL_PM_MAX_RECENT_SAMPLES
- *   - SERIAL_PM_FULL_HANDLING
  *   - SERIAL_PM_RECONNECT_ENABLED
  *   - SERIAL_PM_RECONNECT_MAX_ATTEMPTS
  *   - SERIAL_PM_RECONNECT_BASE_DELAY_MS
@@ -191,7 +190,6 @@ export function createRecorder(
 export function buildPowerMeterConfigFromEnv(env: NodeJS.ProcessEnv): PowerMeterConfig {
     const samplingIntervalSec = parseIntSafe(env.SERIAL_PM_SAMPLING_INTERVAL_SEC, 1)
     const maxRecentSamples = parseIntSafe(env.SERIAL_PM_MAX_RECENT_SAMPLES, 120)
-    const fullHandling = parseIntSafe(env.SERIAL_PM_FULL_HANDLING, 3)
 
     const reconnectEnabled = parseBoolSafe(env.SERIAL_PM_RECONNECT_ENABLED, true)
     const reconnectMaxAttempts = parseIntSafe(env.SERIAL_PM_RECONNECT_MAX_ATTEMPTS, 5)
@@ -201,7 +199,7 @@ export function buildPowerMeterConfigFromEnv(env: NodeJS.ProcessEnv): PowerMeter
     return {
         maxRecentSamples,
         samplingIntervalSec,
-        fullHandling,
+        // fullHandling is now unused; we simply omit it here.
         reconnect: {
             enabled: reconnectEnabled,
             maxAttempts: reconnectMaxAttempts,

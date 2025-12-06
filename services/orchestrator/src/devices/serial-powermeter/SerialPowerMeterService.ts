@@ -1,5 +1,11 @@
 /* eslint-disable no-console */
-import { SerialPort } from 'serialport'
+
+import {
+    spawn,
+    type ChildProcessByStdio,
+} from 'node:child_process'
+import type { Readable } from 'node:stream'
+
 import {
     type PowerMeterConfig,
     type PowerMeterEventSink,
@@ -10,7 +16,6 @@ import {
     type PowerRecorderOptions,
 } from './types.js'
 import {
-    parseWattsUpFrame,
     createRecorder,
     type RecorderInstance,
 } from './utils.js'
@@ -32,7 +37,7 @@ interface RecorderQualityStats {
     endedAt: number | null
     /** Number of successfully parsed samples while this recorder was active. */
     goodSamples: number
-    /** Number of parse failures / bad frames while this recorder was active. */
+    /** Number of parse failures / bad rows while this recorder was active. */
     badFrames: number
     /** Timestamp of last good sample routed to this recorder. */
     lastGoodSampleAt: number | null
@@ -41,18 +46,14 @@ interface RecorderQualityStats {
 }
 
 /**
- * SerialPowerMeterService
+ * SerialPowerMeterService (child-process / wattsup-backed)
  *
- * - Attaches to a WattsUp? PRO serial device when a compatible path is discovered.
- * - Sends the standard command sequence to start logging at the configured interval.
- * - Parses "#d,..." frames into PowerSample objects.
- * - Maintains a rolling buffer of recent samples.
- * - Supports multiple independent recorders keyed by ID (benchmark, UI, etc).
- *
- * Discovery is handled externally via SerialDiscoveryService. The orchestrator
- * is expected to:
- *   - Call onDeviceIdentified(...) when a power meter is detected.
- *   - Call onDeviceLost(...) when that device disappears.
+ * - Serial discovery is handled externally via SerialDiscoveryService.
+ * - When a power meter device is identified, we start the `wattsup` binary
+ *   as a child process, pointing it at the discovered device path.
+ * - We parse CSV output lines into PowerSample objects.
+ * - We maintain recent samples, stats, and recorder instances exactly as before.
+ * - We do NOT talk to the serial port directly anymore.
  */
 export class SerialPowerMeterService {
     private readonly config: PowerMeterConfig
@@ -68,13 +69,21 @@ export class SerialPowerMeterService {
 
     private deviceId: string | null = null
     private devicePath: string | null = null
-    private deviceBaudRate = 115200
 
-    private port: SerialPort | null = null
+    /** Child process running the wattsup binary. */
+    private child: ChildProcessByStdio<null, Readable, Readable> | null = null
     private reconnectAttempts = 0
+
+    // Chunk → line buffering of stdout:
+    private readBuffer = ''
+
+    // For gap warnings (only warn once per gap episode):
+    private gapWarningEmitted = false
+
     private reconnectTimer: NodeJS.Timeout | null = null
 
-    private readBuffer = ''
+    private headerFields: string[] | null = null
+
     private recentSamples: PowerSample[] = []
 
     /** Multiple concurrent recorders (benchmark, UI, other spans). */
@@ -88,40 +97,17 @@ export class SerialPowerMeterService {
     private recorderQuality = new Map<string, RecorderQualityStats>()
 
     /**
-     * Guardrails for unparseable data:
-     *
-     * - We treat repeated invalid frames as a sign that the device is unhealthy
-     *   (or the link is corrupted), even if bytes are still flowing.
-     * - After a threshold of consecutive failures, we behave as if the device
-     *   were disconnected and let normal reconnect logic take over.
-     *
-     * These are intentionally conservative defaults and can be tuned via env:
-     *   - SERIAL_PM_MAX_PARSE_FAILURES
-     *   - SERIAL_PM_PARSE_FAILURE_WINDOW_MS
-     */
-    private consecutiveParseFailures = 0
-    private readonly maxConsecutiveParseFailures: number
-    private readonly parseFailureWindowMs: number
-
-    /**
-     * Count of invalid frames seen since the last successfully parsed
-     * sample. This helps distinguish "no data at all" from "lots of junk"
-     * when the guardrail based on lastSampleAt fires.
-     */
-    private invalidFramesSinceLastGoodSample = 0
-
-    /**
-     * Whether to actually perform a "soft disconnect" (close + reconnect)
-     * when guardrails for invalid frames are tripped.
+     * Whether to perform a "soft restart" (stop + restart child) when
+     * the gap-monitor watchdog observes a long absence of samples.
      *
      * Controlled by SERIAL_PM_ENABLE_SOFT_DISCONNECT; defaults to false so
-     * benchmarks rely on per-run quality rather than port churn.
+     * benchmarks rely on per-run quality rather than process churn.
      */
-    private readonly enableSoftDisconnect: boolean
+    private readonly enableSoftRestart: boolean
 
     /**
      * Expected interval between samples in ms, derived from samplingIntervalSec.
-     * Used only for logging / observability (no behavioral guardrails).
+     * Used for logging / observability and the gap-monitor thresholds.
      */
     private readonly expectedSampleIntervalMs: number
 
@@ -131,6 +117,12 @@ export class SerialPowerMeterService {
      */
     private gapMonitorTimer: NodeJS.Timeout | null = null
 
+    /**
+     * Path to the wattsup binary. Defaults to "wattsup" in PATH.
+     * Can be overridden via SERIAL_PM_WATTSUP_PATH.
+     */
+    private readonly wattsupBinaryPath: string
+
     constructor(config: PowerMeterConfig, deps: SerialPowerMeterServiceDeps) {
         this.config = config
         this.deps = deps
@@ -138,35 +130,19 @@ export class SerialPowerMeterService {
         const intervalSec = this.config.samplingIntervalSec ?? 1
         this.expectedSampleIntervalMs = Math.max(1, intervalSec * 1000)
 
-        // ---- Max consecutive failures (env override with sane default) ----
-        const maxFailRaw = process.env.SERIAL_PM_MAX_PARSE_FAILURES
-        const maxFailNum = maxFailRaw !== undefined ? Number(maxFailRaw) : NaN
-        this.maxConsecutiveParseFailures =
-            Number.isFinite(maxFailNum) && maxFailNum > 0
-                ? maxFailNum
-                : 30 // was 10; relax to be less sensitive to short bursts
-
-        // ---- Failure window ms (env override with heuristic fallback) -----
-        const windowRaw = process.env.SERIAL_PM_PARSE_FAILURE_WINDOW_MS
-        const windowNum = windowRaw !== undefined ? Number(windowRaw) : NaN
-
-        if (Number.isFinite(windowNum) && windowNum > 0) {
-            this.parseFailureWindowMs = windowNum
-        } else {
-            // Heuristic (relaxed): ~3x the time it would take to see
-            // maxConsecutiveParseFailures samples, clamped to [60s, 300s].
-            const heuristic = intervalSec * 1000 * this.maxConsecutiveParseFailures * 3
-            this.parseFailureWindowMs = Math.max(60_000, Math.min(300_000, heuristic))
-        }
-
-        // ---- Soft disconnect enable flag ----------------------------------
+        // Soft restart enable flag (watchdog-based).
         const softRaw = process.env.SERIAL_PM_ENABLE_SOFT_DISCONNECT
         if (softRaw == null || softRaw === '') {
-            this.enableSoftDisconnect = false
+            this.enableSoftRestart = false
         } else {
             const v = softRaw.toLowerCase()
-            this.enableSoftDisconnect = v === 'true' || v === '1' || v === 'yes'
+            this.enableSoftRestart = v === 'true' || v === '1' || v === 'yes'
         }
+
+        this.wattsupBinaryPath =
+            process.env.SERIAL_PM_WATTSUP_PATH && process.env.SERIAL_PM_WATTSUP_PATH.trim() !== ''
+                ? process.env.SERIAL_PM_WATTSUP_PATH.trim()
+                : 'wattsup'
     }
 
     /* ---------------------------------------------------------------------- */
@@ -176,7 +152,6 @@ export class SerialPowerMeterService {
     /** For symmetry with other services; may remain a no-op. */
     public async start(): Promise<void> {
         // Intentionally empty for now; device attach is driven by discovery.
-        // We could add background health tasks here later.
     }
 
     public async stop(): Promise<void> {
@@ -184,12 +159,11 @@ export class SerialPowerMeterService {
         this.stopGapMonitor()
         this.recorders.clear()
         this.recorderQuality.clear()
-        await this.closePort('explicit-close')
+        await this.stopChild('explicit-close')
+
         this.state = { phase: 'disconnected' }
         this.deviceId = null
         this.devicePath = null
-        this.consecutiveParseFailures = 0
-        this.invalidFramesSinceLastGoodSample = 0
     }
 
     /** Current high-level state. */
@@ -222,37 +196,24 @@ export class SerialPowerMeterService {
         path: string
         baudRate?: number
     }): Promise<void> {
+        // baudRate is irrelevant here; wattsup handles serial details.
         this.deviceId = args.id
-
-        // On macOS, SerialPort.list() typically returns /dev/tty.*,
-        // but the recommended node for outgoing serial use is /dev/cu.*.
-        let effectivePath = args.path
-        if (effectivePath.startsWith('/dev/tty.')) {
-            const cuPath = '/dev/cu.' + effectivePath.slice('/dev/tty.'.length)
-            effectivePath = cuPath
-        }
-
-        this.devicePath = effectivePath
-        this.deviceBaudRate = args.baudRate ?? 115200
+        this.devicePath = args.path
 
         this.deps.events.publish({
             kind: 'meter-device-identified',
             at: Date.now(),
             id: args.id,
-            path: this.devicePath,
-            baudRate: this.deviceBaudRate,
+            path: args.path,
+            baudRate: args.baudRate ?? 115200,
         })
 
-        if (
-            this.port &&
-            this.port.isOpen &&
-            this.state.phase === 'streaming' &&
-            this.devicePath === effectivePath
-        ) {
+        // If we already have a running child for this path, do nothing.
+        if (this.child && this.state.phase === 'streaming') {
             return
         }
 
-        await this.openPort()
+        await this.startChild()
     }
 
     public async onDeviceLost(args: { id: string }): Promise<void> {
@@ -260,11 +221,9 @@ export class SerialPowerMeterService {
 
         this.clearReconnectTimer()
         this.stopGapMonitor()
-        await this.closePort('device-lost')
+        await this.stopChild('device-lost')
 
         this.state = { phase: 'disconnected' }
-        this.consecutiveParseFailures = 0
-        this.invalidFramesSinceLastGoodSample = 0
 
         this.deps.events.publish({
             kind: 'meter-device-lost',
@@ -319,7 +278,7 @@ export class SerialPowerMeterService {
 
         const summary = inst.finish()
 
-        // If we have quality stats, attach a derived quality block
+        // Attach per-recording quality metrics when available.
         if (quality) {
             const intervalSec = this.config.samplingIntervalSec ?? 1
             const intervalMs = Math.max(1, intervalSec * 1000)
@@ -336,10 +295,6 @@ export class SerialPowerMeterService {
             const badFrameRatio = badFrames / expectedSamples
             const maxGapMs = quality.maxGapMs
 
-            // Simple heuristic verdict:
-            //  - good:     dense stream, low bad frame ratio, small gaps
-            //  - degraded: usable but noticeable gaps or errors
-            //  - poor:     too many gaps or bad frames to trust
             let verdict: 'good' | 'degraded' | 'poor' = 'good'
 
             if (goodSampleRatio < 0.9 || badFrameRatio > 0.1 || maxGapMs > 10_000) {
@@ -388,130 +343,102 @@ export class SerialPowerMeterService {
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  SerialPort wiring                                                     */
+    /*  Child-process wiring (wattsup binary)                                 */
     /* ---------------------------------------------------------------------- */
 
-    private async openPort(): Promise<void> {
+    private async startChild(): Promise<void> {
         if (!this.devicePath) {
             this.deps.events.publish({
                 kind: 'recoverable-error',
                 at: Date.now(),
-                error: 'openPort called without devicePath',
+                error: 'startChild called without devicePath',
             })
             return
         }
 
-        const path = this.devicePath
-        const baudRate = this.deviceBaudRate
+        if (this.child) {
+            await this.stopChild('unknown')
+        }
 
         this.state = { phase: 'connecting' }
-        this.consecutiveParseFailures = 0
-        this.invalidFramesSinceLastGoodSample = 0
+        this.headerFields = null
+        this.readBuffer = ''
+        this.gapWarningEmitted = false
 
-        return new Promise<void>((resolve, reject) => {
-            const port = new SerialPort({
-                path,
-                baudRate,
-                autoOpen: false,
-                dataBits: 8,
-                parity: 'none',
-                stopBits: 1,
-            })
+        const args = [
+            this.devicePath,
+            '-r',
+            '-s',
+        ]
 
-            const onOpen = async () => {
-                this.port = port
-                this.reconnectAttempts = 0
-
-                this.deps.events.publish({
-                    kind: 'meter-device-connected',
-                    at: Date.now(),
-                    path,
-                    baudRate,
-                })
-
-                port.on('data', (chunk: Buffer) => {
-                    try {
-                        this.handleData(chunk.toString('ascii'))
-                    } catch (err) {
-                        const e = err as Error
-                        console.error(
-                            '[powermeter:fatal] exception in handleData:',
-                            e?.message,
-                            e?.stack
-                        )
-                        // Route this into our normal error path so *if* something blows,
-                        // we see it and the service reacts instead of silently freezing.
-                        void this.handlePortError(
-                            new Error(`handleData exception: ${e?.message ?? String(e)}`)
-                        )
-                    }
-                })
-
-                port.on('error', (err: Error) => {
-                    void this.handlePortError(err)
-                })
-
-                port.on('close', () => {
-                    void this.handlePortClose()
-                })
-
-                try {
-                    await this.initializeWattsUpDevice()
-                    this.state = { phase: 'streaming' }
-                    this.deps.events.publish({
-                        kind: 'meter-streaming-started',
-                        at: Date.now(),
-                    })
-
-                    // Start the gap monitor once we are streaming.
-                    this.startGapMonitor()
-
-                    resolve()
-                } catch (err: any) {
-                    await this.handlePortError(err instanceof Error ? err : new Error(String(err)))
-                    reject(err)
-                }
-            }
-
-            const onError = async (err: Error) => {
-                port.off('open', onOpen)
-                port.off('error', onError)
-                await this.handlePortOpenError(err)
-                reject(err)
-            }
-
-            port.once('open', onOpen)
-            port.once('error', onError)
-
-            port.open()
+        const child = spawn(this.wattsupBinaryPath, args, {
+            stdio: ['ignore', 'pipe', 'pipe'],
         })
+
+        this.child = child
+
+        const now = Date.now()
+        this.deps.events.publish({
+            kind: 'meter-device-connected',
+            at: now,
+            path: this.devicePath,
+            baudRate: 0, // not meaningful here
+        })
+
+        child.stdout.on('data', (chunk: Buffer) => {
+            this.handleStdoutData(chunk.toString('utf8'))
+        })
+
+        child.stderr.on('data', (chunk: Buffer) => {
+            const text = chunk.toString('utf8').trim()
+            if (!text) return
+
+            this.stats.lastErrorAt = Date.now()
+            this.deps.events.publish({
+                kind: 'recoverable-error',
+                at: this.stats.lastErrorAt,
+                error: `wattsup stderr: ${text}`,
+            })
+        })
+
+        child.on('error', (err: Error) => {
+            void this.handleChildError(err)
+        })
+
+        child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+            void this.handleChildExit(code, signal)
+        })
+
+        // Once child is started, we consider ourselves "streaming" (headers will come first).
+        this.state = { phase: 'streaming' }
+        this.deps.events.publish({
+            kind: 'meter-streaming-started',
+            at: Date.now(),
+        })
+
+        this.startGapMonitor()
     }
 
-    private async closePort(
+    private async stopChild(
         reason: 'io-error' | 'explicit-close' | 'unknown' | 'device-lost'
     ): Promise<void> {
-        const port = this.port
-        this.port = null
+        const child = this.child
+        this.child = null
 
-        const hadPort = !!port
+        const hadChild = !!child
 
-        if (port && port.isOpen) {
-            if (reason === 'explicit-close' || reason === 'unknown') {
-                try {
-                    await this.writeCommand('#L,W,0;')
-                } catch {
-                    // ignore
-                }
+        if (child) {
+            try {
+                child.removeAllListeners('exit')
+                child.kill('SIGTERM')
+            } catch {
+                // ignore
             }
-
-            await new Promise<void>((resolve) => {
-                port.close(() => resolve())
-            })
         }
 
         this.state = { phase: 'disconnected' }
 
-        if (hadPort) {
+        if (hadChild) {
             this.deps.events.publish({
                 kind: 'meter-device-disconnected',
                 at: Date.now(),
@@ -521,276 +448,17 @@ export class SerialPowerMeterService {
         }
     }
 
-    private async initializeWattsUpDevice(): Promise<void> {
-        // 1) Version query
-        // 2) Set EXTERNAL (E) logging mode with configured interval (stream frames to host)
-        // 3) Set output handling (FULLHANDLING = 2 by default)
-        await this.writeCommand('#V,3;')
-        await this.sleep(200)
-
-        const intervalSec = this.config.samplingIntervalSec ?? 1
-
-        // IMPORTANT: use "E" (external streaming) so the meter actually sends #d frames.
-        const externalModeChar = 'E'
-        const modeCmd = `#L,W,3,${externalModeChar},,${intervalSec};`
-        await this.writeCommand(modeCmd)
-        await this.sleep(200)
-
-        const fullHandling = this.config.fullHandling ?? 2
-        const outCmd = `#O,W,1,${fullHandling};`
-        await this.writeCommand(outCmd)
-        await this.sleep(200)
-    }
-
-    private async writeCommand(cmd: string): Promise<void> {
-        const port = this.port
-        if (!port || !port.isOpen) throw new Error('writeCommand: port not open')
-
-        const wire = cmd + '\r\n'
-
-        await new Promise<void>((resolve, reject) => {
-            port.write(wire, (err) => {
-                if (err) reject(err)
-                else resolve()
-            })
-        })
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  Data handling                                                         */
-    /* ---------------------------------------------------------------------- */
-
-    private handleData(chunk: string): void {
-        if (this.state.phase === 'disconnected' || this.state.phase === 'error') {
-            this.deps.events.publish({
-                kind: 'recoverable-error',
-                at: Date.now(),
-                error: 'Received data while in invalid state',
-            })
-            return
-        }
-
-        // Strip NULs at the chunk level so they don't poison splitting/parsing.
-        const cleanedChunk = chunk.replace(/\u0000+/g, '')
-
-        this.readBuffer += cleanedChunk
-        this.stats.bytesReceived += cleanedChunk.length
-
-        const lines = this.readBuffer.split(/\r?\n/)
-        this.readBuffer = lines.pop() ?? ''
-
-        for (const line of lines) {
-            // Also strip any trailing NULs that slipped through and then trim.
-            const sanitized = line.replace(/\u0000+$/g, '')
-            const trimmed = sanitized.trim()
-            if (!trimmed) continue
-
-            if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
-                const nowIso = () => new Date().toISOString()
-                console.log(`[powermeter:debug] ${nowIso()} raw line`, JSON.stringify(trimmed))
-            }
-
-            if (trimmed.startsWith('#d')) {
-                // Canonical WattsUp frame:
-                //   "#d,-,18,610,1186,545,45,_,_,_,610,_,_,_,_,_,94,_,_,_,_;"
-                this.handleDataFrame(trimmed)
-            } else {
-                const csvParts = trimmed.split(',')
-
-                // Helper: strict "integer-ish" check used for key numeric fields.
-                const isIntLike = (value: string | undefined): boolean => {
-                    if (value == null) return false
-                    const withoutTerminator = value.replace(/;$/, '')
-                    if (withoutTerminator === '' || withoutTerminator === '_' || withoutTerminator === '-') {
-                        return false
-                    }
-                    return /^-?\d+$/.test(withoutTerminator)
-                }
-
-                const looksLikeBareWattsUpRow = (() => {
-                    // A valid frame example:
-                    //   "-,18,610,1186,545,45,_,_,_,610,_,_,_,_,_,94,_,_,_,_;"
-                    //
-                    // When headerless, we expect:
-                    //   - A trailing ';'
-                    //   - At least ~20 fields
-                    //   - Numeric index at [1]
-                    //   - Numeric watts/volts/amps at [2],[3],[4] after header injection
-                    //     (i.e., original positions [2],[3],[4],[5] in the bare row)
-                    if (!trimmed.endsWith(';')) return false
-                    if (csvParts.length < 18) return false
-
-                    // index, watts_raw, volts_raw, amps_raw should all be integer-like
-                    return (
-                        isIntLike(csvParts[1]) && // sample index
-                        isIntLike(csvParts[2]) && // watts_raw
-                        isIntLike(csvParts[3]) && // volts_raw
-                        isIntLike(csvParts[4])    // amps_raw
-                    )
-                })()
-
-                if (looksLikeBareWattsUpRow) {
-                    // Promote a bare data row to a synthetic "#d,..." frame.
-                    const synthetic = `#d,${trimmed}`
-
-                    try {
-                        this.handleDataFrame(synthetic)
-                        continue
-                    } catch {
-                        // If parsing still fails, fall through and treat as junk.
-                    }
-                }
-
-                const now = Date.now()
-
-                // Treat very small junk lines as harmless "noise":
-                // - still emit meter-unknown-line for observability
-                // - but do NOT emit a recoverable-error.
-                const isTinyJunk = trimmed.length < 8 || csvParts.length <= 3
-
-                // this.deps.events.publish({
-                //     kind: 'meter-unknown-line',
-                //     at: now,
-                //     line: trimmed,
-                // })
-
-                if (!isTinyJunk) {
-                    this.deps.events.publish({
-                        kind: 'recoverable-error',
-                        at: now,
-                        error: `Unknown line from power meter: "${trimmed}"`,
-                    })
-                }
-            }
-        }
-    }
-
-    private handleDataFrame(line: string): void {
-        const now = Date.now()
-        const sample = parseWattsUpFrame(line)
-
-        if (!sample) {
-            this.consecutiveParseFailures += 1
-            this.invalidFramesSinceLastGoodSample += 1
-
-            // Count this as a bad frame for all active recorders
-            for (const stats of this.recorderQuality.values()) {
-                stats.badFrames += 1
-            }
-
-            this.stats.lastErrorAt = now
-            this.deps.events.publish({
-                kind: 'recoverable-error',
-                at: now,
-                error: `Failed to parse WattsUp data frame (consecutiveFailures=${this.consecutiveParseFailures})`,
-            })
-
-            const lastSampleAt = this.stats.lastSampleAt
-            const tooLongSinceGoodSample =
-                lastSampleAt != null && now - lastSampleAt > this.parseFailureWindowMs
-
-            const hitConsecutiveThreshold =
-                this.consecutiveParseFailures >= this.maxConsecutiveParseFailures
-
-            if (hitConsecutiveThreshold || tooLongSinceGoodSample) {
-                const deltaMs = lastSampleAt != null ? now - lastSampleAt : null
-
-                const parts: string[] = []
-
-                if (hitConsecutiveThreshold) {
-                    parts.push(
-                        `consecutiveFailures=${this.consecutiveParseFailures} >= maxConsecutiveParseFailures=${this.maxConsecutiveParseFailures}`
-                    )
-                }
-
-                if (tooLongSinceGoodSample && deltaMs != null) {
-                    parts.push(
-                        `tooLongSinceGoodSample: deltaMs=${deltaMs} > parseFailureWindowMs=${this.parseFailureWindowMs}, invalidFramesSinceLastGoodSample=${this.invalidFramesSinceLastGoodSample}`
-                    )
-                }
-
-                const reason = parts.join('; ')
-
-                if (this.enableSoftDisconnect) {
-                    this.deps.events.publish({
-                        kind: 'recoverable-error',
-                        at: now,
-                        error: `Invalid WattsUp data guardrail tripped (${reason}); treating meter as disconnected (soft disconnect enabled)`,
-                    })
-
-                    void this.handlePortError(
-                        new Error('Too many invalid WattsUp data frames (soft disconnect)')
-                    )
-                } else {
-                    // Log that we hit guardrails but are intentionally *not* bouncing the port.
-                    this.deps.events.publish({
-                        kind: 'recoverable-error',
-                        at: now,
-                        error: `Invalid WattsUp data guardrail tripped (${reason}); soft disconnect disabled, keeping port open`,
-                    })
-                }
-            }
-
-            return
-        }
-
-        // ✅ Successfully parsed sample
-        this.consecutiveParseFailures = 0
-        this.invalidFramesSinceLastGoodSample = 0
-
-        const nowSample = now
-        this.stats.totalSamples += 1
-        this.stats.lastSampleAt = nowSample
-
-        // Maintain bounded recent sample buffer
-        this.recentSamples.push(sample)
-        if (this.recentSamples.length > this.config.maxRecentSamples) {
-            this.recentSamples.splice(0, this.recentSamples.length - this.config.maxRecentSamples)
-        }
-
-        // Feed all active recorders and update their quality stats
-        for (const [recorderId, inst] of this.recorders.entries()) {
-            inst.addSample(sample)
-
-            const stats = this.recorderQuality.get(recorderId)
-            if (!stats) continue
-
-            stats.goodSamples += 1
-
-            if (stats.lastGoodSampleAt != null) {
-                const gap = nowSample - stats.lastGoodSampleAt
-                if (gap > stats.maxGapMs) {
-                    stats.maxGapMs = gap
-                }
-            }
-
-            stats.lastGoodSampleAt = nowSample
-        }
-
-        this.deps.events.publish({
-            kind: 'meter-sample',
-            at: nowSample,
-            sample,
-        })
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  Error + reconnect handling                                            */
-    /* ---------------------------------------------------------------------- */
-
-    private async handlePortError(err: Error): Promise<void> {
+    private async handleChildError(err: Error): Promise<void> {
         this.stats.lastErrorAt = Date.now()
 
         this.deps.events.publish({
             kind: 'recoverable-error',
             at: this.stats.lastErrorAt,
-            error: `Serial power meter port error: ${err.message}`,
+            error: `wattsup child error: ${err.message}`,
         })
 
-        await this.closePort('io-error')
+        await this.stopChild('io-error')
         this.state = { phase: 'disconnected' }
-        this.consecutiveParseFailures = 0
-        this.invalidFramesSinceLastGoodSample = 0
 
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
@@ -798,13 +466,14 @@ export class SerialPowerMeterService {
             this.deps.events.publish({
                 kind: 'fatal-error',
                 at: Date.now(),
-                error: 'Serial power meter error and reconnect disabled',
+                error: 'wattsup child error and reconnect disabled',
             })
-            this.state = { phase: 'error', message: 'Reconnect disabled after IO error' }
+            this.state = { phase: 'error', message: 'Reconnect disabled after child error' }
         }
     }
 
-    private async handlePortClose(): Promise<void> {
+    private async handleChildExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
+        // If we already reset to disconnected or error, ignore duplicate exits.
         if (this.state.phase === 'disconnected' || this.state.phase === 'error') return
 
         this.stats.lastErrorAt = Date.now()
@@ -812,13 +481,11 @@ export class SerialPowerMeterService {
         this.deps.events.publish({
             kind: 'recoverable-error',
             at: this.stats.lastErrorAt,
-            error: 'Serial power meter port closed unexpectedly',
+            error: `wattsup child exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
         })
 
-        await this.closePort('io-error')
+        await this.stopChild('io-error')
         this.state = { phase: 'disconnected' }
-        this.consecutiveParseFailures = 0
-        this.invalidFramesSinceLastGoodSample = 0
 
         if (this.config.reconnect.enabled) {
             this.scheduleReconnect()
@@ -826,37 +493,192 @@ export class SerialPowerMeterService {
             this.deps.events.publish({
                 kind: 'fatal-error',
                 at: Date.now(),
-                error: 'Serial power meter port closed and reconnect disabled',
+                error: 'wattsup child exited and reconnect disabled',
             })
-            this.state = { phase: 'error', message: 'Reconnect disabled after port close' }
+            this.state = { phase: 'error', message: 'Reconnect disabled after child exit' }
         }
     }
 
-    private async handlePortOpenError(err: Error): Promise<void> {
-        this.stats.lastErrorAt = Date.now()
+    /* ---------------------------------------------------------------------- */
+    /*  CSV data handling                                                     */
+    /* ---------------------------------------------------------------------- */
 
-        this.deps.events.publish({
-            kind: 'recoverable-error',
-            at: this.stats.lastErrorAt,
-            error: `Failed to open power meter serial port: ${err.message}`,
-        })
-
-        if (this.config.reconnect.enabled) {
-            this.scheduleReconnect()
-        } else {
+    private handleStdoutData(chunk: string): void {
+        // Child process should never be feeding us while "disconnected" or "error",
+        // but if it does, treat that as a recoverable error and ignore.
+        if (this.state.phase === 'disconnected' || this.state.phase === 'error') {
             this.deps.events.publish({
-                kind: 'fatal-error',
+                kind: 'recoverable-error',
                 at: Date.now(),
-                error: 'Failed to open power meter serial port and reconnect disabled',
+                error: 'Received wattsup stdout data while in invalid state',
             })
-            this.state = { phase: 'error', message: 'Reconnect disabled after open failure' }
+            return
+        }
+
+        // Accumulate into a simple line buffer.
+        this.readBuffer += chunk
+        const lines = this.readBuffer.split(/\r?\n/)
+        this.readBuffer = lines.pop() ?? ''
+
+        for (const rawLine of lines) {
+            const trimmed = rawLine.trim()
+            if (!trimmed) continue
+
+            // Header line (first line from wattsup) – capture field order.
+            if (/^\s*W\s*,\s*V\s*,\s*A\b/i.test(trimmed)) {
+                this.headerFields = trimmed.split(',').map(h => h.trim())
+                // Optional: control-line event if you ever want it.
+                // this.deps.events.publish({ kind: 'meter-control-line', at: Date.now(), line: trimmed })
+                continue
+            }
+
+            if (process.env.SERIAL_PM_DEBUG_FRAMES === 'true') {
+                console.log(
+                    `[powermeter:debug] ${new Date().toISOString()} csv row`,
+                    JSON.stringify(trimmed)
+                )
+            }
+
+            const sample = this.parseWattsUpCsvLine(trimmed)
+            if (!sample) {
+                // Single-row parse failure; logged for observability only.
+                this.stats.lastErrorAt = Date.now()
+                this.deps.events.publish({
+                    kind: 'recoverable-error',
+                    at: this.stats.lastErrorAt,
+                    error: `Failed to parse wattsup CSV row: "${trimmed}"`,
+                })
+                // Count as a bad frame for any active recorders.
+                for (const stats of this.recorderQuality.values()) {
+                    stats.badFrames += 1
+                }
+                continue
+            }
+
+            // ✅ Successfully parsed sample – reset watchdog warning state.
+            this.gapWarningEmitted = false
+
+            const nowSample = Date.now()
+            this.stats.totalSamples += 1
+            this.stats.lastSampleAt = nowSample
+
+            // Maintain bounded recent samples.
+            this.recentSamples.push(sample)
+            if (this.recentSamples.length > this.config.maxRecentSamples) {
+                this.recentSamples.splice(
+                    0,
+                    this.recentSamples.length - this.config.maxRecentSamples
+                )
+            }
+
+            // Feed all active recorders and update their quality stats.
+            for (const [recorderId, inst] of this.recorders.entries()) {
+                inst.addSample(sample)
+
+                const stats = this.recorderQuality.get(recorderId)
+                if (!stats) continue
+
+                stats.goodSamples += 1
+
+                if (stats.lastGoodSampleAt != null) {
+                    const gap = nowSample - stats.lastGoodSampleAt
+                    if (gap > stats.maxGapMs) {
+                        stats.maxGapMs = gap
+                    }
+                }
+
+                stats.lastGoodSampleAt = nowSample
+            }
+
+            this.deps.events.publish({
+                kind: 'meter-sample',
+                at: nowSample,
+                sample,
+            })
         }
     }
+
+    private parseWattsUpCsvLine(line: string): PowerSample | null {
+        if (!this.headerFields) return null
+
+        const parts = line.split(',').map(p => p.trim())
+        if (parts.length < 3) {
+            return null
+        }
+
+        const get = (name: string): string | undefined => {
+            const idx = this.headerFields!.findIndex(
+                h => h.toLowerCase() === name.toLowerCase()
+            )
+            if (idx < 0 || idx >= parts.length) return undefined
+            return parts[idx]
+        }
+
+        const wattsStr = get('W')
+        const voltsStr = get('V')
+        const ampsStr = get('A')
+
+        if (!wattsStr || !voltsStr || !ampsStr) return null
+
+        const watts = Number(wattsStr)
+        const volts = Number(voltsStr)
+        const amps = Number(ampsStr)
+
+        if (Number.isNaN(watts) || Number.isNaN(volts) || Number.isNaN(amps)) {
+            return null
+        }
+
+        const whRawStr = get('WH')
+        const wmaxStr = get('Wmax')
+        const pfStr = get('PF')
+
+        const whRaw = this.safeNumber(whRawStr)
+        const wattsAltRaw = this.safeNumber(wmaxStr)
+        const powerFactorRaw = this.safeNumber(pfStr)
+
+        const ts = new Date().toISOString()
+
+        const sample: PowerSample = {
+            ts,
+            watts,
+            volts,
+            amps,
+            whRaw,
+            wattsAltRaw,
+            powerFactorRaw,
+            rawLine: line,
+        }
+
+        return sample
+    }
+
+    private safeNumber(value: string | undefined): number | null {
+        if (value == null || value === '' || value === '_' || value === '-') return null
+        const n = Number(value)
+        return Number.isNaN(n) ? null : n
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Reconnect + gap monitor                                               */
+    /* ---------------------------------------------------------------------- */
 
     private scheduleReconnect(): void {
         this.clearReconnectTimer()
 
-        const { baseDelayMs, maxDelayMs } = this.config.reconnect
+        const { baseDelayMs, maxDelayMs, maxAttempts } = this.config.reconnect
+
+        if (maxAttempts > 0 && this.reconnectAttempts >= maxAttempts) {
+            this.deps.events.publish({
+                kind: 'fatal-error',
+                at: Date.now(),
+                error: 'wattsup child reconnect attempts exhausted',
+            })
+            this.state = {
+                phase: 'error',
+                message: 'Reconnect attempts exhausted',
+            }
+            return
+        }
 
         this.reconnectAttempts += 1
 
@@ -879,7 +701,7 @@ export class SerialPowerMeterService {
         if (!this.devicePath) return
 
         try {
-            await this.openPort()
+            await this.startChild()
         } catch {
             // already logged
         }
@@ -902,38 +724,66 @@ export class SerialPowerMeterService {
         return candidate
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  Gap monitor (logging only, no behavior changes)                       */
-    /* ---------------------------------------------------------------------- */
-
     private startGapMonitor(): void {
         if (this.gapMonitorTimer) return
 
-        // Check roughly once per second, but never more often than 500ms.
+        const warnThresholdMs = 3_000  // 3 seconds
+        const restartThresholdMs = 6_000 // 6 seconds
+
+        // Check every ~1s, but not faster than 500ms.
         const tickMs = Math.max(500, this.expectedSampleIntervalMs)
 
         this.gapMonitorTimer = setInterval(() => {
-            // Only emit any logs when frame debug is enabled.
+            // Only emit logs when frame debug is enabled; you can relax this if you
+            // want the warnings regardless of the debug flag.
             if (process.env.SERIAL_PM_DEBUG_FRAMES !== 'true') return
 
+            // If we don't have any sample yet, there's nothing meaningful to say.
             const last = this.stats.lastSampleAt
             if (last == null) return
 
             const now = Date.now()
             const ageMs = now - last
 
-            // Consider "missing" when we've gone more than 2x the expected interval
-            // without seeing a sample.
-            const thresholdMs = this.expectedSampleIntervalMs * 2
-            if (ageMs <= thresholdMs) return
+            // Below warning threshold: all good.
+            if (ageMs < warnThresholdMs) return
 
-            const approxMissing = Math.floor(ageMs / this.expectedSampleIntervalMs)
+            // Between 3s and 6s: warn once per gap episode.
+            if (ageMs >= warnThresholdMs && ageMs < restartThresholdMs) {
+                if (!this.gapWarningEmitted) {
+                    this.gapWarningEmitted = true
 
-            console.warn(
-                `[powermeter:warn] ${new Date().toISOString()} suspected missing power meter samples: ` +
-                `lastSampleAgeMs=${ageMs} expectedIntervalMs=${this.expectedSampleIntervalMs} ` +
-                `approxMissing=${approxMissing}`
-            )
+                    console.warn(
+                        `[powermeter:warn] ${new Date().toISOString()} ` +
+                            `no wattsup sample received for ${ageMs}ms (>= ${warnThresholdMs}ms); ` +
+                            `expecting data approximately every ${this.expectedSampleIntervalMs}ms`
+                    )
+
+                    this.deps.events.publish({
+                        kind: 'recoverable-error',
+                        at: now,
+                        error: `No wattsup sample received for ${ageMs}ms (>= ${warnThresholdMs}ms)`,
+                    })
+                }
+
+                return
+            }
+
+            // ≥ 6s: trigger soft restart if enabled.
+            if (ageMs >= restartThresholdMs && this.enableSoftRestart) {
+                console.warn(
+                    `[powermeter:warn] ${new Date().toISOString()} ` +
+                        `no wattsup sample received for ${ageMs}ms (>= ${restartThresholdMs}ms); ` +
+                        `triggering soft restart of wattsup child process`
+                )
+
+                // Let the existing child-error handler deal with restart semantics.
+                void this.handleChildError(
+                    new Error(
+                        `No wattsup samples for ${ageMs}ms (>= ${restartThresholdMs}ms); soft restart`
+                    )
+                )
+            }
         }, tickMs)
     }
 
