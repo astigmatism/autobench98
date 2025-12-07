@@ -408,7 +408,6 @@ function startTypingTimer() {
         const chunk = pending.value.slice(0, chars)
         pending.value = pending.value.slice(chars)
 
-        // Append new characters
         liveText.value += chunk
     }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
 }
@@ -452,65 +451,80 @@ function finalizeLiveJob() {
 }
 
 /**
- * Hydrate from server-side history and detect newly completed jobs.
+ * Initial hydration from server-side history:
+ * Treat any existing history as already-completed jobs and render them
+ * without animation. After this first pass, we ignore history changes
+ * and rely on lastJob/lastJobFullText for new jobs.
  */
 watch(
     () => printer.value.history,
     (history) => {
-        if (!history || history.length === 0) {
-            if (maxSeenJobId.value === null) {
-                completedJobs.value = []
-            }
+        if (maxSeenJobId.value !== null) {
+            // Already hydrated; ignore further history changes.
             return
         }
 
-        // SAFE seed: no direct history[0] indexing
+        if (!history || history.length === 0) {
+            completedJobs.value = []
+            return
+        }
+
+        completedJobs.value = history.map(h => ({
+            id: h.id,
+            text: h.text,
+        }))
+
         const newestId = history.reduce(
             (max, h) => (h.id > max ? h.id : max),
             Number.NEGATIVE_INFINITY
         )
-
-        if (maxSeenJobId.value === null) {
-            // Initial hydration: show existing history as already completed.
-            completedJobs.value = history.map(h => ({
-                id: h.id,
-                text: h.text,
-            }))
-            maxSeenJobId.value = newestId
-            return
-        }
-
-        const previousMax = maxSeenJobId.value
-        const newJobs = history.filter(h => h.id > (previousMax ?? Number.NEGATIVE_INFINITY))
-
-        if (newJobs.length === 0) {
-            return
-        }
-
-        // Queue new completed jobs for animation.
-        for (const h of newJobs) {
-            jobQueue.value.push({
-                id: h.id,
-                text: h.text,
-            })
-        }
-
         maxSeenJobId.value = newestId
+    },
+    { immediate: true, deep: true }
+)
 
-        // If a job is currently animating and a new job arrives, fast-forward
-        // the current one into a single completed block so we can move on.
+/**
+ * Watch lastJob + lastJobFullText to detect newly completed jobs and queue
+ * them for animation.
+ */
+watch(
+    () => ({
+        last: printer.value.lastJob,
+        fullText: printer.value.lastJobFullText,
+    }),
+    ({ last, fullText }) => {
+        if (!last || !fullText) return
+
+        const lastId = last.id
+        const prevMax = maxSeenJobId.value
+
+        if (prevMax !== null && lastId <= prevMax) {
+            // Already seen this job.
+            return
+        }
+
+        // New completed job with canonical full text.
+        maxSeenJobId.value = lastId
+
+        // If we are currently animating a job, fast-forward it so it becomes
+        // a single completed block, then queue this new job.
         if (liveJobId.value != null) {
             if (pending.value.length) {
                 liveText.value += pending.value
                 pending.value = ''
             }
-            // finalizeLiveJob will run via the pending watcher below.
-        } else {
-            // Nothing currently animating; start immediately.
+            // finalizeLiveJob will be triggered by the pending watcher.
+        }
+
+        jobQueue.value.push({
+            id: lastId,
+            text: fullText,
+        })
+
+        if (liveJobId.value == null) {
             startNextJobFromQueue()
         }
-    },
-    { immediate: true, deep: true }
+    }
 )
 
 /**
