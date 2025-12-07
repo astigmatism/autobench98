@@ -382,7 +382,7 @@ export class SerialPrinterService {
         }
     }
 
-    private finalizeJob(): void {
+        private finalizeJob(): void {
         this.clearIdleTimer()
         if (this.buffer.length === 0) {
             // Nothing accumulated; if we were in receiving, go back to idle.
@@ -404,6 +404,35 @@ export class SerialPrinterService {
             this.config.lineEnding === '\n'
                 ? this.buffer
                 : this.buffer.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n')
+
+        // ---------------------------------------------------------------------
+        // Noise filter: drop tiny/spurious jobs (power on/off burps, etc.)
+        //
+        // Strategy:
+        //   - Strip control characters (0x00–0x1F, 0x7F).
+        //   - Trim whitespace.
+        //   - If there are <= 1 visible characters, treat as noise.
+        // ---------------------------------------------------------------------
+        const visible = rawNormalized
+            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+            .trim()
+
+        if (visible.length <= 1) {
+            console.log('[SerialPrinterService] Dropping tiny noise job', {
+                jobId,
+                rawLength: rawNormalized.length,
+                visibleLength: visible.length,
+                visibleSample: visible,
+            })
+
+            // Reset buffer/state as if it were an empty job.
+            this.buffer = ''
+            this.currentJobId = null
+            this.currentJobStartedAt = null
+            this.state = 'idle'
+            // IMPORTANT: no queue push, no stats bump, no job-completed event.
+            return
+        }
 
         const preview = buildPreview(rawNormalized, DEFAULT_PREVIEW_CHARS)
 
