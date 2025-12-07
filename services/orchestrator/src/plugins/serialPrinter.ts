@@ -60,6 +60,14 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
                 break
             }
 
+            case 'job-dismissed': {
+                const { jobId, visibleChars, reason } = evt
+                this.logSp.info(
+                    `kind=job-dismissed ts=${ts} jobId=${jobId} visibleChars=${visibleChars} reason=${reason}`
+                )
+                break
+            }
+
             case 'device-connected': {
                 const { portPath } = evt
                 this.logSp.info(

@@ -411,16 +411,21 @@ export class SerialPrinterService {
         const visibleChars = rawNormalized.replace(/[\s\0]/g, '').length
 
         if (visibleChars <= 1) {
-            // 🧹 Noise job: log and drop, do NOT enqueue or bump stats.totalJobs.
+            // 🧹 Noise job: log and drop, do NOT enqueue or bump stats.totalJobs,
+            // and DO NOT treat as a device error (no reconnect implications).
             this.deps.events.publish({
-                kind: 'recoverable-error',
+                kind: 'job-dismissed',
                 at: now,
-                error: `Serial printer noise job dismissed (jobId=${jobId}, bytes=${this.buffer.length}, visibleChars=${visibleChars})`,
+                jobId,
+                reason: 'noise-job-visible-chars<=1',
+                raw: rawNormalized,
+                visibleChars,
             })
 
             this.buffer = ''
             this.currentJobId = null
             this.currentJobStartedAt = null
+            // We stay logically "connected" at the transport level.
             this.state = 'idle'
             return
         }

@@ -167,6 +167,33 @@ export class SerialPrinterStateAdapter {
             }
 
             /* ------------------------------------------------------------------ */
+            /* JOB DISMISSED (noise / ignored)                                   */
+            /* ------------------------------------------------------------------ */
+            case 'job-dismissed': {
+                const snap = getSnapshot()
+                const stats = snap.serialPrinter.stats
+                const current = snap.serialPrinter.currentJob
+
+                const isCurrent =
+                    current != null && current.id === evt.jobId
+
+                updateSerialPrinterSnapshot({
+                    // Transport is still healthy; this is just a logical "no-op" job.
+                    phase: 'connected',
+                    message: undefined,
+                    currentJob: isCurrent ? null : current,
+                    // No history / lastJob updates, no stats.totalJobs bump.
+                    lastJobFullText: null,
+                    stats: {
+                        ...stats,
+                        // bytesReceived already accounted for via job-chunk;
+                        // we intentionally do NOT touch lastErrorAt here.
+                    },
+                })
+                return
+            }
+
+            /* ------------------------------------------------------------------ */
             /* RECOVERABLE ERROR                                                  */
             /* ------------------------------------------------------------------ */
             case 'recoverable-error': {
@@ -181,7 +208,6 @@ export class SerialPrinterStateAdapter {
                         ...stats,
                         lastErrorAt: evt.at,
                     },
-                    // Preserve history so it survives transient failures.
                 })
                 return
             }

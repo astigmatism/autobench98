@@ -62,6 +62,7 @@ export type SerialPrinterEventKind =
     | 'job-started'
     | 'job-chunk'
     | 'job-completed'
+    | 'job-dismissed'
     | 'device-connected'
     | 'device-disconnected'
     | 'fatal-error'
@@ -95,6 +96,16 @@ export interface SerialPrinterJobCompletedEvent extends SerialPrinterEventBase {
     job: SerialPrinterJob
 }
 
+export interface SerialPrinterJobDismissedEvent extends SerialPrinterEventBase {
+    kind: 'job-dismissed'
+    jobId: number
+    reason: string
+    /** Raw text that was dismissed (normalized line endings) */
+    raw: string
+    /** Count of non-whitespace, non-NUL characters used for the heuristic */
+    visibleChars: number
+}
+
 export interface SerialPrinterDeviceConnectedEvent extends SerialPrinterEventBase {
     kind: 'device-connected'
     portPath: string
@@ -120,6 +131,7 @@ export type SerialPrinterEvent =
     | SerialPrinterJobStartedEvent
     | SerialPrinterJobChunkEvent
     | SerialPrinterJobCompletedEvent
+    | SerialPrinterJobDismissedEvent
     | SerialPrinterDeviceConnectedEvent
     | SerialPrinterDeviceDisconnectedEvent
     | SerialPrinterFatalErrorEvent
