@@ -450,19 +450,24 @@ function finalizeFinishedJobIfReady() {
     if (pending.value.length > 0) return
 
     const id = finishingJobId.value
-    // All pending characters have been rendered; move the tape into history.
+    const historyEnabled = (printer.value.historyLimit || 0) > 0
+
+    // Capture before clearing
     const fallback = liveText.value
-    const text = getCanonicalCompletedText(id, fallback)
 
-    pushCompletedJob(id, text)
-
+    // Clear live state
     finishingJobId.value = null
     currentJobId.value = null
     liveText.value = ''
     displayedLength.value = 0
-    // pending is already empty, but make it explicit:
     pending.value = ''
     stopTypingTimer()
+
+    // If we *don't* have server history, we must keep a local copy.
+    if (!historyEnabled) {
+        const text = getCanonicalCompletedText(id, fallback)
+        pushCompletedJob(id, text)
+    }
 }
 
 /**
@@ -491,6 +496,8 @@ watch(
 watch(
     () => printer.value.currentJob,
     (job, prevJob) => {
+        const historyEnabled = (printer.value.historyLimit || 0) > 0
+
         // New job started (id changed)
         if (job && job.id !== currentJobId.value) {
             const previousId = currentJobId.value
@@ -502,8 +509,12 @@ watch(
                         liveText.value += pending.value
                         pending.value = ''
                     }
-                    const text = getCanonicalCompletedText(previousId, liveText.value)
-                    pushCompletedJob(previousId, text)
+
+                    if (!historyEnabled) {
+                        const text = getCanonicalCompletedText(previousId, liveText.value)
+                        pushCompletedJob(previousId, text)
+                    }
+
                     finishingJobId.value = null
                 } else {
                     // Previous job never reached "finished" state on the backend,
@@ -513,8 +524,11 @@ watch(
                         liveText.value += pending.value
                         pending.value = ''
                     }
-                    const text = getCanonicalCompletedText(previousId, liveText.value)
-                    pushCompletedJob(previousId, text)
+
+                    if (!historyEnabled) {
+                        const text = getCanonicalCompletedText(previousId, liveText.value)
+                        pushCompletedJob(previousId, text)
+                    }
                 }
             }
 
@@ -532,7 +546,8 @@ watch(
             // Don't clear text yet; just remember which job is finishing.
             finishingJobId.value = prevJob.id
             // finalizeFinishedJobIfReady (driven by pending watcher)
-            // will move this job into completedJobs once pending is empty.
+            // will move this job into completedJobs once pending is empty
+            // (or just clear live state if historyEnabled).
         }
     }
 )
@@ -575,7 +590,7 @@ watch(
 /**
  * When pending changes and a job is marked as "finishing", check whether
  * we've drained all remaining characters; if so, finalize the job into
- * completedJobs.
+ * completedJobs (or just clear live state if historyEnabled).
  */
 watch(
     () => pending.value,
