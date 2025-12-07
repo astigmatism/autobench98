@@ -382,10 +382,11 @@ export class SerialPrinterService {
         }
     }
 
-        private finalizeJob(): void {
+    private finalizeJob(): void {
         this.clearIdleTimer()
+
+        // If we accumulated nothing, just reset if we thought we were receiving.
         if (this.buffer.length === 0) {
-            // Nothing accumulated; if we were in receiving, go back to idle.
             if (this.state === 'receiving') {
                 this.state = 'idle'
                 this.currentJobId = null
@@ -405,32 +406,22 @@ export class SerialPrinterService {
                 ? this.buffer
                 : this.buffer.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n')
 
-        // ---------------------------------------------------------------------
-        // Noise filter: drop tiny/spurious jobs (power on/off burps, etc.)
-        //
-        // Strategy:
-        //   - Strip control characters (0x00–0x1F, 0x7F).
-        //   - Trim whitespace.
-        //   - If there are <= 1 visible characters, treat as noise.
-        // ---------------------------------------------------------------------
-        const visible = rawNormalized
-            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-            .trim()
+        // Treat ultra-short, nearly-empty frames as noise (e.g. power-on/off burps).
+        // Heuristic: ignore jobs whose non-whitespace, non-NUL characters ≤ 1.
+        const visibleChars = rawNormalized.replace(/[\s\0]/g, '').length
 
-        if (visible.length <= 1) {
-            console.log('[SerialPrinterService] Dropping tiny noise job', {
-                jobId,
-                rawLength: rawNormalized.length,
-                visibleLength: visible.length,
-                visibleSample: visible,
+        if (visibleChars <= 1) {
+            // 🧹 Noise job: log and drop, do NOT enqueue or bump stats.totalJobs.
+            this.deps.events.publish({
+                kind: 'recoverable-error',
+                at: now,
+                error: `Serial printer noise job dismissed (jobId=${jobId}, bytes=${this.buffer.length}, visibleChars=${visibleChars})`,
             })
 
-            // Reset buffer/state as if it were an empty job.
             this.buffer = ''
             this.currentJobId = null
             this.currentJobStartedAt = null
             this.state = 'idle'
-            // IMPORTANT: no queue push, no stats bump, no job-completed event.
             return
         }
 
@@ -444,11 +435,7 @@ export class SerialPrinterService {
             preview,
         }
 
-        // 🔍 DEBUG: log the full raw job so we can verify completeness.
-        // This will be noisy, but it's intentionally "messy" for debugging.
-        // You can search for "SERIAL PRINTER JOB RAW" in the orchestrator logs.
-        // Length check helps compare with what Windows 98 sends.
-        // If this matches your Notepad doc, backend capture is good.
+        // Optional debug logging
         // console.log('================= SERIAL PRINTER JOB RAW START =================')
         // console.log(`Job ID: ${jobId}`)
         // console.log(`Raw length (chars): ${job.raw.length}`)
