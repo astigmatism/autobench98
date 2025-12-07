@@ -420,11 +420,11 @@ export class SerialPrinterService {
         // You can search for "SERIAL PRINTER JOB RAW" in the orchestrator logs.
         // Length check helps compare with what Windows 98 sends.
         // If this matches your Notepad doc, backend capture is good.
-        console.log('================= SERIAL PRINTER JOB RAW START =================')
-        console.log(`Job ID: ${jobId}`)
-        console.log(`Raw length (chars): ${job.raw.length}`)
-        console.log(job.raw)
-        console.log('================== SERIAL PRINTER JOB RAW END ==================')
+        // console.log('================= SERIAL PRINTER JOB RAW START =================')
+        // console.log(`Job ID: ${jobId}`)
+        // console.log(`Raw length (chars): ${job.raw.length}`)
+        // console.log(job.raw)
+        // console.log('================== SERIAL PRINTER JOB RAW END ==================')
 
         this.buffer = ''
         this.currentJobId = null
