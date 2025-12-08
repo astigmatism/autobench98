@@ -87,6 +87,8 @@ export class CfBlockDiscoveryService {
             productId: this.cfg.productId ?? null,
             serialNumber: this.cfg.serialNumber ?? null,
             pollIntervalMs: this.cfg.pollIntervalMs,
+            // tiny version tag so we can prove this code is what’s running
+            implVersion: 'linux-size-aware-v1',
         })
 
         // Immediate first check, then interval.
@@ -232,36 +234,16 @@ export class CfBlockDiscoveryService {
         return null
     }
 
-    /**
-     * macOS: two-phase:
-     *   1) Use `system_profiler SPUSBDataType -json` to find the USB READER
-     *      with matching VID/PID/serial.
-     *   2) Use `diskutil` to find the USB block device that corresponds to
-     *      the media (if inserted).
-     *
-     * For now, we assume that when the card is inserted, there is a single
-     * USB whole disk that represents it (e.g., /dev/disk4).
-     */
+    /* ------------------------------- Darwin -------------------------------- */
+
     private async findOnDarwin(): Promise<CfBlockDeviceInfo | null> {
-        // 1) Confirm the USB reader exists at all
         const readerPresent = await this.findDarwinUsbReader()
         if (!readerPresent) {
-            /*
-            this.log('debug', 'darwin: USB reader not found by VID/PID/serial', {
-                vendorId: this.cfg.vendorId ?? null,
-                productId: this.cfg.productId ?? null,
-                serialNumber: this.cfg.serialNumber ?? null,
-            })
-            */
             return null
         }
 
-        // 2) If reader exists, try to locate the block device representing the media
         const diskPath = await this.findDarwinUsbMediaDisk()
         if (!diskPath) {
-            // Reader present but no media. We still surface a "device" with a
-            // synthetic path so CfImagerService knows the reader exists; it can
-            // separately probe for media.
             const id = makeDeviceId({
                 kind: 'block.cfreader',
                 path: 'unmounted',
@@ -294,9 +276,6 @@ export class CfBlockDiscoveryService {
         }
     }
 
-    /**
-     * Phase 1 (darwin): verify the CF USB reader exists using system_profiler JSON.
-     */
     private async findDarwinUsbReader(): Promise<boolean> {
         const rawJson = await this.runCommand('system_profiler', ['SPUSBDataType', '-json'])
         if (!rawJson.trim()) {
@@ -362,18 +341,6 @@ export class CfBlockDiscoveryService {
         return found
     }
 
-    /**
-     * Phase 2 (darwin): if the reader exists, attempt to find the /dev/diskX
-     * that represents the media (if any) via diskutil.
-     *
-     * We:
-     *   - Call `diskutil list -plist | plutil -convert json -o - -` to
-     *     enumerate disks (JSON).
-     *   - Filter disks that are:
-     *       * External/removable
-     *       * WholeDisk == true
-     *       * BusProtocol == "USB"
-     */
     private async findDarwinUsbMediaDisk(): Promise<string | null> {
         const out = await this.runShell('diskutil list -plist | plutil -convert json -o - -')
         if (!out.trim()) {
@@ -437,6 +404,8 @@ export class CfBlockDiscoveryService {
 
         return bestPath
     }
+
+    /* ------------------------------- Linux --------------------------------- */
 
     /**
      * Linux: two-phase, mirroring Darwin semantics:
@@ -512,12 +481,6 @@ export class CfBlockDiscoveryService {
         }
     }
 
-    /**
-     * Phase 1 (linux): locate the USB reader using /sys/bus/usb/devices and
-     * the configured VID/PID/serial.
-     *
-     * Returns the sysfs path and discovered serial (if present).
-     */
     private async findLinuxUsbReader(): Promise<{ sysPath: string; serial?: string } | null> {
         const script = `
 set -e
@@ -586,15 +549,6 @@ done
         return null
     }
 
-    /**
-     * Phase 2 (linux): given the reader's sysfs path, find block devices whose
-     * /sys/block/<dev>/device realpath lives under that path, then filter by
-     * size > 0 (media present).
-     *
-     * When your reader exposes multiple LUNs (e.g. /dev/sd[a-d]) under the same
-     * USB device, some may have no card and report size 0; we only consider
-     * those with size > 0 to be valid media.
-     */
     private async findLinuxUsbMediaDisk(readerSysPath: string): Promise<string | null> {
         const script = `
 set -e
@@ -637,6 +591,9 @@ done
         const lines = out.split('\n').map((l) => l.trim()).filter(Boolean)
         if (lines.length === 0) {
             // No block devices at all under this reader (very odd, but treat as no media)
+            this.log('debug', 'linux: no block devices under reader sysfs path', {
+                readerSysPath,
+            })
             return null
         }
 
@@ -649,6 +606,11 @@ done
             candidates.push({ dev, size })
         }
 
+        this.log('debug', 'linux: block device candidates under reader', {
+            readerSysPath,
+            candidates: candidates.map((c) => ({ dev: c.dev, size: c.size })),
+        })
+
         if (candidates.length === 0) {
             return null
         }
@@ -656,7 +618,6 @@ done
         const withMedia = candidates.filter((c) => c.size > 0)
 
         if (withMedia.length === 0) {
-            // Reader is there, LUNs are there, but all sizes are 0 → no card in any slot.
             this.log('debug', 'linux: block devices under reader but all report size 0 (no media)', {
                 readerSysPath,
                 candidates: candidates.map((c) => ({ dev: c.dev, size: c.size })),
@@ -747,7 +708,6 @@ done
 
     private async safeDiskutilInfo(identifier: string): Promise<string | null> {
         try {
-            // identifier is like "disk4"
             const script =
                 `diskutil info -plist "${identifier}" ` +
                 `| plutil -convert json -o - -`
