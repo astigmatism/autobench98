@@ -606,10 +606,12 @@ done
             candidates.push({ dev, size })
         }
 
+        /*
         this.log('debug', 'linux: block device candidates under reader', {
             readerSysPath,
             candidates: candidates.map((c) => ({ dev: c.dev, size: c.size })),
         })
+        */
 
         if (candidates.length === 0) {
             return null
@@ -618,10 +620,12 @@ done
         const withMedia = candidates.filter((c) => c.size > 0)
 
         if (withMedia.length === 0) {
+            /*
             this.log('debug', 'linux: block devices under reader but all report size 0 (no media)', {
                 readerSysPath,
                 candidates: candidates.map((c) => ({ dev: c.dev, size: c.size })),
             })
+            */
             return null
         }
 
