@@ -30,8 +30,8 @@ export interface CfBlockDeviceInfo {
  * Platform behavior:
  *   - macOS: uses `system_profiler SPUSBDataType -json` to find the USB device
  *            by VID/PID/serial, and `diskutil` to find the matching disk node.
- *   - Linux: uses /sys/bus/usb/devices to find the USB device by VID/PID/serial,
- *            and then discovers any block devices underneath that USB node.
+ *   - Linux: uses /sys/bus/usb/devices to find the USB reader by VID/PID/serial,
+ *            then `lsblk -J` to find a matching USB disk block device.
  *
  * Notes:
  *   - This is intentionally conservative: we never try to be "smart" about
@@ -438,20 +438,19 @@ export class CfBlockDiscoveryService {
     }
 
     /**
-     * Linux: two-phase, mirroring Darwin semantics as closely as possible:
+     * Linux: two-phase, mirroring Darwin semantics:
      *
      *   1) Use /sys/bus/usb/devices to locate the USB reader by VID/PID/serial.
-     *   2) Under that USB device, look for any block devices (e.g., /dev/sdX).
+     *   2) Use `lsblk -J -o NAME,TRAN,SERIAL,PATH,RM,TYPE` to locate a USB disk
+     *      whose serial (if available) matches the reader, or otherwise take the
+     *      first USB disk as a fallback.
      *
-     * If the reader exists but no block device is found, we return a synthetic
-     * "unmounted" path so the higher-level service knows the reader is present
-     * but has no media inserted.
+     * If the reader exists but there is no matching USB disk, we treat this as
+     * "reader present, no media" and surface an "unmounted" synthetic path.
      */
     private async findOnLinux(): Promise<CfBlockDeviceInfo | null> {
-        // 1) Confirm the USB reader exists at all via sysfs.
-        const readerSysPath = await this.findLinuxUsbReader()
-        if (!readerSysPath) {
-            // USB reader not present; no device.
+        const reader = await this.findLinuxUsbReader()
+        if (!reader) {
             this.log('debug', 'linux: USB reader not found by VID/PID/serial', {
                 vendorId: this.cfg.vendorId ?? null,
                 productId: this.cfg.productId ?? null,
@@ -460,10 +459,9 @@ export class CfBlockDiscoveryService {
             return null
         }
 
-        // 2) If reader exists, try to locate a block device representing the media.
-        const blockDevPath = await this.findLinuxUsbMediaBlock(readerSysPath)
+        const blockPath = await this.findLinuxUsbMediaDisk(reader.serial)
 
-        if (!blockDevPath) {
+        if (!blockPath) {
             // Reader present but no media. Mirror Darwin: synthetic "unmounted" path.
             const id = makeDeviceId({
                 kind: 'block.cfreader',
@@ -472,8 +470,9 @@ export class CfBlockDiscoveryService {
                 productId: this.cfg.productId,
             })
 
-            this.log('debug', 'linux: USB reader present but no block device (no media)', {
-                sysPath: readerSysPath,
+            this.log('debug', 'linux: USB reader present but no matching USB disk (no media)', {
+                sysPath: reader.sysPath,
+                serial: reader.serial ?? null,
                 id,
             })
 
@@ -482,45 +481,41 @@ export class CfBlockDiscoveryService {
                 path: 'unmounted',
                 vendorId: this.cfg.vendorId,
                 productId: this.cfg.productId,
-                serialNumber: this.cfg.serialNumber,
+                serialNumber: reader.serial ?? this.cfg.serialNumber,
             }
         }
 
         const id = makeDeviceId({
             kind: 'block.cfreader',
-            path: blockDevPath,
+            path: blockPath,
             vendorId: this.cfg.vendorId,
             productId: this.cfg.productId,
         })
 
         this.log('info', 'linux: selected CF reader block device', {
-            path: blockDevPath,
-            sysPath: readerSysPath,
+            path: blockPath,
+            sysPath: reader.sysPath,
+            serial: reader.serial ?? null,
             vendorId: this.cfg.vendorId ?? null,
             productId: this.cfg.productId ?? null,
-            serialNumber: this.cfg.serialNumber ?? null,
         })
 
         return {
             id,
-            path: blockDevPath,
+            path: blockPath,
             vendorId: this.cfg.vendorId,
             productId: this.cfg.productId,
-            serialNumber: this.cfg.serialNumber,
+            serialNumber: reader.serial ?? this.cfg.serialNumber,
         }
     }
 
     /**
-     * Phase 1 (linux): verify the CF USB reader exists using /sys/bus/usb/devices.
+     * Phase 1 (linux): locate the USB reader using /sys/bus/usb/devices and
+     * the configured VID/PID/serial.
      *
-     * We scan all USB device directories that have idVendor/idProduct and optional
-     * serial, then match against the configured VID/PID/serial.
-     *
-     * Returns the matching sysfs path (e.g., /sys/bus/usb/devices/1-2.3) or null.
+     * Returns the sysfs path and discovered serial (if present).
      */
-    private async findLinuxUsbReader(): Promise<string | null> {
-        // Build a small shell script that prints:
-        //   <sys-path> <vid> <pid> <serial-or-empty>
+    private async findLinuxUsbReader(): Promise<{ sysPath: string; serial?: string } | null> {
         const script = `
 set -e
 for dev in /sys/bus/usb/devices/*; do
@@ -558,7 +553,6 @@ done
         const lines = out.split('\n').map((l) => l.trim()).filter(Boolean)
 
         for (const line of lines) {
-            // Expect: "<sysPath> <vid> <pid> <serial (may contain spaces, but typical udev serials do not)>"
             const parts = line.split(' ').filter(Boolean)
             if (parts.length < 3) continue
 
@@ -582,7 +576,7 @@ done
                     pid,
                     serial: serial ?? null,
                 })
-                return sysPath
+                return { sysPath, serial }
             }
         }
 
@@ -590,66 +584,101 @@ done
     }
 
     /**
-     * Phase 2 (linux): given the sysfs path of the USB reader device, attempt
-     * to find a block device (e.g., /dev/sdX) underneath it.
+     * Phase 2 (linux): given the reader serial (if any), use `lsblk -J` to
+     * find a USB disk representing the CF media.
      *
-     * We search for "block/*" directories underneath the USB device node, and
-     * return the first matching /dev/<name>. This mirrors Darwin's assumption
-     * of a single whole-disk device representing the CF card.
+     * Preference order:
+     *   - USB disk whose SERIAL matches readerSerial (if known).
+     *   - Otherwise, USB disk whose SERIAL matches configured cfg.serialNumber.
+     *   - Otherwise, first USB disk (fallback).
      */
-    private async findLinuxUsbMediaBlock(readerSysPath: string): Promise<string | null> {
-        // Shell script:
-        //   - Under the given USB device sysfs path, find any "block/*" dirs.
-        //   - For each, emit "/dev/<basename>".
-        const script = `
-set -e
-dev="${readerSysPath}"
-if [ ! -d "$dev" ]; then
-  exit 0
-fi
-# Find any block directories up to a reasonable depth.
-paths=$(find "$dev" -maxdepth 6 -type d -name block 2>/dev/null || true)
-for blkdir in $paths; do
-  for node in "$blkdir"/*; do
-    if [ -e "$node" ]; then
-      name=$(basename "$node")
-      printf "/dev/%s\\n" "$name"
-    fi
-  done
-done
-`.trim()
+    private async findLinuxUsbMediaDisk(readerSerial?: string): Promise<string | null> {
+        const out = await this.runCommand('lsblk', ['-J', '-o', 'NAME,TRAN,SERIAL,PATH,RM,TYPE'])
+        if (!out.trim()) {
+            this.log('debug', 'linux: lsblk returned empty output', {})
+            return null
+        }
 
-        let out: string
+        let parsed: any
         try {
-            out = await this.runShell(script)
+            parsed = JSON.parse(out)
         } catch (err) {
-            this.log('debug', 'linux: failed while searching for block devices under USB reader', {
-                sysPath: readerSysPath,
+            this.log('warn', 'linux: failed to parse lsblk JSON', {
                 err: (err as Error).message,
             })
             return null
         }
 
-        const lines = out.split('\n').map((l) => l.trim()).filter(Boolean)
-        if (lines.length === 0) {
-            // No block devices = no media.
+        const devices: any[] = Array.isArray(parsed?.blockdevices)
+            ? parsed.blockdevices
+            : []
+
+        this.log('debug', 'linux CF discovery: inspecting lsblk devices', {
+            count: devices.length,
+        })
+
+        const desiredSerial = readerSerial ?? this.cfg.serialNumber ?? undefined
+
+        type Candidate = { path: string; serial?: string }
+        const candidates: Candidate[] = []
+
+        const visit = (node: any): void => {
+            if (!node || typeof node !== 'object') return
+
+            const path = typeof node.path === 'string' ? node.path : undefined
+            const serial = node.serial ? String(node.serial) : undefined
+            const tran = node.tran ? String(node.tran).toLowerCase() : undefined
+            const type = node.type ? String(node.type).toLowerCase() : undefined
+
+            const isUsb = tran === 'usb'
+            const isDisk = type === 'disk'
+
+            if (path && isUsb && isDisk) {
+                this.log('debug', 'linux: inspecting USB disk node from lsblk', {
+                    path,
+                    serial: serial ?? null,
+                    tran,
+                    type,
+                })
+                candidates.push({ path, serial })
+            }
+
+            if (Array.isArray(node.children)) {
+                for (const child of node.children) visit(child)
+            }
+        }
+
+        for (const dev of devices) visit(dev)
+
+        if (candidates.length === 0) {
+            this.log('debug', 'linux: no USB disk candidates found in lsblk', {})
             return null
         }
 
-        // Take the first candidate as the whole-disk device. If multiple exist,
-        // they are typically partitions; the first is usually the whole disk.
-        const candidate = lines[0]
-
-        // Very basic sanity check: should look like /dev/sdX or /dev/mmcblkX, etc.
-        if (!candidate.startsWith('/dev/')) {
-            this.log('debug', 'linux: ignoring unexpected block device candidate', {
-                sysPath: readerSysPath,
-                candidate,
-            })
-            return null
+        // 1) Prefer exact serial match to readerSerial / cfg.serialNumber.
+        if (desiredSerial) {
+            const bySerial = candidates.find((c) => c.serial === desiredSerial)
+            if (bySerial) {
+                this.log('debug', 'linux: selected USB disk by serial match', {
+                    path: bySerial.path,
+                    serial: bySerial.serial ?? null,
+                    desiredSerial,
+                })
+                return bySerial.path
+            }
         }
 
-        return candidate
+        // 2) Fallback: first USB disk.
+        const first = candidates[0]
+        this.log(
+            'debug',
+            'linux: taking first USB disk candidate as CF media fallback',
+            {
+                path: first.path,
+                serial: first.serial ?? null,
+            }
+        )
+        return first.path
     }
 
     /* ---------------------------------------------------------------------- */
