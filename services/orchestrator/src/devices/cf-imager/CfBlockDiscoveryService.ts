@@ -31,7 +31,8 @@ export interface CfBlockDeviceInfo {
  *   - macOS: uses `system_profiler SPUSBDataType -json` to find the USB device
  *            by VID/PID/serial, and `diskutil` to find the matching disk node.
  *   - Linux: uses /sys/bus/usb/devices to find the USB reader by VID/PID/serial,
- *            then walks /sys/block to find block devices owned by that reader.
+ *            then walks /sys/block to find block devices owned by that reader
+ *            and inspects their size to detect inserted media.
  *
  * Notes:
  *   - This is intentionally conservative: we never try to be "smart" about
@@ -442,10 +443,13 @@ export class CfBlockDiscoveryService {
      *
      *   1) Use /sys/bus/usb/devices to locate the USB reader by VID/PID/serial.
      *   2) Walk /sys/block/* and pick block devices whose `/device` realpath
-     *      is under that USB device's sysfs path.
+     *      is under that USB device's sysfs path, **then** filter by size:
+     *         - size == 0 → slot exists but no media
+     *         - size > 0  → media present in that slot
      *
-     * If the reader exists but there is no such block device, we treat this as
-     * "reader present, no media" and surface an "unmounted" synthetic path.
+     * If the reader exists but there is no such block device with size > 0,
+     * we treat this as "reader present, no media" and surface an "unmounted"
+     * synthetic path.
      */
     private async findOnLinux(): Promise<CfBlockDeviceInfo | null> {
         const reader = await this.findLinuxUsbReader()
@@ -469,7 +473,7 @@ export class CfBlockDiscoveryService {
                 productId: this.cfg.productId,
             })
 
-            this.log('debug', 'linux: USB reader present but no block device under it (no media)', {
+            this.log('debug', 'linux: USB reader present but no block device with media under it', {
                 sysPath: reader.sysPath,
                 serial: reader.serial ?? null,
                 id,
@@ -491,7 +495,7 @@ export class CfBlockDiscoveryService {
             productId: this.cfg.productId,
         })
 
-        this.log('info', 'linux: selected CF reader block device (via sysfs linkage)', {
+        this.log('info', 'linux: selected CF reader block device (via sysfs + size)', {
             path: blockPath,
             sysPath: reader.sysPath,
             serial: reader.serial ?? null,
@@ -584,10 +588,12 @@ done
 
     /**
      * Phase 2 (linux): given the reader's sysfs path, find block devices whose
-     * /sys/block/<dev>/device realpath lives under that path.
+     * /sys/block/<dev>/device realpath lives under that path, then filter by
+     * size > 0 (media present).
      *
-     * This directly associates the block device with *that specific reader*,
-     * rather than guessing based on "USB disk" heuristics.
+     * When your reader exposes multiple LUNs (e.g. /dev/sd[a-d]) under the same
+     * USB device, some may have no card and report size 0; we only consider
+     * those with size > 0 to be valid media.
      */
     private async findLinuxUsbMediaDisk(readerSysPath: string): Promise<string | null> {
         const script = `
@@ -596,17 +602,24 @@ reader="$(readlink -f "${readerSysPath}")"
 if [ ! -d "$reader" ]; then
   exit 0
 fi
+# Emit: "<devname> <size>"
 for blk in /sys/block/*; do
   [ -d "$blk" ] || continue
   devname="$(basename "$blk")"
   devlink="$(readlink -f "$blk/device" 2>/dev/null || echo "")"
-  if [ -n "$devlink" ]; then
-    case "$devlink" in
-      "$reader"/*)
-        echo "/dev/$devname"
-      ;;
-    esac
+  if [ -z "$devlink" ]; then
+    continue
   fi
+  case "$devlink" in
+    "$reader"/*)
+      sizeFile="$blk/size"
+      size="0"
+      if [ -f "$sizeFile" ]; then
+        size=$(cat "$sizeFile" 2>/dev/null || echo "0")
+      fi
+      echo "$devname $size"
+    ;;
+  esac
 done
 `.trim()
 
@@ -614,7 +627,7 @@ done
         try {
             out = await this.runShell(script)
         } catch (err) {
-            this.log('warn', 'linux: failed to map USB reader to block device via sysfs', {
+            this.log('warn', 'linux: failed to map USB reader to block devices via sysfs', {
                 readerSysPath,
                 err: (err as Error).message,
             })
@@ -623,18 +636,49 @@ done
 
         const lines = out.split('\n').map((l) => l.trim()).filter(Boolean)
         if (lines.length === 0) {
+            // No block devices at all under this reader (very odd, but treat as no media)
             return null
         }
 
-        if (lines.length > 1) {
-            this.log('debug', 'linux: multiple block devices under CF reader, taking first', {
-                readerSysPath,
-                candidates: lines,
-            })
+        const candidates: { dev: string; size: number }[] = []
+        for (const line of lines) {
+            const [dev, sizeStr] = line.split(' ').filter(Boolean)
+            if (!dev) continue
+            const size = Number.parseInt(sizeStr ?? '0', 10)
+            if (Number.isNaN(size)) continue
+            candidates.push({ dev, size })
         }
 
-        const first = lines[0]
-        return first || null
+        if (candidates.length === 0) {
+            return null
+        }
+
+        const withMedia = candidates.filter((c) => c.size > 0)
+
+        if (withMedia.length === 0) {
+            // Reader is there, LUNs are there, but all sizes are 0 → no card in any slot.
+            this.log('debug', 'linux: block devices under reader but all report size 0 (no media)', {
+                readerSysPath,
+                candidates: candidates.map((c) => ({ dev: c.dev, size: c.size })),
+            })
+            return null
+        }
+
+        if (withMedia.length > 1) {
+            this.log(
+                'debug',
+                'linux: multiple block devices with media under CF reader, taking first',
+                {
+                    readerSysPath,
+                    candidates: withMedia.map((c) => ({ dev: c.dev, size: c.size })),
+                }
+            )
+        }
+
+        const chosen = withMedia[0]
+        const path = `/dev/${chosen.dev}`
+
+        return path
     }
 
     /* ---------------------------------------------------------------------- */
