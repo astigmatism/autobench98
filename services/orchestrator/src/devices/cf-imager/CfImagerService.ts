@@ -572,14 +572,38 @@ export class CfImagerService {
     }
 
     /**
-     * Linux: use lsblk to get SIZE (bytes) for the given block device.
+     * Linux: read block size from /sys/block/<dev>/size (in 512-byte sectors)
+     * and convert to bytes.
+     *
+     * This matches the discovery logic that already relies on /sys/block.
      */
     private async readLinuxBlockSize(devPath: string): Promise<number> {
-        const out = await this.runCommand('lsblk', ['-bno', 'SIZE', devPath])
-        const trimmed = out.trim()
+        // devPath is usually like "/dev/sda"; strip the prefix if present.
+        const name = devPath.startsWith('/dev/') ? devPath.slice('/dev/'.length) : devPath
+
+        const script = `
+    set -e
+    blk="/sys/block/${name}"
+    if [ ! -d "$blk" ]; then
+    exit 0
+    fi
+    sizeFile="$blk/size"
+    if [ ! -f "$sizeFile" ]; then
+    exit 0
+    fi
+    size=$(cat "$sizeFile" 2>/dev/null || echo "0")
+    echo "$size"
+    `.trim()
+
+        const out = await this.runShell(script)
+        const trimmed = out.trim().split('\n').pop() ?? ''
         if (!trimmed) return 0
-        const n = Number(trimmed)
-        return Number.isFinite(n) && n > 0 ? n : 0
+
+        const sectors = Number.parseInt(trimmed, 10)
+        if (!Number.isFinite(sectors) || sectors <= 0) return 0
+
+        const bytes = sectors * 512
+        return bytes > 0 ? bytes : 0
     }
 
     /**
