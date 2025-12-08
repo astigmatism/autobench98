@@ -466,6 +466,7 @@ export class CfBlockDiscoveryService {
             productId: this.cfg.productId,
         })
 
+        /*
         this.log('info', 'linux: selected CF reader block device (via sysfs + size)', {
             path: blockPath,
             sysPath: reader.sysPath,
@@ -473,6 +474,7 @@ export class CfBlockDiscoveryService {
             vendorId: this.cfg.vendorId ?? null,
             productId: this.cfg.productId ?? null,
         })
+        */
 
         return {
             id,
