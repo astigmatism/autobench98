@@ -442,11 +442,13 @@ export class CfBlockDiscoveryService {
                 productId: this.cfg.productId,
             })
 
+            /*
             this.log('debug', 'linux: USB reader present but no block device with media under it', {
                 sysPath: reader.sysPath,
                 serial: reader.serial ?? null,
                 id,
             })
+            */
 
             return {
                 id,
@@ -536,12 +538,14 @@ done
             const serialOk = matchSerial ? serial === matchSerial : true
 
             if (vidOk && pidOk && serialOk) {
+                /*
                 this.log('debug', 'linux: matched CF USB reader in sysfs', {
                     sysPath,
                     vid,
                     pid,
                     serial: serial ?? null,
                 })
+                */
                 return { sysPath, serial }
             }
         }
