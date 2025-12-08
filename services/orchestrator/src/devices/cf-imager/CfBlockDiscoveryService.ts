@@ -430,11 +430,13 @@ export class CfBlockDiscoveryService {
     private async findOnLinux(): Promise<CfBlockDeviceInfo | null> {
         const reader = await this.findLinuxUsbReader()
         if (!reader) {
+            /*
             this.log('debug', 'linux: USB reader not found by VID/PID/serial', {
                 vendorId: this.cfg.vendorId ?? null,
                 productId: this.cfg.productId ?? null,
                 serialNumber: this.cfg.serialNumber ?? null,
             })
+            */
             return null
         }
 
