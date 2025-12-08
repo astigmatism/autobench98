@@ -1,5 +1,9 @@
 import { EventEmitter } from 'node:events'
 import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
+import type {
+    CfImagerState as CfImagerSnapshot,
+    CfImagerMediaStatus,
+} from '../devices/cf-imager/types.js'
 
 /**
  * Client-consumable server configuration shipped inside the state snapshot.
@@ -120,6 +124,15 @@ export type AtlonaControllerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  CF Imager snapshot (alias of CfImagerState)                               */
+/* -------------------------------------------------------------------------- */
+
+export type CfImagerMediaSnapshot = CfImagerMediaStatus
+
+// CfImagerSnapshot is imported as CfImagerState above and aliased.
+ // (already named CfImagerSnapshot in the import)
+
+/* -------------------------------------------------------------------------- */
 /*  Full AppState                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -132,6 +145,7 @@ export type AppState = {
     powerMeter: PowerMeterSnapshot
     serialPrinter: SerialPrinterSnapshot
     atlonaController: AtlonaControllerSnapshot
+    cfImager: CfImagerSnapshot
 }
 
 /* -------------------------------------------------------------------------- */
@@ -202,8 +216,7 @@ const initialPowerMeter: PowerMeterSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Initial serial printer slice (UPDATED with currentJob + lastJobFullText +
- *  server-side history buffer)                                               */
+/*  Initial serial printer slice                                              */
 /* -------------------------------------------------------------------------- */
 
 const initialSerialPrinter: SerialPrinterSnapshot = {
@@ -240,6 +253,24 @@ const initialAtlonaController: AtlonaControllerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Initial CF Imager slice                                                   */
+/* -------------------------------------------------------------------------- */
+
+const initialCfImager: CfImagerSnapshot = {
+    phase: 'disconnected',
+    media: 'none',
+    message: undefined,
+    device: undefined,
+    fs: {
+        rootPath: '/',
+        cwd: '/',
+        entries: [],
+    },
+    currentOp: undefined,
+    lastError: undefined,
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initial full state                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -268,6 +299,7 @@ let state: AppState = {
     powerMeter: initialPowerMeter,
     serialPrinter: initialSerialPrinter,
     atlonaController: initialAtlonaController,
+    cfImager: initialCfImager,
 }
 
 /* -------------------------------------------------------------------------- */
@@ -362,7 +394,7 @@ export function updatePowerMeterSnapshot(partial: {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Serial printer update helpers (UPDATED)                                   */
+/*  Serial printer update helpers                                             */
 /* -------------------------------------------------------------------------- */
 
 export function setSerialPrinterSnapshot(next: SerialPrinterSnapshot) {
@@ -450,4 +482,41 @@ export function updateAtlonaControllerSnapshot(partial: {
     }
 
     set('atlonaController', merged)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  CF Imager update helpers                                                  */
+/* -------------------------------------------------------------------------- */
+
+export function setCfImagerSnapshot(next: CfImagerSnapshot) {
+    set('cfImager', next)
+}
+
+export function updateCfImagerSnapshot(partial: {
+    phase?: CfImagerSnapshot['phase']
+    media?: CfImagerSnapshot['media']
+    message?: string
+    device?: CfImagerSnapshot['device']
+    fs?: Partial<CfImagerSnapshot['fs']>
+    currentOp?: CfImagerSnapshot['currentOp']
+    lastError?: string
+}) {
+    const prev = state.cfImager
+
+    const fs: CfImagerSnapshot['fs'] = {
+        ...prev.fs,
+        ...(partial.fs ?? {}),
+    }
+
+    const merged: CfImagerSnapshot = {
+        phase: partial.phase ?? prev.phase,
+        media: partial.media ?? prev.media,
+        message: partial.message ?? prev.message,
+        device: partial.device ?? prev.device,
+        fs,
+        currentOp: partial.currentOp ?? prev.currentOp,
+        lastError: partial.lastError ?? prev.lastError,
+    }
+
+    set('cfImager', merged)
 }

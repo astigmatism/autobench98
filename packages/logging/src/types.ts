@@ -12,6 +12,7 @@ export enum LogChannel {
     powermeter = 'powermeter',
     serial_printer = 'serial-printer',
     atlona_controller = 'atlona-controller',
+    cf_imager = 'cf-imager',
 }
 
 export type ChannelColor =

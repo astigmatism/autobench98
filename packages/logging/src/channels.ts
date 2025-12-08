@@ -20,6 +20,7 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     [LogChannel.serial_printer]:  { emoji: '🖨️', color: 'white' },
     // Atlona controller-specific channel
     [LogChannel.atlona_controller]: { emoji: '📽️', color: 'purple' },
+    [LogChannel.cf_imager]:       { emoji: '💾', color: 'cyan' },
 }
 
 export const ANSI: Record<ChannelColor, string> = {
@@ -49,4 +50,5 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.powermeter]:      30,
     [LogChannel.serial_printer]:  30,
     [LogChannel.atlona_controller]: 30,
+    [LogChannel.cf_imager]:       30,
 }
