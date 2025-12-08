@@ -141,15 +141,17 @@ export class CfImagerService {
     }
 
     public async onDeviceLost(args: { id: string }): Promise<void> {
-        console.log('[cf-imager] onDeviceLost', JSON.stringify({ id: args.id }))
+        // console.log('[cf-imager] onDeviceLost', JSON.stringify({ id: args.id }))
 
         if (!this.device || this.device.id !== args.id) {
-            console.log(
-                '[cf-imager] onDeviceLost: ignoring, current device is',
-                this.device ? this.device.id : 'none'
-            )
+            // console.log(
+            //    '[cf-imager] onDeviceLost: ignoring, current device is',
+            //    this.device ? this.device.id : 'none'
+            //)
             return
         }
+
+        const wasUnmounted = this.device.path === 'unmounted'
 
         await this.cancelCurrentChild('device-lost')
 
@@ -159,23 +161,27 @@ export class CfImagerService {
         this.state.phase = 'disconnected'
         this.state.media = 'none'
         this.state.device = undefined
-        this.state.message = 'Device lost'
+        this.state.message = wasUnmounted
+            ? 'CF reader media variant replaced'
+            : 'Device lost'
 
         this.deps.events.publish({
             kind: 'cf-device-disconnected',
             at: Date.now(),
             deviceId: lostId,
+            // keep the existing union value so we don’t break any consumers
             reason: 'device-lost',
         })
 
-        // Also reflect media state explicitly for the adapter / pane.
         this.deps.events.publish({
             kind: 'cf-media-updated',
             at: Date.now(),
             media: 'none',
             device: undefined,
             sizeBytes: 0,
-            message: 'CF reader disconnected',
+            message: wasUnmounted
+                ? 'CF reader media path replaced'
+                : 'CF reader disconnected',
         })
     }
 
