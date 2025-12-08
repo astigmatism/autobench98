@@ -1,644 +1,656 @@
 /* eslint-disable no-console */
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { promises as fsp } from 'node:fs'
-import { basename, join } from 'node:path'
+import { spawn } from 'node:child_process'
 
-import type {
-    CfImagerConfig,
-    CfImagerEventSink,
-    CfImagerState,
-    CfImagerFsState,
-    CfImagerCurrentOp,
-    CfImagerDeviceInfo,
-} from './types.js'
-import {
-    resolveUnderRoot,
-    listDirectoryState,
-} from './utils.js'
-
-interface CfImagerServiceDeps {
-    events: CfImagerEventSink
+export interface CfBlockDiscoveryConfig {
+    /** Hex VID, e.g. "05e3" (case-insensitive, with or without 0x). */
+    vendorId?: string
+    /** Hex PID, e.g. "0748". */
+    productId?: string
+    /** Optional USB serial number, e.g. "000000001209". */
+    serialNumber?: string
+    /** Poll cadence in ms. Reasonable default: 3000–5000. */
+    pollIntervalMs: number
 }
 
 /**
- * CfImagerService
- *
- * - Integrates with CfBlockDiscoveryService via onDeviceIdentified/onDeviceLost.
- * - Constrains all FS operations to a configured root directory.
- * - Exposes high-level operations for the frontend pane (list/create/rename/delete).
- * - Spawns external bash scripts to read/write CF images (stubbed initially).
- *
- * NOTE: Only a single operation (read/write) is allowed at a time.
+ * Info passed to CfImagerService.onDeviceIdentified/onDeviceLost.
  */
+export interface CfBlockDeviceInfo {
+    id: string
+    path: string
+    vendorId?: string
+    productId?: string
+    serialNumber?: string
+}
 
-// How often to re-probe media while a reader is attached (ms).
-// This is intentionally modest to avoid log spam but keep UI responsive.
-const MEDIA_POLL_INTERVAL_MS = 3000
-
+/**
+ * Simple polling-based discovery for a *USB block device* CF reader.
+ *
+ * Platform behavior:
+ *   - macOS: uses `system_profiler SPUSBDataType -json` to find the USB device
+ *            by VID/PID/serial, and `diskutil` to find the matching disk node.
+ *   - Linux: uses /sys/bus/usb/devices to find the USB reader by VID/PID/serial,
+ *            then walks /sys/block to find block devices owned by that reader
+ *            and inspects their size to detect inserted media.
+ *
+ * Notes:
+ *   - This is intentionally conservative: we never try to be "smart" about
+ *     other disks. We only ever look for the one reader configured in env.
+ *   - If we can’t confidently determine a /dev path, we log and return null.
+ */
 export class CfBlockDiscoveryService {
-    private readonly config: CfImagerConfig
-    private readonly deps: CfImagerServiceDeps
+    private readonly cfg: CfBlockDiscoveryConfig
+    private readonly onPresent: (info: CfBlockDeviceInfo) => void | Promise<void>
+    private readonly onLost: (info: { id: string }) => void | Promise<void>
+    private readonly log: (
+        level: 'debug' | 'info' | 'warn' | 'error',
+        msg: string,
+        meta?: Record<string, unknown>
+    ) => void
 
-    private state: CfImagerState
-    private device: CfImagerDeviceInfo | null = null
+    private timer: NodeJS.Timeout | null = null
+    private lastDevice: CfBlockDeviceInfo | null = null
+    private running = false
 
-    /** Current working directory (absolute path under root). */
-    private cwdAbs: string
-
-    /** Single in-flight child process for read/write (if any). */
-    private child: ChildProcessWithoutNullStreams | null = null
-
-    /** Periodic media probe timer while a reader is attached. */
-    private mediaPollTimer: NodeJS.Timeout | null = null
-
-    constructor(config: CfImagerConfig, deps: CfImagerServiceDeps) {
-        this.config = config
-        this.deps = deps
-
-        const root = config.rootDir
-        this.cwdAbs = root
-
-        const fs: CfImagerFsState = listDirectoryState(
-            root,
-            this.cwdAbs,
-            this.config.maxEntriesPerDir
-        )
-
-        this.state = {
-            phase: 'disconnected',
-            media: 'none',
-            fs,
+    constructor(
+        cfg: CfBlockDiscoveryConfig,
+        opts: {
+            onPresent: (info: CfBlockDeviceInfo) => void | Promise<void>
+            onLost: (info: { id: string }) => void | Promise<void>
+            log?: (
+                level: 'debug' | 'info' | 'warn' | 'error',
+                msg: string,
+                meta?: Record<string, unknown>
+            ) => void
         }
-
-        console.log(
-            '[cf-imager] service constructed',
-            JSON.stringify({
-                rootDir: this.config.rootDir,
-                maxEntriesPerDir: this.config.maxEntriesPerDir,
-                readScriptPath: this.config.readScriptPath,
-                writeScriptPath: this.config.writeScriptPath,
-            })
-        )
+    ) {
+        this.cfg = {
+            ...cfg,
+            pollIntervalMs: Math.max(1000, cfg.pollIntervalMs || 3000),
+            vendorId: normalizeHex(cfg.vendorId),
+            productId: normalizeHex(cfg.productId),
+            serialNumber: cfg.serialNumber?.toString() ?? undefined,
+        }
+        this.onPresent = opts.onPresent
+        this.onLost = opts.onLost
+        this.log = opts.log ?? (() => {})
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  Public API                                                            */
-    /* ---------------------------------------------------------------------- */
+    public start(): void {
+        if (this.running) return
+        this.running = true
 
-    public async start(): Promise<void> {
-        console.log('[cf-imager] start() called (no-op; waiting for device discovery)')
-        // No-op for now; device lifecycle is fully driven by discovery.
+        this.log('info', 'CF block discovery start', {
+            platform: process.platform,
+            vendorId: this.cfg.vendorId ?? null,
+            productId: this.cfg.productId ?? null,
+            serialNumber: this.cfg.serialNumber ?? null,
+            pollIntervalMs: this.cfg.pollIntervalMs,
+            // tiny version tag so we can prove this code is what’s running
+            implVersion: 'linux-size-aware-v1',
+        })
+
+        // Immediate first check, then interval.
+        void this.pollOnce().catch((err) => {
+            this.log('warn', 'initial CF block discovery poll failed', {
+                err: (err as Error).message,
+            })
+        })
+
+        this.timer = setInterval(() => {
+            void this.pollOnce().catch((err) => {
+                this.log('debug', 'CF block discovery poll failed', {
+                    err: (err as Error).message,
+                })
+            })
+        }, this.cfg.pollIntervalMs)
     }
 
     public async stop(): Promise<void> {
-        console.log('[cf-imager] stop() called')
-        await this.cancelCurrentChild('explicit-close')
-        this.stopMediaPolling()
-
-        this.device = null
-        this.state.phase = 'disconnected'
-        this.state.media = 'none'
-        this.state.device = undefined
-        this.state.message = 'Service stopped'
-    }
-
-    public getState(): CfImagerState {
-        // Shallow clone to discourage mutation.
-        return {
-            ...this.state,
-            fs: { ...this.state.fs, entries: [...this.state.fs.entries] },
-        }
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  Discovery-driven lifecycle                                            */
-    /* ---------------------------------------------------------------------- */
-
-    public async onDeviceIdentified(args: {
-        id: string
-        path: string
-        vendorId?: string
-        productId?: string
-        serialNumber?: string
-    }): Promise<void> {
-
-        this.device = {
-            id: args.id,
-            path: args.path,
-            vendorId: args.vendorId,
-            productId: args.productId,
-            serialNumber: args.serialNumber,
+        this.running = false
+        if (this.timer) {
+            clearInterval(this.timer)
+            this.timer = null
         }
 
-        // Reader present. Media status is initially unknown until we probe.
-        this.state.phase = 'idle'
-        this.state.media = 'unknown'
-        this.state.device = this.device
-        this.state.message = 'Reader connected (probing media…)'
-
-        this.deps.events.publish({
-            kind: 'cf-device-identified',
-            at: Date.now(),
-            device: this.device,
-        })
-
-        // Emit latest FS snapshot on device presence too (handy for first-open).
-        this.emitFsUpdated()
-
-        // Reset any previous polling and start a fresh cycle for this device.
-        this.stopMediaPolling()
-        void this.refreshMediaStatus()
-        this.startMediaPolling()
-    }
-
-    public async onDeviceLost(args: { id: string }): Promise<void> {
-        console.log('[cf-imager] onDeviceLost', JSON.stringify({ id: args.id }))
-
-        if (!this.device || this.device.id !== args.id) {
-            console.log(
-                '[cf-imager] onDeviceLost: ignoring, current device is',
-                this.device ? this.device.id : 'none'
-            )
-            return
-        }
-
-        await this.cancelCurrentChild('device-lost')
-        this.stopMediaPolling()
-
-        const lostId = this.device.id
-        this.device = null
-
-        this.state.phase = 'disconnected'
-        this.state.media = 'none'
-        this.state.device = undefined
-        this.state.message = 'Device lost'
-
-        this.deps.events.publish({
-            kind: 'cf-device-disconnected',
-            at: Date.now(),
-            deviceId: lostId,
-            reason: 'device-lost',
-        })
-
-        // Also reflect media state explicitly for the adapter / pane.
-        this.deps.events.publish({
-            kind: 'cf-media-updated',
-            at: Date.now(),
-            media: 'none',
-            device: undefined,
-            sizeBytes: 0,
-            message: 'CF reader disconnected',
-        })
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  Filesystem API (used by commands / pane)                              */
-    /* ---------------------------------------------------------------------- */
-
-    public async listDirectory(relPath: string | undefined): Promise<void> {
-        console.log('[cf-imager] listDirectory', { relPath })
-        try {
-            const abs = resolveUnderRoot(this.config.rootDir, relPath ?? '.')
-            this.cwdAbs = abs
-            this.emitFsUpdated()
-        } catch (err) {
-            this.emitError(`listDirectory failed: ${(err as Error).message}`)
-        }
-    }
-
-    public async changeDirectory(newRel: string): Promise<void> {
-        console.log('[cf-imager] changeDirectory', { newRel })
-        await this.listDirectory(newRel)
-    }
-
-    public async createFolder(name: string): Promise<void> {
-        console.log('[cf-imager] createFolder', { name })
-        try {
-            const safeName = sanitizeName(name)
-            if (!safeName) {
-                throw new Error('Folder name is required')
-            }
-
-            const target = resolveUnderRoot(this.config.rootDir, join(this.relCwd(), safeName))
-            await fsp.mkdir(target, { recursive: false })
-
-            this.emitFsUpdated()
-        } catch (err) {
-            this.emitError(`createFolder failed: ${(err as Error).message}`)
-        }
-    }
-
-    public async renamePath(fromRel: string, toRel: string): Promise<void> {
-        console.log('[cf-imager] renamePath', { fromRel, toRel })
-        try {
-            const fromAbs = resolveUnderRoot(this.config.rootDir, fromRel)
-            const toAbs = resolveUnderRoot(this.config.rootDir, toRel)
-
-            // Rename main path
-            await fsp.rename(fromAbs, toAbs)
-
-            // If this is a .img rename, also handle .part companion.
-            const fromBase = basename(fromAbs)
-            const toBase = basename(toAbs)
-
-            if (fromBase.toLowerCase().endsWith('.img')) {
-                const fromPart = fromAbs.replace(/\.img$/i, '.part')
-                const toPart = toAbs.replace(/\.img$/i, '.part')
-                try {
-                    await fsp.rename(fromPart, toPart)
-                } catch {
-                    // .part may not exist; silently ignore.
-                }
-            }
-
-            this.emitFsUpdated()
-        } catch (err) {
-            this.emitError(`renamePath failed: ${(err as Error).message}`)
-        }
-    }
-
-    public async deletePath(relPath: string): Promise<void> {
-        console.log('[cf-imager] deletePath', { relPath })
-        try {
-            const abs = resolveUnderRoot(this.config.rootDir, relPath)
-
-            // If file looks like an .img, try to remove .part as well.
-            const base = basename(abs)
-            if (base.toLowerCase().endsWith('.img')) {
-                const part = abs.replace(/\.img$/i, '.part')
-                try {
-                    await fsp.unlink(part)
-                } catch {
-                    // ignore
-                }
-            }
-
-            // Best-effort directory vs file removal.
+        if (this.lastDevice) {
+            const lost = this.lastDevice
+            this.lastDevice = null
+            this.log('info', 'CF reader considered lost on stop', {
+                id: lost.id,
+                path: lost.path,
+            })
             try {
-                await fsp.rm(abs, { recursive: true, force: true })
-            } catch {
-                await fsp.unlink(abs)
+                await this.onLost({ id: lost.id })
+            } catch (err) {
+                this.log('warn', 'onLost callback failed during stop', {
+                    err: (err as Error).message,
+                })
             }
+        }
 
-            this.emitFsUpdated()
+        this.log('info', 'CF block discovery stopped')
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Core polling loop                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    private async pollOnce(): Promise<void> {
+        if (!this.running) return
+
+        const dev = await this.findDeviceForPlatform()
+
+        if (!dev && this.lastDevice) {
+            // Was present, now gone.
+            const lost = this.lastDevice
+            this.lastDevice = null
+            this.log('info', 'CF reader lost', { id: lost.id, path: lost.path })
+            await this.safeOnLost(lost.id)
+            return
+        }
+
+        if (!dev && !this.lastDevice) {
+            // Nothing matched this cycle; warn so we can see that we're polling and not finding.
+            this.log('warn', 'CF discovery poll: no matching reader found', {
+                platform: process.platform,
+            })
+            return
+        }
+
+        if (dev && !this.lastDevice) {
+            // Newly present.
+            this.lastDevice = dev
+            this.log('info', 'CF reader detected', {
+                id: dev.id,
+                path: dev.path,
+                vendorId: dev.vendorId ?? null,
+                productId: dev.productId ?? null,
+                serialNumber: dev.serialNumber ?? null,
+            })
+            await this.safeOnPresent(dev)
+            return
+        }
+
+        if (dev && this.lastDevice) {
+            // Still present; if path changed, treat as reattach.
+            if (dev.path !== this.lastDevice.path) {
+                const old = this.lastDevice
+                this.lastDevice = dev
+                this.log('info', 'CF reader reattached with new path', {
+                    oldPath: old.path,
+                    newPath: dev.path,
+                    id: dev.id,
+                })
+                await this.safeOnLost(old.id)
+                await this.safeOnPresent(dev)
+            }
+        }
+    }
+
+    private async safeOnPresent(info: CfBlockDeviceInfo): Promise<void> {
+        try {
+            await this.onPresent(info)
         } catch (err) {
-            this.emitError(`deletePath failed: ${(err as Error).message}`)
-        }
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  Imaging operations (still stubbed, but media-aware)                   */
-    /* ---------------------------------------------------------------------- */
-
-    private async ensureDeviceAndMediaForOp(opName: string): Promise<boolean> {
-        console.log('[cf-imager] ensureDeviceAndMediaForOp', {
-            opName,
-            hasDevice: !!this.device,
-            hasChild: !!this.child,
-            media: this.state.media,
-        })
-
-        if (!this.device) {
-            this.emitError(`${opName}: device not connected`)
-            return false
-        }
-        if (this.child) {
-            this.emitError(`${opName}: operation already in progress`)
-            return false
-        }
-
-        // Re-probe media right before we start the operation so we're aligned
-        // with whatever the OS currently sees.
-        await this.refreshMediaStatus()
-
-        if (this.state.media === 'none') {
-            this.emitError(`${opName}: no CF media detected in reader`)
-            return false
-        }
-
-        if (this.state.media === 'unknown') {
-            this.emitError(`${opName}: CF media status unknown; please refresh or reinsert card`)
-            return false
-        }
-
-        return true
-    }
-
-    public async writeImageToDevice(imageRelPath: string): Promise<void> {
-        console.log('[cf-imager] writeImageToDevice requested', { imageRelPath })
-        if (!await this.ensureDeviceAndMediaForOp('writeImageToDevice')) return
-
-        const now = new Date().toISOString()
-        const op: CfImagerCurrentOp = {
-            kind: 'write',
-            source: imageRelPath,
-            destination: this.device!.path,
-            startedAt: now,
-            progressPct: 0,
-        }
-
-        this.state.phase = 'busy'
-        this.state.currentOp = op
-        this.state.message = undefined
-
-        this.deps.events.publish({
-            kind: 'cf-op-started',
-            at: Date.now(),
-            op,
-        })
-
-        // TODO: replace this stub with spawn(this.config.writeScriptPath, [...])
-        this.deps.events.publish({
-            kind: 'cf-op-error',
-            at: Date.now(),
-            op,
-            error: 'writeImageToDevice not yet implemented',
-        })
-
-        this.state.phase = 'idle'
-        this.state.currentOp = undefined
-        this.state.message = 'Write not yet implemented'
-
-        console.log('[cf-imager] writeImageToDevice stub completed')
-    }
-
-    public async readDeviceToImage(targetDirRel: string, imageName: string): Promise<void> {
-        console.log('[cf-imager] readDeviceToImage requested', { targetDirRel, imageName })
-        if (!await this.ensureDeviceAndMediaForOp('readDeviceToImage')) return
-
-        const safeName = sanitizeName(imageName)
-        if (!safeName) {
-            this.emitError('readDeviceToImage: imageName is required')
-            return
-        }
-
-        const targetDirAbs = resolveUnderRoot(this.config.rootDir, targetDirRel || '.')
-        const imgPathAbs = join(targetDirAbs, `${safeName}.img`)
-
-        const imgRel = this.relFromRoot(imgPathAbs)
-        const now = new Date().toISOString()
-
-        const op: CfImagerCurrentOp = {
-            kind: 'read',
-            source: this.device!.path,
-            destination: imgRel,
-            startedAt: now,
-            progressPct: 0,
-        }
-
-        this.state.phase = 'busy'
-        this.state.currentOp = op
-        this.state.message = undefined
-
-        this.deps.events.publish({
-            kind: 'cf-op-started',
-            at: Date.now(),
-            op,
-        })
-
-        // TODO: replace this stub with spawn(this.config.readScriptPath, [...])
-        this.deps.events.publish({
-            kind: 'cf-op-error',
-            at: Date.now(),
-            op,
-            error: 'readDeviceToImage not yet implemented',
-        })
-
-        this.state.phase = 'idle'
-        this.state.currentOp = undefined
-        this.state.message = 'Read not yet implemented'
-
-        console.log('[cf-imager] readDeviceToImage stub completed')
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  Child-process management (future wiring)                               */
-    /* ---------------------------------------------------------------------- */
-
-    private async cancelCurrentChild(
-        reason: 'explicit-close' | 'device-lost' | 'io-error' | 'unknown'
-    ): Promise<void> {
-        const child = this.child
-        this.child = null
-
-        if (!child) return
-
-        console.log('[cf-imager] cancelCurrentChild', { reason })
-
-        try {
-            child.removeAllListeners()
-            child.kill('SIGTERM')
-        } catch {
-            // ignore
-        }
-
-        if (this.device) {
-            this.deps.events.publish({
-                kind: 'cf-device-disconnected',
-                at: Date.now(),
-                deviceId: this.device.id,
-                reason,
+            this.log('warn', 'onPresent callback failed', {
+                err: (err as Error).message,
             })
+        }
+    }
 
-            this.deps.events.publish({
-                kind: 'cf-media-updated',
-                at: Date.now(),
-                media: 'none',
-                device: undefined,
-                sizeBytes: 0,
-                message: 'CF reader disconnected (operation cancelled)',
+    private async safeOnLost(id: string): Promise<void> {
+        try {
+            await this.onLost({ id })
+        } catch (err) {
+            this.log('warn', 'onLost callback failed', {
+                err: (err as Error).message,
             })
         }
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  Media polling helpers                                                 */
+    /*  Platform-specific discovery                                           */
     /* ---------------------------------------------------------------------- */
 
-    private startMediaPolling(): void {
-        if (this.mediaPollTimer) return
-        // Only poll when we actually have a device; refreshMediaStatus()
-        // already handles the no-device case defensively.
-        this.mediaPollTimer = setInterval(() => {
-            void this.refreshMediaStatus()
-        }, MEDIA_POLL_INTERVAL_MS)
+    private async findDeviceForPlatform(): Promise<CfBlockDeviceInfo | null> {
+        if (!this.cfg.vendorId && !this.cfg.productId && !this.cfg.serialNumber) {
+            // Misconfiguration: nothing to match on.
+            this.log('debug', 'CF discovery disabled: no VID/PID/serial configured', {})
+            return null
+        }
+
+        if (process.platform === 'darwin') {
+            return this.findOnDarwin()
+        }
+
+        if (process.platform === 'linux') {
+            return this.findOnLinux()
+        }
+
+        this.log('debug', 'CF block discovery unsupported platform', {
+            platform: process.platform,
+        })
+        return null
     }
 
-    private stopMediaPolling(): void {
-        if (this.mediaPollTimer) {
-            clearInterval(this.mediaPollTimer)
-            this.mediaPollTimer = null
+    /* ------------------------------- Darwin -------------------------------- */
+
+    private async findOnDarwin(): Promise<CfBlockDeviceInfo | null> {
+        const readerPresent = await this.findDarwinUsbReader()
+        if (!readerPresent) {
+            return null
+        }
+
+        const diskPath = await this.findDarwinUsbMediaDisk()
+        if (!diskPath) {
+            const id = makeDeviceId({
+                kind: 'block.cfreader',
+                path: 'unmounted',
+                vendorId: this.cfg.vendorId,
+                productId: this.cfg.productId,
+            })
+
+            return {
+                id,
+                path: 'unmounted',
+                vendorId: this.cfg.vendorId,
+                productId: this.cfg.productId,
+                serialNumber: this.cfg.serialNumber,
+            }
+        }
+
+        const id = makeDeviceId({
+            kind: 'block.cfreader',
+            path: diskPath,
+            vendorId: this.cfg.vendorId,
+            productId: this.cfg.productId,
+        })
+
+        return {
+            id,
+            path: diskPath,
+            vendorId: this.cfg.vendorId,
+            productId: this.cfg.productId,
+            serialNumber: this.cfg.serialNumber,
         }
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  Media probing (macOS + Linux)                                         */
-    /* ---------------------------------------------------------------------- */
-
-    private async refreshMediaStatus(): Promise<void> {
-        const prev = this.state.media
-
-        if (!this.device) {
-            this.state.media = 'none'
-            if (prev !== this.state.media) {
-                const message = '[cf-imager] media status -> none (no device)'
-                console.log(message)
-                this.deps.events.publish({
-                    kind: 'cf-media-updated',
-                    at: Date.now(),
-                    media: this.state.media,
-                    device: undefined,
-                    sizeBytes: 0,
-                    message: 'No CF reader attached',
-                })
-            }
-            return
+    private async findDarwinUsbReader(): Promise<boolean> {
+        const rawJson = await this.runCommand('system_profiler', ['SPUSBDataType', '-json'])
+        if (!rawJson.trim()) {
+            this.log('debug', 'darwin: system_profiler returned empty output', {})
+            return false
         }
 
-        const devPath = this.device.path
-        if (!devPath || devPath === 'unmounted') {
-            this.state.media = 'none'
-            if (prev !== this.state.media) {
-                const message = '[cf-imager] media status -> none (reader has no media path)'
-                console.log(message)
-                this.deps.events.publish({
-                    kind: 'cf-media-updated',
-                    at: Date.now(),
-                    media: this.state.media,
-                    device: this.device ?? undefined,
-                    sizeBytes: 0,
-                    message: 'CF reader detected, no media path',
-                })
-            }
-            return
-        }
-
-        let sizeBytes = 0
-
+        let parsed: any
         try {
-            if (process.platform === 'linux') {
-                sizeBytes = await this.readLinuxBlockSize(devPath)
-            } else if (process.platform === 'darwin') {
-                sizeBytes = await this.readDarwinBlockSize(devPath)
-            } else {
-                this.state.media = 'unknown'
-                if (prev !== this.state.media) {
-                    const message =
-                        `[cf-imager] media status -> unknown (unsupported platform=${process.platform})`
-                    console.log(message)
-                    this.deps.events.publish({
-                        kind: 'cf-media-updated',
-                        at: Date.now(),
-                        media: this.state.media,
-                        device: this.device ?? undefined,
-                        sizeBytes: undefined,
-                        message: 'CF media status unknown (unsupported platform)',
-                    })
-                }
+            parsed = JSON.parse(rawJson)
+        } catch (err) {
+            this.log('warn', 'darwin: failed to parse system_profiler JSON', {
+                err: (err as Error).message,
+            })
+            return false
+        }
+
+        const roots: any[] = Array.isArray(parsed?.SPUSBDataType)
+            ? parsed.SPUSBDataType
+            : []
+
+        const matchVendor = this.cfg.vendorId
+        const matchProduct = this.cfg.productId
+        const matchSerial = this.cfg.serialNumber
+
+        let found = false
+
+        const visit = (node: any): void => {
+            if (!node || typeof node !== 'object') return
+
+            const vendorIdStr = node.vendor_id ?? node.vendorID
+            const productIdStr = node.product_id ?? node.productID
+            const serial = node.serial_num ? String(node.serial_num) : undefined
+
+            const vid = extractHexId(
+                typeof vendorIdStr === 'string' ? vendorIdStr : String(vendorIdStr ?? '')
+            )
+            const pid = extractHexId(
+                typeof productIdStr === 'string' ? productIdStr : String(productIdStr ?? '')
+            )
+
+            const vidOk = matchVendor ? vid === matchVendor : true
+            const pidOk = matchProduct ? pid === matchProduct : true
+            const serialOk = matchSerial ? serial === matchSerial : true
+
+            if (vidOk && pidOk && serialOk) {
+                found = true
                 return
             }
-        } catch (err) {
-            this.state.media = 'unknown'
-            if (prev !== this.state.media) {
-                const message =
-                    `[cf-imager] media status -> unknown (probe failed err="${(err as Error).message}")`
-                console.log(message)
-                this.deps.events.publish({
-                    kind: 'cf-media-updated',
-                    at: Date.now(),
-                    media: this.state.media,
-                    device: this.device ?? undefined,
-                    sizeBytes: undefined,
-                    message: 'CF media status unknown (probe failed)',
-                })
-            }
-            return
+
+            const kids: any[] = []
+            if (Array.isArray(node._items)) kids.push(...node._items)
+            if (Array.isArray(node.hub_port)) kids.push(...node.hub_port)
+            if (Array.isArray(node.children)) kids.push(...node.children)
+            for (const child of kids) visit(child)
         }
 
-        const next = sizeBytes > 0 ? 'present' : 'none'
-        this.state.media = next
-
-        if (prev !== next) {
-            let logMsg: string
-            let uiMsg: string
-
-            if (next === 'present') {
-                logMsg =
-                    `[cf-imager] media status -> present sizeBytes=${sizeBytes} devicePath=${devPath}`
-                uiMsg = 'CF card detected'
-            } else if (prev === 'present' && next === 'none') {
-                logMsg = '[cf-imager] media status -> none (media removed)'
-                uiMsg = 'CF card removed from reader'
-            } else {
-                logMsg = `[cf-imager] media status -> ${next}`
-                uiMsg = next === 'none'
-                    ? 'No CF card detected in reader'
-                    : 'CF media status changed'
-            }
-
-            console.log(logMsg)
-
-            this.deps.events.publish({
-                kind: 'cf-media-updated',
-                at: Date.now(),
-                media: this.state.media,
-                device: this.device ?? undefined,
-                sizeBytes,
-                message: uiMsg,
-            })
+        for (const root of roots) {
+            if (found) break
+            visit(root)
         }
+
+        return found
     }
 
-    /**
-     * Linux: use lsblk to get SIZE (bytes) for the given block device.
-     */
-    private async readLinuxBlockSize(devPath: string): Promise<number> {
-        const out = await this.runCommand('lsblk', ['-bno', 'SIZE', devPath])
-        const trimmed = out.trim()
-        if (!trimmed) return 0
-        const n = Number(trimmed)
-        return Number.isFinite(n) && n > 0 ? n : 0
-    }
+    private async findDarwinUsbMediaDisk(): Promise<string | null> {
+        const out = await this.runShell('diskutil list -plist | plutil -convert json -o - -')
+        if (!out.trim()) {
+            this.log('debug', 'darwin: diskutil list -plist returned empty output', {})
+            return null
+        }
 
-    /**
-     * macOS: use diskutil + plutil to get a JSON plist and read TotalSize.
-     *
-     * NOTE: no logging here; all logging is done at the state-transition level
-     * in refreshMediaStatus().
-     */
-    private async readDarwinBlockSize(devPath: string): Promise<number> {
-        const script =
-            `diskutil info -plist "${devPath}" ` +
-            `| plutil -convert json -o - -`
-
-        const out = await this.runShell(script)
-        if (!out.trim()) return 0
-
+        let parsed: any
         try {
-            const parsed = JSON.parse(out) as any
-            const sz =
-                typeof parsed?.TotalSize === 'number'
-                    ? parsed.TotalSize
-                    : typeof parsed?.Size === 'number'
-                    ? parsed.Size
-                    : 0
-            return typeof sz === 'number' && sz > 0 ? sz : 0
-        } catch {
-            // Parsing failed; treat as "no media".
-            return 0
+            parsed = JSON.parse(out)
+        } catch (err) {
+            this.log('warn', 'darwin: failed to parse diskutil list JSON', {
+                err: (err as Error).message,
+            })
+            return null
+        }
+
+        const disks: any[] = Array.isArray(parsed?.AllDisksAndPartitions)
+            ? parsed.AllDisksAndPartitions
+            : []
+
+        let bestPath: string | null = null
+
+        for (const disk of disks) {
+            if (!disk || typeof disk !== 'object') continue
+
+            const ident = typeof disk.DeviceIdentifier === 'string' ? disk.DeviceIdentifier : undefined
+            if (!ident) continue
+
+            const infoJson = await this.safeDiskutilInfo(ident)
+            if (!infoJson) continue
+
+            let info: any
+            try {
+                info = JSON.parse(infoJson)
+            } catch (err) {
+                this.log('warn', 'darwin: failed to parse diskutil info JSON', {
+                    identifier: ident,
+                    err: (err as Error).message,
+                })
+                continue
+            }
+
+            const busProtocol = typeof info.BusProtocol === 'string' ? info.BusProtocol : undefined
+            const wholeDisk = info.WholeDisk === true
+            const external =
+                info.RemovableMediaOrExternalDevice === true || info.Internal === false
+            const isUsb = busProtocol === 'USB'
+
+            const node = typeof info.DeviceNode === 'string' ? info.DeviceNode : `/dev/${ident}`
+
+            if (isUsb && wholeDisk && external) {
+                bestPath = node
+                break
+            }
+        }
+
+        if (!bestPath) {
+            return null
+        }
+
+        return bestPath
+    }
+
+    /* ------------------------------- Linux --------------------------------- */
+
+    /**
+     * Linux: two-phase, mirroring Darwin semantics:
+     *
+     *   1) Use /sys/bus/usb/devices to locate the USB reader by VID/PID/serial.
+     *   2) Walk /sys/block/* and pick block devices whose `/device` realpath
+     *      is under that USB device's sysfs path, **then** filter by size:
+     *         - size == 0 → slot exists but no media
+     *         - size > 0  → media present in that slot
+     *
+     * If the reader exists but there is no such block device with size > 0,
+     * we treat this as "reader present, no media" and surface an "unmounted"
+     * synthetic path.
+     */
+    private async findOnLinux(): Promise<CfBlockDeviceInfo | null> {
+        const reader = await this.findLinuxUsbReader()
+        if (!reader) {
+            this.log('debug', 'linux: USB reader not found by VID/PID/serial', {
+                vendorId: this.cfg.vendorId ?? null,
+                productId: this.cfg.productId ?? null,
+                serialNumber: this.cfg.serialNumber ?? null,
+            })
+            return null
+        }
+
+        const blockPath = await this.findLinuxUsbMediaDisk(reader.sysPath)
+
+        if (!blockPath) {
+            // Reader present but no media. Mirror Darwin: synthetic "unmounted" path.
+            const id = makeDeviceId({
+                kind: 'block.cfreader',
+                path: 'unmounted',
+                vendorId: this.cfg.vendorId,
+                productId: this.cfg.productId,
+            })
+
+            this.log('debug', 'linux: USB reader present but no block device with media under it', {
+                sysPath: reader.sysPath,
+                serial: reader.serial ?? null,
+                id,
+            })
+
+            return {
+                id,
+                path: 'unmounted',
+                vendorId: this.cfg.vendorId,
+                productId: this.cfg.productId,
+                serialNumber: reader.serial ?? this.cfg.serialNumber,
+            }
+        }
+
+        const id = makeDeviceId({
+            kind: 'block.cfreader',
+            path: blockPath,
+            vendorId: this.cfg.vendorId,
+            productId: this.cfg.productId,
+        })
+
+        this.log('info', 'linux: selected CF reader block device (via sysfs + size)', {
+            path: blockPath,
+            sysPath: reader.sysPath,
+            serial: reader.serial ?? null,
+            vendorId: this.cfg.vendorId ?? null,
+            productId: this.cfg.productId ?? null,
+        })
+
+        return {
+            id,
+            path: blockPath,
+            vendorId: this.cfg.vendorId,
+            productId: this.cfg.productId,
+            serialNumber: reader.serial ?? this.cfg.serialNumber,
         }
     }
 
-    /**
-     * Run a single command and capture stdout as UTF-8 text.
-     * Used for lsblk-style calls (no shell, no pipes).
-     *
-     * NOTE: no logging here; failures are surfaced via thrown errors.
-     */
+    private async findLinuxUsbReader(): Promise<{ sysPath: string; serial?: string } | null> {
+        const script = `
+set -e
+for dev in /sys/bus/usb/devices/*; do
+  if [ -f "$dev/idVendor" ] && [ -f "$dev/idProduct" ]; then
+    vid=$(cat "$dev/idVendor" 2>/dev/null || echo "")
+    pid=$(cat "$dev/idProduct" 2>/dev/null || echo "")
+    serial=""
+    if [ -f "$dev/serial" ]; then
+      serial=$(cat "$dev/serial" 2>/dev/null || echo "")
+    fi
+    echo "$dev $vid $pid $serial"
+  fi
+done
+`.trim()
+
+        let out: string
+        try {
+            out = await this.runShell(script)
+        } catch (err) {
+            this.log('warn', 'linux: failed to enumerate USB devices from sysfs', {
+                err: (err as Error).message,
+            })
+            return null
+        }
+
+        if (!out.trim()) {
+            this.log('debug', 'linux: no USB devices found under /sys/bus/usb/devices', {})
+            return null
+        }
+
+        const matchVendor = this.cfg.vendorId
+        const matchProduct = this.cfg.productId
+        const matchSerial = this.cfg.serialNumber
+
+        const lines = out.split('\n').map((l) => l.trim()).filter(Boolean)
+
+        for (const line of lines) {
+            const parts = line.split(' ').filter(Boolean)
+            if (parts.length < 3) continue
+
+            const sysPath = parts[0]
+            const vidRaw = parts[1]
+            const pidRaw = parts[2]
+            const serialRaw = parts.slice(3).join(' ') || undefined
+
+            const vid = normalizeHex(vidRaw)
+            const pid = normalizeHex(pidRaw)
+            const serial = serialRaw ? String(serialRaw) : undefined
+
+            const vidOk = matchVendor ? vid === matchVendor : true
+            const pidOk = matchProduct ? pid === matchProduct : true
+            const serialOk = matchSerial ? serial === matchSerial : true
+
+            if (vidOk && pidOk && serialOk) {
+                this.log('debug', 'linux: matched CF USB reader in sysfs', {
+                    sysPath,
+                    vid,
+                    pid,
+                    serial: serial ?? null,
+                })
+                return { sysPath, serial }
+            }
+        }
+
+        return null
+    }
+
+    private async findLinuxUsbMediaDisk(readerSysPath: string): Promise<string | null> {
+        const script = `
+set -e
+reader="$(readlink -f "${readerSysPath}")"
+if [ ! -d "$reader" ]; then
+  exit 0
+fi
+# Emit: "<devname> <size>"
+for blk in /sys/block/*; do
+  [ -d "$blk" ] || continue
+  devname="$(basename "$blk")"
+  devlink="$(readlink -f "$blk/device" 2>/dev/null || echo "")"
+  if [ -z "$devlink" ]; then
+    continue
+  fi
+  case "$devlink" in
+    "$reader"/*)
+      sizeFile="$blk/size"
+      size="0"
+      if [ -f "$sizeFile" ]; then
+        size=$(cat "$sizeFile" 2>/dev/null || echo "0")
+      fi
+      echo "$devname $size"
+    ;;
+  esac
+done
+`.trim()
+
+        let out: string
+        try {
+            out = await this.runShell(script)
+        } catch (err) {
+            this.log('warn', 'linux: failed to map USB reader to block devices via sysfs', {
+                readerSysPath,
+                err: (err as Error).message,
+            })
+            return null
+        }
+
+        const lines = out.split('\n').map((l) => l.trim()).filter(Boolean)
+        if (lines.length === 0) {
+            // No block devices at all under this reader (very odd, but treat as no media)
+            this.log('debug', 'linux: no block devices under reader sysfs path', {
+                readerSysPath,
+            })
+            return null
+        }
+
+        const candidates: { dev: string; size: number }[] = []
+        for (const line of lines) {
+            const [dev, sizeStr] = line.split(' ').filter(Boolean)
+            if (!dev) continue
+            const size = Number.parseInt(sizeStr ?? '0', 10)
+            if (Number.isNaN(size)) continue
+            candidates.push({ dev, size })
+        }
+
+        this.log('debug', 'linux: block device candidates under reader', {
+            readerSysPath,
+            candidates: candidates.map((c) => ({ dev: c.dev, size: c.size })),
+        })
+
+        if (candidates.length === 0) {
+            return null
+        }
+
+        const withMedia = candidates.filter((c) => c.size > 0)
+
+        if (withMedia.length === 0) {
+            this.log('debug', 'linux: block devices under reader but all report size 0 (no media)', {
+                readerSysPath,
+                candidates: candidates.map((c) => ({ dev: c.dev, size: c.size })),
+            })
+            return null
+        }
+
+        if (withMedia.length > 1) {
+            this.log(
+                'debug',
+                'linux: multiple block devices with media under CF reader, taking first',
+                {
+                    readerSysPath,
+                    candidates: withMedia.map((c) => ({ dev: c.dev, size: c.size })),
+                }
+            )
+        }
+
+        const chosen = withMedia[0]
+        const path = `/dev/${chosen.dev}`
+
+        return path
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Small command helpers                                                 */
+    /* ---------------------------------------------------------------------- */
+
     private runCommand(cmd: string, args: string[]): Promise<string> {
         return new Promise((resolve, reject) => {
-            const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+            const child = spawn(cmd, args, {
+                stdio: ['ignore', 'pipe', 'pipe'],
+            })
 
             let stdout = ''
             let stderr = ''
@@ -664,11 +676,6 @@ export class CfBlockDiscoveryService {
         })
     }
 
-    /**
-     * Run a small shell script (used on macOS for piped diskutil/plutil).
-     *
-     * NOTE: no logging here; failures are surfaced via thrown errors.
-     */
     private runShell(script: string): Promise<string> {
         return new Promise((resolve, reject) => {
             const child = spawn('sh', ['-c', script], {
@@ -699,54 +706,19 @@ export class CfBlockDiscoveryService {
         })
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  Internal helpers                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    private relCwd(): string {
-        return this.relFromRoot(this.cwdAbs)
-    }
-
-    private relFromRoot(absPath: string): string {
-        const fs = listDirectoryState(this.config.rootDir, absPath, this.config.maxEntriesPerDir)
-        return fs.cwd
-    }
-
-    private emitFsUpdated(): void {
-        const fs = listDirectoryState(
-            this.config.rootDir,
-            this.cwdAbs,
-            this.config.maxEntriesPerDir
-        )
-        this.state.fs = fs
-
-        this.deps.events.publish({
-            kind: 'cf-fs-updated',
-            at: Date.now(),
-            fs,
-        })
-    }
-
-    private emitError(msg: string): void {
-        console.error(
-            `[cf-imager] emitError msg="${msg}" hasDevice=${this.device ? 'true' : 'false'}`
-        )
-
-        if (this.device) {
-            this.state.phase = 'error'
-        } else {
-            this.state.phase = 'disconnected'
-            this.state.media = 'none'
+    private async safeDiskutilInfo(identifier: string): Promise<string | null> {
+        try {
+            const script =
+                `diskutil info -plist "${identifier}" ` +
+                `| plutil -convert json -o - -`
+            return await this.runShell(script)
+        } catch (err) {
+            this.log('debug', 'darwin: diskutil info failed', {
+                identifier,
+                err: (err as Error).message,
+            })
+            return null
         }
-
-        this.state.lastError = msg
-        this.state.message = msg
-
-        this.deps.events.publish({
-            kind: 'cf-error',
-            at: Date.now(),
-            error: msg,
-        })
     }
 }
 
@@ -754,13 +726,24 @@ export class CfBlockDiscoveryService {
 /*  Small helpers                                                             */
 /* -------------------------------------------------------------------------- */
 
-function sanitizeName(name: string | undefined): string {
-    if (!name) return ''
-    const trimmed = name.trim()
-    if (!trimmed) return ''
+function normalizeHex(v?: string): string | undefined {
+    if (!v) return undefined
+    return v.toString().replace(/^0x/i, '').toLowerCase()
+}
 
-    // For v1: disallow path separators and "..".
-    if (trimmed.includes('/') || trimmed.includes('\\')) return ''
-    if (trimmed === '.' || trimmed === '..') return ''
-    return trimmed
+/** Extract 0x1234 → 1234 from system_profiler strings. */
+function extractHexId(s: string): string | undefined {
+    const m = /0x([0-9a-fA-F]+)/.exec(s)
+    return m ? m[1].toLowerCase() : undefined
+}
+
+function makeDeviceId(args: {
+    kind: string
+    path: string
+    vendorId?: string
+    productId?: string
+}): string {
+    const vid = args.vendorId ?? 'unknown'
+    const pid = args.productId ?? 'unknown'
+    return `usb:${vid}:${pid}:${args.kind}:${args.path}`
 }
