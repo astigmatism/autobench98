@@ -36,7 +36,7 @@ interface CfImagerServiceDeps {
 // This is intentionally modest to avoid log spam but keep UI responsive.
 const MEDIA_POLL_INTERVAL_MS = 3000
 
-export class CfImagerService {
+export class CfBlockDiscoveryService {
     private readonly config: CfImagerConfig
     private readonly deps: CfImagerServiceDeps
 
