@@ -174,34 +174,25 @@ export class CfBlockDiscoveryService {
         }
 
         if (dev && this.lastDevice) {
-            // Still present; if path changed, treat as reattach.
+            // Still present; if path changed, treat this as a *media path update*,
+            // not a real device disconnect/reconnect.
             if (dev.path !== this.lastDevice.path) {
                 const old = this.lastDevice
                 this.lastDevice = dev
+                this.log('info', 'CF reader media path updated', {
+                    oldPath: old.path,
+                    newPath: dev.path,
+                    id: dev.id,
+                })
 
-                if (dev.path === 'unmounted') {
-                    this.log('info', 'CF media removed; reader now has no media path', {
-                    oldPath: old.path,
-                    newPath: dev.path,
-                    id: dev.id,
-                    })
-                } else if (old.path === 'unmounted') {
-                    this.log('info', 'CF media inserted; reader now has media path', {
-                    oldPath: old.path,
-                    newPath: dev.path,
-                    id: dev.id,
-                    })
-                } else {
-                    this.log('info', 'CF reader reattached with new path', {
-                    oldPath: old.path,
-                    newPath: dev.path,
-                    id: dev.id,
-                    })
-                }
-
-                await this.safeOnLost(old.id)
+                // Important: do NOT call onLost here. The reader is still attached;
+                // only the media / block path changed. We just notify listeners that
+                // the device is "identified" with its new path.
                 await this.safeOnPresent(dev)
-                }
+            }
+
+            // If dev.path is the same as lastDevice.path, nothing to do.
+            return
         }
     }
 
