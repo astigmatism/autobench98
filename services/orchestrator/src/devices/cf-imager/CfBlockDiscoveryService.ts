@@ -178,14 +178,30 @@ export class CfBlockDiscoveryService {
             if (dev.path !== this.lastDevice.path) {
                 const old = this.lastDevice
                 this.lastDevice = dev
-                this.log('info', 'CF reader reattached with new path', {
+
+                if (dev.path === 'unmounted') {
+                    this.log('info', 'CF media removed; reader now has no media path', {
                     oldPath: old.path,
                     newPath: dev.path,
                     id: dev.id,
-                })
+                    })
+                } else if (old.path === 'unmounted') {
+                    this.log('info', 'CF media inserted; reader now has media path', {
+                    oldPath: old.path,
+                    newPath: dev.path,
+                    id: dev.id,
+                    })
+                } else {
+                    this.log('info', 'CF reader reattached with new path', {
+                    oldPath: old.path,
+                    newPath: dev.path,
+                    id: dev.id,
+                    })
+                }
+
                 await this.safeOnLost(old.id)
                 await this.safeOnPresent(dev)
-            }
+                }
         }
     }
 
