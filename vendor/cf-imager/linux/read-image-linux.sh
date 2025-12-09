@@ -182,31 +182,29 @@ emit_progress_from_line() {
 
 # ---------------------------------------------------------------------------
 # Run dd with status=progress.
-# Use a FIFO to capture stderr, normalize '\r' to '\n', and emit DD_STATUS
-# + PROGRESS to stdout while dd runs.
+# Instead of writing stderr to a file and tailing it, we:
+#   - Merge stderr into stdout (2>&1)
+#   - Turn carriage returns into newlines (tr '\r' '\n')
+#   - Stream each line as DD_STATUS + PROGRESS in real time.
 # ---------------------------------------------------------------------------
 
-pipe_err="$(mktemp -u)"
-mkfifo "$pipe_err"
-trap 'rm -f "$pipe_err"' EXIT
+dd_rc=0
 
-# Reader: converts carriage-return updates to newline-terminated lines,
-# and emits DD_STATUS + PROGRESS.
-(
-  tr '\r' '\n' < "$pipe_err" | while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    echo "DD_STATUS $line"
-    emit_progress_from_line "$line"
-  done
-) &
-watcher_pid=$!
+# Temporarily disable "exit on error" while we run the pipeline
+set +e
 
-# Writer: dd sends progress to the FIFO via stderr.
-dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync 2> "$pipe_err"
-dd_rc=$?
+dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync 2>&1 \
+  | tr '\r' '\n' \
+  | while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      echo "DD_STATUS $line"
+      emit_progress_from_line "$line"
+    done
 
-# Wait for watcher to drain remaining lines (pipe closes when dd exits).
-wait "$watcher_pid" || true
+dd_rc=${PIPESTATUS[0]}
+
+# Re-enable strict mode
+set -e
 
 if [[ $dd_rc -ne 0 ]]; then
   log "ERROR: dd failed with exit code $dd_rc"
