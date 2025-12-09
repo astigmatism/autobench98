@@ -1,15 +1,17 @@
 <template>
     <div class="pm-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
-        <!-- Hover gear button (toggles advanced view) -->
-        <button
-            class="gear-btn"
-            :aria-expanded="showAdvanced ? 'true' : 'false'"
-            aria-controls="pm-advanced-panel"
-            title="Show recording controls & stats"
-            @click="showAdvanced = !showAdvanced"
-        >
-            ⚙️
-        </button>
+        <!-- Hotspot region: only hovering here shows the advanced view button -->
+        <div class="pm-advanced-hotspot">
+            <button
+                class="gear-btn"
+                :aria-expanded="showAdvanced ? 'true' : 'false'"
+                aria-controls="pm-advanced-panel"
+                title="Show recording controls & stats"
+                @click="showAdvanced = !showAdvanced"
+            >
+                ⚙️
+            </button>
+        </div>
 
         <!-- Single main panel (scrollable in advanced mode) -->
         <div class="panel current-panel" :class="{ 'panel--scrollable': showAdvanced }">
@@ -302,7 +304,7 @@ function relLuminance(hex: string): number {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 function contrastRatio(l1: number, l2: number): number {
-    const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, l1]
+    const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, 1]
     return (L1 + 0.05) / (L2 + 0.05)
 }
 
@@ -795,7 +797,19 @@ const showAdvanced = ref(false)
     color: var(--pane-fg);
 }
 
-/* Gear button (hover-only visibility) */
+/* Hotspot area for advanced controls button (top-right).
+   Only hovering this region will reveal the button. */
+.pm-advanced-hotspot {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 3.2rem;
+    height: 2.4rem;
+    pointer-events: auto;
+    z-index: 30;
+}
+
+/* Gear button (visible only while hotspot is hovered) */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -809,13 +823,23 @@ const showAdvanced = ref(false)
     color: #eee;
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease,
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        opacity 120ms ease,
+        background 120ms ease,
+        border-color 120ms ease,
         transform 60ms ease;
-    z-index: 2;
+    z-index: 31;
 }
-.pm-pane:hover .gear-btn {
+
+/* Only show button while hotspot is hovered */
+.pm-advanced-hotspot:hover .gear-btn {
     opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
 }
+
 .gear-btn:hover {
     background: #1a1a1a;
     transform: translateY(-1px);

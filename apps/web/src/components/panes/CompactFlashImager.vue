@@ -1,15 +1,17 @@
 <template>
   <div class="cf-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
-    <!-- Hover gear button -->
-    <button
-      class="gear-btn"
-      :aria-expanded="showAdvanced ? 'true' : 'false'"
-      aria-controls="cf-advanced-panel"
-      title="Show CF reader details"
-      @click="showAdvanced = !showAdvanced"
-    >
-      ⚙️
-    </button>
+    <!-- Hotspot region: only hovering here shows the advanced settings button -->
+    <div class="cf-advanced-hotspot">
+      <button
+        class="gear-btn"
+        :aria-expanded="showAdvanced ? 'true' : 'false'"
+        aria-controls="cf-advanced-panel"
+        title="Show CF reader details"
+        @click="showAdvanced = !showAdvanced"
+      >
+        ⚙️
+      </button>
+    </div>
 
     <div class="panel">
       <!-- Header: title (left) + status badge (right) -->
@@ -28,235 +30,310 @@
         </span>
       </div>
 
-      <!-- Advanced device/media details (hidden by default) -->
-      <transition name="slide-fade">
-        <div
-          v-show="showAdvanced"
-          id="cf-advanced-panel"
-          class="advanced-panel"
-        >
-          <div class="advanced-row">
-            <span class="label">Device</span>
-            <span class="value" v-if="view.device">
-              {{ view.device.path }}
-            </span>
-            <span class="value dim" v-else>
-              No CF reader detected
-            </span>
-          </div>
-
-          <div class="advanced-row" v-if="view.device">
-            <span class="label">USB IDs</span>
-            <span class="value">
-              <span v-if="view.device.vendorId">VID {{ view.device.vendorId }}</span>
-              <span v-if="view.device.productId">
-                <span v-if="view.device.vendorId">&nbsp;•&nbsp;</span>
-                PID {{ view.device.productId }}
-              </span>
-              <span
-                v-if="!view.device.vendorId && !view.device.productId"
-                class="dim"
-              >
-                (not reported)
-              </span>
-            </span>
-          </div>
-
-          <div class="advanced-row">
-            <span class="label">Media</span>
-            <span class="value">
-              <template v-if="view.media === 'present'">
-                Card present
-              </template>
-              <template v-else-if="view.media === 'none'">
-                No card inserted
-              </template>
-              <template v-else-if="view.media === 'unknown'">
-                Checking / probe in progress
-              </template>
-              <template v-else>
-                Unknown
-              </template>
-            </span>
-          </div>
-
+      <!-- Body (everything below the header, including modal overlay) -->
+      <div class="panel-body">
+        <!-- Advanced device/media details (hidden by default) -->
+        <transition name="slide-fade">
           <div
-            class="advanced-row"
-            v-if="view.message"
+            v-show="showAdvanced"
+            id="cf-advanced-panel"
+            class="advanced-panel"
           >
-            <span class="label">Status</span>
-            <span class="value">{{ view.message }}</span>
-          </div>
-        </div>
-      </transition>
+            <div class="advanced-row">
+              <span class="label">Device</span>
+              <span class="value" v-if="view.device">
+                {{ view.device.path }}
+              </span>
+              <span class="value dim" v-else>
+                No CF reader detected
+              </span>
+            </div>
 
-      <!-- Current operation (if any) -->
-      <div v-if="view.currentOp" class="op-panel">
-        <div class="op-head">
-          <span class="op-kind">
-            <span class="dot dot-small"></span>
-            {{ opLabel }}
-          </span>
-          <span class="op-paths">
-            {{ view.currentOp.source }} → {{ view.currentOp.destination }}
-          </span>
-        </div>
+            <div class="advanced-row" v-if="view.device">
+              <span class="label">USB IDs</span>
+              <span class="value">
+                <span v-if="view.device.vendorId">VID {{ view.device.vendorId }}</span>
+                <span v-if="view.device.productId">
+                  <span v-if="view.device.vendorId">&nbsp;•&nbsp;</span>
+                  PID {{ view.device.productId }}
+                </span>
+                <span
+                  v-if="!view.device.vendorId && !view.device.productId"
+                  class="dim"
+                >
+                  (not reported)
+                </span>
+              </span>
+            </div>
 
-        <div class="op-progress-row">
-          <div class="op-progress-bar">
+            <div class="advanced-row">
+              <span class="label">Media</span>
+              <span class="value">
+                <template v-if="view.media === 'present'">
+                  Card present
+                </template>
+                <template v-else-if="view.media === 'none'">
+                  No card inserted
+                </template>
+                <template v-else-if="view.media === 'unknown'">
+                  Checking / probe in progress
+                </template>
+                <template v-else>
+                  Unknown
+                </template>
+              </span>
+            </div>
+
             <div
-              class="op-progress-fill"
-              :style="{ width: progressPctDisplay + '%' }"
-            ></div>
+              class="advanced-row"
+              v-if="view.message"
+            >
+              <span class="label">Status</span>
+              <span class="value">{{ view.message }}</span>
+            </div>
           </div>
-          <div class="op-progress-meta">
-            <span class="pct">{{ progressPctDisplay.toFixed(1) }}%</span>
-            <span v-if="bytesDisplay" class="bytes">
-              {{ bytesDisplay }}
+        </transition>
+
+        <!-- Current operation (if any) -->
+        <div v-if="view.currentOp" class="op-panel">
+          <div class="op-head">
+            <span class="op-kind">
+              <span class="dot dot-small"></span>
+              {{ opLabel }}
+            </span>
+            <span class="op-paths">
+              {{ view.currentOp.source }} → {{ view.currentOp.destination }}
             </span>
           </div>
+
+          <div class="op-progress-row">
+            <div class="op-progress-bar">
+              <div
+                class="op-progress-fill"
+                :style="{ width: progressPctDisplay + '%' }"
+              ></div>
+            </div>
+            <div class="op-progress-meta">
+              <span class="pct">{{ progressPctDisplay.toFixed(1) }}%</span>
+              <span v-if="bytesDisplay" class="bytes">
+                {{ bytesDisplay }}
+              </span>
+            </div>
+          </div>
+
+          <div v-if="view.currentOp.message" class="op-message">
+            {{ view.currentOp.message }}
+          </div>
         </div>
 
-        <div v-if="view.currentOp.message" class="op-message">
-          {{ view.currentOp.message }}
-        </div>
-      </div>
-
-      <!-- Last error (if any and not already shown in currentOp) -->
-      <div v-if="view.lastError && !view.currentOp" class="error-banner">
-        ⚠️ {{ view.lastError }}
-      </div>
-
-      <!-- File system toolbar (outside the browsing window) -->
-      <div class="fs-toolbar">
-        <div class="fs-toolbar-left">
-          <button
-            class="btn"
-            type="button"
-            :disabled="!canGoUp"
-            @click="onGoUpClick"
-            title="Go to parent folder"
-          >
-            Parent
-          </button>
-
-          <label class="fs-path">
-            <span class="label">Path:</span>
-            <input
-              class="fs-path-input"
-              type="text"
-              v-model="pathInput"
-              spellcheck="false"
-            />
-          </label>
-
-          <button
-            class="btn"
-            type="button"
-            @click="onNewFolderClick"
-            title="Create new folder (not yet wired)"
-          >
-            New Folder
-          </button>
-
-          <button
-            class="btn"
-            type="button"
-            :disabled="!canRename"
-            @click="onRenameClick"
-            title="Rename selected item (not yet wired)"
-          >
-            Rename
-          </button>
-
-          <button
-            class="btn"
-            type="button"
-            :disabled="!canDelete"
-            @click="onDeleteClick"
-            title="Delete selected item(s) (not yet wired)"
-          >
-            Delete
-          </button>
+        <!-- Last error (if any and not already shown in currentOp) -->
+        <div v-if="view.lastError && !view.currentOp" class="error-banner">
+          ⚠️ {{ view.lastError }}
         </div>
 
-        <!-- Right side currently unused; kept for layout symmetry -->
-        <div class="fs-toolbar-right"></div>
-      </div>
+        <!-- File system toolbar (outside the browsing window) -->
+        <div class="fs-toolbar">
+          <div class="fs-toolbar-left">
+            <button
+              class="btn"
+              type="button"
+              :disabled="!canGoUp"
+              @click="onGoUpClick"
+              title="Go to parent folder"
+            >
+              Parent
+            </button>
 
-      <!-- File system browser window -->
-      <div class="fs-panel">
-        <div v-if="sortedEntries.length === 0" class="fs-empty">
-          No entries in this directory.
+            <label class="fs-path">
+              <span class="label">Path:</span>
+              <input
+                class="fs-path-input"
+                type="text"
+                v-model="pathInput"
+                spellcheck="false"
+              />
+            </label>
+
+            <button
+              class="btn"
+              type="button"
+              @click="onNewFolderClick"
+              title="Create new folder"
+            >
+              New Folder
+            </button>
+
+            <button
+              class="btn"
+              type="button"
+              :disabled="!canRename"
+              @click="onRenameClick"
+              title="Rename selected item"
+            >
+              Rename
+            </button>
+
+            <button
+              class="btn"
+              type="button"
+              :disabled="!canDelete"
+              @click="onDeleteClick"
+              title="Delete selected item(s)"
+            >
+              Delete
+            </button>
+          </div>
+
+          <!-- Right side currently unused; kept for layout symmetry -->
+          <div class="fs-toolbar-right"></div>
         </div>
 
-        <div v-else class="fs-list">
+        <!-- File system browser window -->
+        <div class="fs-panel">
+          <div v-if="sortedEntries.length === 0" class="fs-empty">
+            No entries in this directory.
+          </div>
+
+          <div v-else class="fs-list">
+            <div
+              v-for="entry in sortedEntries"
+              :key="entryKey(entry)"
+              class="fs-row"
+              :data-kind="entry.kind"
+              :data-selected="isSelected(entry) ? 'true' : 'false'"
+              @click.stop.prevent="onEntryClick($event, entry)"
+              @dblclick.stop.prevent="onEntryDblClick(entry)"
+            >
+              <span class="name">
+                <span class="icon">{{ entry.kind === 'dir' ? '📁' : '📄' }}</span>
+                {{ entry.name }}
+              </span>
+              <span class="meta">
+                <span v-if="entry.sizeBytes != null" class="size">
+                  {{ formatSize(entry.sizeBytes) }}
+                </span>
+                <span v-if="entry.modifiedAt" class="time">
+                  {{ formatDate(entry.modifiedAt) }}
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <!-- Shim overlay while FS is busy (blocks clicks, dims content) -->
+          <div v-if="fsBusy" class="fs-shim">
+            <div class="fs-shim-inner">
+              <span class="spinner shim-spinner"></span>
+              <span class="fs-shim-text">Refreshing…</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer: metadata (left) + actions (right) -->
+        <div class="fs-footer">
+          <div class="fs-meta-text">
+            {{ sortedEntries.length }} item<span v-if="sortedEntries.length !== 1">s</span>
+          </div>
+
+          <div class="fs-actions">
+            <button
+              class="btn"
+              type="button"
+              :disabled="!canReadImage"
+              @click="onReadImageClick"
+              title="Read image from CF media (not yet wired)"
+            >
+              Read image from media
+            </button>
+            <button
+              class="btn"
+              type="button"
+              :disabled="!canWriteImage"
+              @click="onWriteImageClick"
+              title="Write image to CF media (not yet wired)"
+            >
+              Write image to media
+            </button>
+          </div>
+        </div>
+
+        <!-- General-purpose modal dialog overlay -->
+        <transition name="fade-modal">
           <div
-            v-for="entry in sortedEntries"
-            :key="entryKey(entry)"
-            class="fs-row"
-            :data-kind="entry.kind"
-            :data-selected="isSelected(entry) ? 'true' : 'false'"
-            @click.stop.prevent="onEntryClick($event, entry)"
-            @dblclick.stop.prevent="onEntryDblClick(entry)"
+            v-if="modalVisible"
+            class="cf-modal-backdrop"
           >
-            <span class="name">
-              <span class="icon">{{ entry.kind === 'dir' ? '📁' : '📄' }}</span>
-              {{ entry.name }}
-            </span>
-            <span class="meta">
-              <span v-if="entry.sizeBytes != null" class="size">
-                {{ formatSize(entry.sizeBytes) }}
-              </span>
-              <span v-if="entry.modifiedAt" class="time">
-                {{ formatDate(entry.modifiedAt) }}
-              </span>
-            </span>
+            <div
+              class="cf-modal"
+              role="dialog"
+              :aria-label="modalTitle || 'Dialog'"
+            >
+              <button
+                class="cf-modal-close"
+                type="button"
+                @click="closeModal"
+                aria-label="Close dialog"
+              >
+                ×
+              </button>
+
+              <h3 class="cf-modal-title">
+                {{ modalTitle || 'Action' }}
+              </h3>
+
+              <div class="cf-modal-body">
+                <!-- Message-only mode (e.g., delete confirmation) -->
+                <p
+                  v-if="!modalHasInput && modalMessage"
+                  class="cf-modal-message"
+                >
+                  {{ modalMessage }}
+                </p>
+
+                <!-- Input mode (new folder / rename) -->
+                <label
+                  v-if="modalHasInput"
+                  class="cf-modal-field"
+                >
+                  <span class="cf-modal-field-label">
+                    {{ modalMessage || 'Enter a value.' }}
+                  </span>
+                  <input
+                    class="cf-modal-input"
+                    type="text"
+                    v-model="modalInput"
+                    spellcheck="false"
+                    ref="modalInputRef"
+                  />
+                </label>
+              </div>
+
+              <!-- Button row kept simple for now; wiring comes later -->
+              <div class="cf-modal-actions">
+                <button
+                  type="button"
+                  class="btn cf-modal-btn-secondary"
+                  @click="closeModal"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="btn cf-modal-btn-primary"
+                  @click="confirmModal"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-
-        <!-- Shim overlay while FS is busy (blocks clicks, dims content) -->
-        <div v-if="fsBusy" class="fs-shim">
-          <div class="fs-shim-inner">
-            <span class="spinner shim-spinner"></span>
-            <span class="fs-shim-text">Refreshing…</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Footer: metadata (left) + actions (right) -->
-      <div class="fs-footer">
-        <div class="fs-meta-text">
-          {{ sortedEntries.length }} item<span v-if="sortedEntries.length !== 1">s</span>
-        </div>
-
-        <div class="fs-actions">
-          <button
-            class="btn"
-            type="button"
-            :disabled="!canReadImage"
-            @click="onReadImageClick"
-            title="Read image from CF media (not yet wired)"
-          >
-            Read image from media
-          </button>
-          <button
-            class="btn"
-            type="button"
-            :disabled="!canWriteImage"
-            @click="onWriteImageClick"
-            title="Write image to CF media (not yet wired)"
-          >
-            Write image to media
-          </button>
-        </div>
+        </transition>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useMirror } from '@/stores/mirror'
 import { getRealtimeClient } from '@/bootstrap'
 
@@ -562,6 +639,109 @@ const canReadImage = computed(() => isMediaReady.value)
 const canWriteImage = computed(() => isMediaReady.value && hasSelectedFile.value)
 
 /* -------------------------------------------------------------------------- */
+/*  Modal dialog state (general-purpose)                                      */
+/* -------------------------------------------------------------------------- */
+
+type ModalMode = 'new-folder' | 'rename' | 'delete' | 'generic'
+
+const modalVisible = ref(false)
+const modalMode = ref<ModalMode>('generic')
+const modalTitle = ref('')
+const modalMessage = ref('')
+const modalInput = ref('')
+const modalInputRef = ref<HTMLInputElement | null>(null)
+
+const modalHasInput = computed(
+  () => modalMode.value === 'new-folder' || modalMode.value === 'rename'
+)
+
+function openNewFolderModal() {
+  modalMode.value = 'new-folder'
+  modalTitle.value = 'Create new folder'
+  modalMessage.value = 'Enter a name for the new folder'
+  modalInput.value = ''
+  modalVisible.value = true
+}
+
+function openRenameModal() {
+  const firstSelected = selectedNames.value[0] ?? ''
+  modalMode.value = 'rename'
+  modalTitle.value = 'Rename item'
+  modalMessage.value = firstSelected
+    ? `Enter a new name for “${firstSelected}”`
+    : 'Enter a new name'
+  modalInput.value = firstSelected
+  modalVisible.value = true
+}
+
+function openDeleteModal() {
+  const names = selectedNames.value
+  const count = names.length
+
+  modalMode.value = 'delete'
+  modalTitle.value = count === 1 ? 'Delete item' : 'Delete items'
+
+  if (count === 1) {
+    modalMessage.value = `Are you sure you want to delete “${names[0]}”?`
+  } else if (count > 1) {
+    const preview = names.slice(0, 3).join('", "')
+    const suffix = count > 3 ? `, and ${count - 3} more` : ''
+    modalMessage.value = `Are you sure you want to delete “${preview}”${suffix}?`
+  } else {
+    modalMessage.value = 'Are you sure you want to delete the selected item(s)?'
+  }
+
+  modalInput.value = ''
+  modalVisible.value = true
+}
+
+function closeModal() {
+  modalVisible.value = false
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Modal autofocus + keyboard handling                                       */
+/* -------------------------------------------------------------------------- */
+
+watch(modalVisible, (visible) => {
+  if (visible && modalHasInput.value) {
+    requestAnimationFrame(() => {
+      const el = modalInputRef.value
+      if (el) {
+        el.focus()
+        if (modalMode.value === 'rename') {
+          const len = el.value.length
+          el.setSelectionRange(len, len)
+        }
+      }
+    })
+  }
+})
+
+function confirmModal() {
+  // For now, OK behaves the same as close for all modes.
+  // Later we will branch based on modalMode.value to:
+  //  - create folder
+  //  - rename
+  //  - delete
+  closeModal()
+}
+
+function handleModalKey(ev: KeyboardEvent) {
+  if (!modalVisible.value) return
+
+  if (ev.key === 'Escape') {
+    ev.preventDefault()
+    closeModal()
+  }
+
+  if (ev.key === 'Enter') {
+    ev.preventDefault()
+    confirmModal()
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Advanced toggle                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -596,15 +776,17 @@ function onGoUpClick() {
  * Stub actions for future wiring.
  */
 function onNewFolderClick() {
-  // TODO: implement "create folder"
+  openNewFolderModal()
 }
 
 function onRenameClick() {
-  // TODO: implement "rename" using selectedNames.value
+  if (!canRename.value) return
+  openRenameModal()
 }
 
 function onDeleteClick() {
-  // TODO: implement "delete" using selectedNames.value
+  if (!canDelete.value) return
+  openDeleteModal()
 }
 
 function onReadImageClick() {
@@ -614,6 +796,18 @@ function onReadImageClick() {
 function onWriteImageClick() {
   // TODO: implement "write image to media" operation
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Lifecycle: global key listener                                            */
+/* -------------------------------------------------------------------------- */
+
+onMounted(() => {
+  window.addEventListener('keydown', handleModalKey)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleModalKey)
+})
 
 /* -------------------------------------------------------------------------- */
 /*  Helpers                                                                   */
@@ -665,7 +859,20 @@ function formatDate(iso: string): string {
   color: var(--pane-fg);
 }
 
-/* Gear button (same interaction pattern as logs pane) */
+/* Hotspot area for advanced-settings button (top-right).
+   Only hovering this region will reveal the button.
+   z-index ensures it floats above pane content. */
+.cf-advanced-hotspot {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 3.2rem;
+  height: 2.2rem;
+  pointer-events: auto;
+  z-index: 30;
+}
+
+/* Gear button for advanced settings */
 .gear-btn {
   position: absolute;
   top: 6px;
@@ -679,18 +886,23 @@ function formatDate(iso: string): string {
   color: #e5e7eb;
   cursor: pointer;
   opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
   transition:
     opacity 120ms ease,
     background 120ms ease,
     border-color 120ms ease,
     transform 60ms ease;
-  z-index: 3;
+  z-index: 31;
 }
-.cf-pane:hover .gear-btn,
-.gear-btn:focus,
-.gear-btn:focus-visible {
+
+/* Show button only when hotspot hovered or button focused */
+.cf-advanced-hotspot:hover .gear-btn {
   opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
+
 .gear-btn:hover {
   background: #0f172a;
   border-color: #4b5563;
@@ -738,6 +950,14 @@ function formatDate(iso: string): string {
 .panel-title {
   font-weight: 500;
   font-size: 0.8rem;
+}
+
+/* Body wraps everything under the header (for modal positioning) */
+.panel-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 /* Status badge */
@@ -1185,6 +1405,141 @@ function formatDate(iso: string): string {
   gap: 8px;
 }
 
+/* Modal overlay (blocks panel-body, leaves header visible) */
+.cf-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  pointer-events: all;
+}
+
+.cf-modal {
+  position: relative;
+  min-width: 260px;
+  max-width: 360px;
+  padding: 10px 12px 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #4b5563;
+  background: radial-gradient(circle at top left, #111827, #020617 60%);
+  box-shadow:
+    0 18px 45px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(15, 23, 42, 0.9);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #e5e7eb;
+}
+
+.cf-modal-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  margin-right: 20px;
+}
+
+.cf-modal-body {
+  margin-top: 4px;
+}
+
+.cf-modal-message {
+  font-size: 0.8rem;
+  line-height: 1.4;
+  opacity: 0.95;
+}
+
+.cf-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.cf-modal-field-label {
+  font-size: 0.78rem;
+  opacity: 0.9;
+}
+
+.cf-modal-input {
+  --control-h: 28px;
+
+  background: #020617;
+  color: #e5e7eb;
+  border-radius: 6px;
+  border: 1px solid #4b5563;
+  padding: 0 8px;
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+  height: var(--control-h);
+  line-height: var(--control-h);
+}
+
+.cf-modal-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #4b5563;
+  background: #020617;
+  color: #e5e7eb;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    transform 60ms ease;
+}
+.cf-modal-close:hover {
+  background: #111827;
+  border-color: #9ca3af;
+  transform: translateY(-1px);
+}
+
+.cf-modal-actions {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cf-modal-btn-secondary {
+  background: #020617;
+}
+.cf-modal-btn-secondary:hover:not(:disabled) {
+  background: #030712;
+}
+
+.cf-modal-btn-primary {
+  border-color: #22c55e;
+  background: #065f46;
+}
+.cf-modal-btn-primary:hover:not(:disabled) {
+  background: #047857;
+}
+
+/* Modal fade transition */
+.fade-modal-enter-active,
+.fade-modal-leave-active {
+  transition: opacity 160ms ease;
+}
+.fade-modal-enter-from,
+.fade-modal-leave-to {
+  opacity: 0;
+}
+
 /* Responsive */
 @media (max-width: 720px) {
   .fs-toolbar {
@@ -1217,6 +1572,12 @@ function formatDate(iso: string): string {
   }
   .advanced-row .value {
     text-align: left;
+  }
+
+  .cf-modal {
+    width: 100%;
+    max-width: none;
+    margin: 0 8px;
   }
 }
 </style>

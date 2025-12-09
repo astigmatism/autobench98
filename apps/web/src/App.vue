@@ -156,6 +156,8 @@ type ModalModel = {
     widthUnit: 'px' | 'pct'
     heightValue: string | number
     heightUnit: 'px' | 'pct'
+    // split configuration (single count for both row/col)
+    splitCount: string | number
     // existing
     bgEnabled: boolean
     bgHex: string
@@ -177,6 +179,8 @@ const initialModel = ref<ModalModel>({
     widthUnit: 'px',
     heightValue: '',
     heightUnit: 'px',
+    // single split count used by the modal
+    splitCount: 2,
     bgEnabled: false,
     bgHex: '#ffffff',
     mTop: '1',
@@ -212,8 +216,8 @@ function getParentSplit(leafId: string): SplitNode | null {
     return fp ? fp.parent ?? null : null
 }
 
-/** Split/Delete */
-function splitLeaf(targetId: string, direction: Direction) {
+/** Split/Delete helpers */
+function splitLeafBinary(targetId: string, direction: Direction) {
     if (!canEdit.value) return
     const found = findNodeAndParent(targetId, root, null)
     if (!found) return
@@ -253,6 +257,78 @@ function splitLeaf(targetId: string, direction: Direction) {
         if (idx >= 0) parent.children.splice(idx, 1, replacement)
     }
 }
+
+/**
+ * N-way split of a leaf into `count` children.
+ * - direction 'row'  → columns (side-by-side)
+ * - direction 'col'  → rows (stacked)
+ * The first child inherits the original leaf's component/props/appearance.
+ * All child constraints are reset to auto; container constraints stay on the split.
+ */
+function splitLeafN(targetId: string, direction: Direction, count: number) {
+    if (!canEdit.value) return
+    if (count <= 1) return
+
+    const found = findNodeAndParent(targetId, root, null)
+    if (!found) return
+    const { node, parent } = found
+    if (node.kind !== 'leaf') return
+
+    const movedConstraints: Constraints = deepClone(
+        node.constraints ?? { widthPx: null, heightPx: null, widthPct: null, heightPct: null }
+    )
+
+    const baseAppearance: Appearance = deepClone(
+        (node as LeafNode).appearance ?? {
+            bg: null,
+            mTop: 1,
+            mRight: 1,
+            mBottom: 1,
+            mLeft: 1
+        }
+    )
+
+    const children: LeafNode[] = []
+
+    // First child inherits component/props/appearance
+    const first: LeafNode = {
+        id: uid(),
+        kind: 'leaf',
+        component: node.component ?? null,
+        props: deepClone(node.props ?? {}),
+        constraints: { widthPx: null, heightPx: null, widthPct: null, heightPct: null },
+        appearance: baseAppearance
+    }
+    children.push(first)
+
+    // Remaining children are fresh panes
+    for (let i = 1; i < count; i++) {
+        const child = makeSinglePane()
+        child.constraints = { widthPx: null, heightPx: null, widthPct: null, heightPct: null }
+        children.push(child)
+    }
+
+    const equalSize = Math.floor((100 / count) * 100) / 100 // keep a sane number, though sizes aren't used yet
+    const sizes = Array.from({ length: count }, () => equalSize)
+
+    const replacement: SplitNode = {
+        id: uid(),
+        kind: 'split',
+        direction,
+        children,
+        sizes,
+        constraints: movedConstraints
+    }
+
+    if (!parent) {
+        Object.keys(root as any).forEach((k) => delete (root as any)[k])
+        Object.assign(root as any, replacement)
+    } else if (Array.isArray(parent.children)) {
+        const idx = parent.children.findIndex((c) => c.id === node.id)
+        if (idx >= 0) parent.children.splice(idx, 1, replacement)
+    }
+}
+
 function deleteLeaf(targetId: string) {
     if (!canEdit.value) return
     if (root.id === targetId) {
@@ -373,16 +449,23 @@ function openModalForLeaf(leaf: LeafNode) {
         widthUnit,
         heightValue,
         heightUnit,
+
+        // single split count (default = 2)
+        splitCount: 2,
+
         bgEnabled: !!leaf.appearance?.bg,
         bgHex: leaf.appearance?.bg ?? '#ffffff',
+
         mTop: String(leaf.appearance?.mTop ?? 1),
         mRight: String(leaf.appearance?.mRight ?? 1),
         mBottom: String(leaf.appearance?.mBottom ?? 1),
         mLeft: String(leaf.appearance?.mLeft ?? 1),
+
         lockWidthCross: locks.lockWidthCross,
         lockHeightCross: locks.lockHeightCross,
         mustBeFluidWidth: locks.mustBeFluidWidth,
         mustBeFluidHeight: locks.mustBeFluidHeight,
+
         hasContainer,
         containerWidthPx,
         containerHeightPx
@@ -407,16 +490,30 @@ function clearLayout() {
     Object.keys(root as any).forEach((k) => delete (root as any)[k])
     Object.assign(root as any, fresh)
 }
-function splitRowFromModal() {
+
+function normalizeCount(raw: string | number | undefined, fallback: number): number {
+    const s = String(raw ?? '').trim()
+    if (!s) return fallback
+    const n = parseInt(s, 10)
+    if (!Number.isFinite(n) || n < 2) return fallback
+    return n
+}
+
+function splitRowFromModal(count?: number | string) {
     const id = modalTargetId.value
-    if (id) splitLeaf(id, 'row')
+    if (!id) return
+    const c = normalizeCount(count as any, 2)
+    splitLeafN(id, 'row', c)
     closeModal()
 }
-function splitColFromModal() {
+function splitColFromModal(count?: number | string) {
     const id = modalTargetId.value
-    if (id) splitLeaf(id, 'col')
+    if (!id) return
+    const c = normalizeCount(count as any, 2)
+    splitLeafN(id, 'col', c)
     closeModal()
 }
+
 function deleteFromModal() {
     const id = modalTargetId.value
     if (id) deleteLeaf(id)
@@ -564,7 +661,7 @@ onMounted(async () => {
                 :is-root="true"
                 :parent-dir="null"
                 :can-edit="canEdit"
-                @split="splitLeaf"
+                @split="splitLeafBinary"
                 @configure="openModalForLeaf"
                 @delete="deleteLeaf"
             />
@@ -821,21 +918,32 @@ function renderLeaf(
         ]
     )
 
+    // Gear button (pane menu trigger)
+    const gearButton = canEdit
+        ? h(
+              'button',
+              {
+                  title: 'Pane menu',
+                  onClick: () => emit('configure', leaf),
+                  class: 'cell-gear tl',
+                  'aria-label': ariaText
+              },
+              '☰'
+          )
+        : null
+
+    // Hotspot area: only hovering this region shows the gear + HUD;
+    // z-index ensures it sits above any pane component content.
+    const menuHotspot =
+        canEdit &&
+        h('div', { class: 'pane-menu-hotspot' }, [
+            gearButton,
+            // HUD next to the gear
+            hud
+        ])
+
     const content = h('div', { style, class: 'studio-leaf' }, [
-        canEdit
-            ? h(
-                  'button',
-                  {
-                      title: 'Pane menu',
-                      onClick: () => emit('configure', leaf),
-                      class: 'cell-gear tl',
-                      'aria-label': ariaText
-                  },
-                  '☰'
-              )
-            : null,
-        // HUD next to the gear
-        canEdit ? hud : null,
+        menuHotspot,
         // SR-only live text
         h('span', { class: 'sr-only', 'aria-live': 'polite' }, ariaText),
         Comp
@@ -974,6 +1082,19 @@ body,
     font-size: 0.95rem;
 }
 
+/* Hotspot area for the pane menu (top-left).
+   Only hovering this region will reveal the gear + HUD.
+   z-index ensures it floats over any pane component content. */
+.pane-menu-hotspot {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 3.2rem;  /* hit area width for the gear */
+    height: 2.2rem; /* hit area height */
+    pointer-events: auto;
+    z-index: 30;
+}
+
 /* Hover menu button (hamburger), top-left */
 .cell-gear {
     position: absolute;
@@ -987,7 +1108,7 @@ body,
     visibility: hidden;
     pointer-events: none;
     transition: opacity 0.15s ease, transform 0.1s ease;
-    z-index: 10;
+    z-index: 31; /* above hotspot and HUD */
     font-size: 0.95rem;
     line-height: 1;
 }
@@ -995,7 +1116,9 @@ body,
     top: 0.5rem;
     left: 0.5rem;
 }
-.studio-leaf:hover .cell-gear,
+
+/* Show gear only when hovering the hotspot or focusing the button */
+.pane-menu-hotspot:hover .cell-gear,
 .cell-gear:focus,
 .cell-gear:focus-visible {
     opacity: 1;
@@ -1018,9 +1141,12 @@ body,
     visibility: hidden;
     pointer-events: none;
     transition: opacity 0.15s ease;
-    z-index: 9; /* beneath the gear */
+    z-index: 29;           /* beneath the gear, above pane content */
+    white-space: nowrap;   /* keep name + dimensions on a single line */
 }
-.studio-leaf:hover .pane-hud,
+
+/* Show HUD only when hotspot hovered or gear focused */
+.pane-menu-hotspot:hover .pane-hud,
 .cell-gear:focus + .pane-hud {
     opacity: 1;
     visibility: visible;

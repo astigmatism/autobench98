@@ -1,16 +1,18 @@
 <!-- apps/web/src/panes/SerialPrinterPane.vue -->
 <template>
     <div class="sp-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
-        <!-- Hover gear button could be used later for options (page size, font, etc.) -->
-        <button
-            class="gear-btn"
-            :aria-expanded="showOptions ? 'true' : 'false'"
-            aria-controls="sp-options-panel"
-            title="Show printer options"
-            @click="showOptions = !showOptions"
-        >
-            ⚙️
-        </button>
+        <!-- Hotspot region: only hovering here shows the options button -->
+        <div class="sp-options-hotspot">
+            <button
+                class="gear-btn"
+                :aria-expanded="showOptions ? 'true' : 'false'"
+                aria-controls="sp-options-panel"
+                title="Show printer options"
+                @click="showOptions = !showOptions"
+            >
+                ⚙️
+            </button>
+        </div>
 
         <!-- Main panel (scroll container for "paper") -->
         <div class="panel">
@@ -675,7 +677,19 @@ function resetSpeed() {
     color: var(--pane-fg);
 }
 
-/* Gear button (hover-only visibility) */
+/* Hotspot area for options button (top-right).
+   Only hovering this region will reveal the button. */
+.sp-options-hotspot {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 3.2rem;
+    height: 2.4rem;
+    pointer-events: auto;
+    z-index: 30;
+}
+
+/* Gear button (visible only while hotspot is hovered) */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -689,13 +703,23 @@ function resetSpeed() {
     color: #eee;
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease,
+    visibility: hidden;
+    pointer-events: none;
+    transition:
+        opacity 120ms ease,
+        background 120ms ease,
+        border-color 120ms ease,
         transform 60ms ease;
-    z-index: 2;
+    z-index: 31;
 }
-.sp-pane:hover .gear-btn {
+
+/* Only show button while hotspot is hovered */
+.sp-options-hotspot:hover .gear-btn {
     opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
 }
+
 .gear-btn:hover {
     background: #1a1a1a;
     transform: translateY(-1px);

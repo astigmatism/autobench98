@@ -1,15 +1,17 @@
 <template>
     <div class="logs-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
-        <!-- Hover gear button -->
-        <button
-            class="gear-btn"
-            :aria-expanded="showControls ? 'true' : 'false'"
-            aria-controls="logs-controls-panel"
-            title="Show filters & sorting"
-            @click="showControls = !showControls"
-        >
-            ⚙️
-        </button>
+        <!-- Hotspot region: only hovering here shows the advanced controls button -->
+        <div class="logs-advanced-hotspot">
+            <button
+                class="gear-btn"
+                :aria-expanded="showControls ? 'true' : 'false'"
+                aria-controls="logs-controls-panel"
+                title="Show filters & sorting"
+                @click="showControls = !showControls"
+            >
+                ⚙️
+            </button>
+        </div>
 
         <!-- Settings panel (toolbar + legend), hidden by default -->
         <transition name="slide-fade">
@@ -351,6 +353,19 @@ watch(
     width: 100%;
 }
 
+/* Hotspot area for advanced controls button (top-right).
+   Only hovering this region will reveal the button.
+   z-index ensures it floats above pane content. */
+.logs-advanced-hotspot {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 3.2rem;
+    height: 2.4rem;
+    pointer-events: auto;
+    z-index: 30;
+}
+
 /* Gear button */
 .gear-btn {
     position: absolute;
@@ -365,15 +380,20 @@ watch(
     color: #eee;
     cursor: pointer;
     opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
     transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease,
         transform 60ms ease;
-    z-index: 2;
+    z-index: 31;
 }
-.logs-pane:hover .gear-btn,
-.gear-btn:focus,
-.gear-btn:focus-visible {
+
+/* Only show button while hotspot is hovered */
+.logs-advanced-hotspot:hover .gear-btn {
     opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
 }
+
 .gear-btn:hover {
     background: #1a1a1a;
     transform: translateY(-1px);

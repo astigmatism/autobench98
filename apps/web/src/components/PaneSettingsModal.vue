@@ -66,7 +66,7 @@
                             Overwrite
                         </button>
 
-                        <!-- Export BEFORE Delete (Option A) -->
+                        <!-- Export BEFORE Delete -->
                         <button
                             class="btn"
                             :disabled="!selectedProfileId"
@@ -128,16 +128,44 @@
                     </p>
                 </section>
 
+                <!-- SPLIT SECTION: one input, two actions -->
                 <section class="section">
                     <h3>Split</h3>
-                    <div class="row">
-                        <button class="btn" :disabled="!canEdit" @click="$emit('splitRow')">
+                    <div class="row inputs wrap" style="gap: 0.5rem">
+                        <label class="row" style="gap: 0.35rem; align-items: center">
+                            <span class="label">Number of panes</span>
+                            <input
+                                v-model="working.splitCount"
+                                type="number"
+                                min="2"
+                                class="input sm"
+                                :disabled="!canEdit"
+                                placeholder="2"
+                            />
+                        </label>
+
+                        <button
+                            class="btn"
+                            :disabled="!canEdit"
+                            @click="emitSplitRow"
+                        >
                             Split into Columns (side-by-side)
                         </button>
-                        <button class="btn" :disabled="!canEdit" @click="$emit('splitCol')">
+                        <button
+                            class="btn"
+                            :disabled="!canEdit"
+                            @click="emitSplitCol"
+                        >
                             Split into Rows (stacked)
                         </button>
                     </div>
+
+                    <p class="hint">
+                        Use a single count (minimum <strong>2</strong>) and choose whether to split
+                        this pane into <strong>columns</strong> (side-by-side) or
+                        <strong>rows</strong> (stacked). The first child keeps the current pane’s
+                        component; additional panes start empty.
+                    </p>
                 </section>
 
                 <section class="section">
@@ -379,7 +407,7 @@ import { reactive, watch, ref } from 'vue'
 type PaneOption = { id: string; label: string }
 type Profile = { id: string; name: string; createdAt: string; updatedAt: string }
 
-// Extend the modal model to support units
+// Modal model, including splitCount
 type ModalModel = {
     componentKey: string
     // unified inputs for width/height with unit
@@ -387,6 +415,8 @@ type ModalModel = {
     widthUnit: 'px' | 'pct'
     heightValue: string | number
     heightUnit: 'px' | 'pct'
+    // split count (single input)
+    splitCount: string | number
     // existing fields
     bgEnabled: boolean
     bgHex: string
@@ -417,8 +447,8 @@ const props = defineProps<{
 const emit = defineEmits<{
     (e: 'close'): void
     (e: 'clearLayout'): void
-    (e: 'splitRow'): void
-    (e: 'splitCol'): void
+    (e: 'splitRow', count: string | number): void
+    (e: 'splitCol', count: string | number): void
     (e: 'deletePane'): void
     (e: 'apply', model: ModalModel): void
     (e: 'loadProfile', id: string): void
@@ -449,6 +479,14 @@ const importHint = ref('')
 
 function emitApply() {
     emit('apply', { ...(working as any) })
+}
+
+// Emit split signals with the current splitCount
+function emitSplitRow() {
+    emit('splitRow', working.splitCount)
+}
+function emitSplitCol() {
+    emit('splitCol', working.splitCount)
 }
 
 // tiny util for date formatting
