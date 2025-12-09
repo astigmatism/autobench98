@@ -450,19 +450,101 @@ export class CfImagerService {
             op,
         })
 
-        // TODO: replace this stub with spawn(this.config.readScriptPath, [...])
-        this.deps.events.publish({
-            kind: 'cf-op-error',
-            at: Date.now(),
-            op,
-            error: 'readDeviceToImage not yet implemented',
-        })
+        // ------------------------------------------------------------------
+        // Spawn the platform-specific read script and capture PROGRESS lines
+        // ------------------------------------------------------------------
+        const script = this.config.readScriptPath
+        if (!script) {
+            this.emitError('readDeviceToImage: readScriptPath is not configured')
+            this.state.phase = 'idle'
+            this.state.currentOp = undefined
+            return
+        }
 
-        this.state.phase = 'idle'
-        this.state.currentOp = undefined
-        this.state.message = 'Read not yet implemented'
+        try {
+            const child = spawn(script, [this.device!.path, imgPathAbs], {
+                // Use full pipes so this matches ChildProcessWithoutNullStreams
+                stdio: ['pipe', 'pipe', 'pipe'],
+            })
 
-        // console.log('[cf-imager] readDeviceToImage stub completed')
+            this.child = child
+
+            // Stream stdout line-by-line, looking for PROGRESS lines
+            child.stdout.setEncoding('utf8')
+            let stdoutBuf = ''
+
+            child.stdout.on('data', (chunk: string) => {
+                stdoutBuf += chunk
+                let idx: number
+                while ((idx = stdoutBuf.indexOf('\n')) !== -1) {
+                    const line = stdoutBuf.slice(0, idx).trim()
+                    stdoutBuf = stdoutBuf.slice(idx + 1)
+                    if (!line) continue
+
+                    if (line.startsWith('PROGRESS ')) {
+                        const progress = parseProgressLine(line)
+                        if (progress) {
+                            const { bytes, total, pct } = progress
+
+                            // Debug logging so you can verify on macOS + Linux
+                            console.log(
+                                '[cf-imager] progress (read):',
+                                `bytes=${bytes} total=${total} pct=${pct}`
+                            )
+
+                            // Update current op for future UI wiring
+                            if (this.state.currentOp && this.state.currentOp.kind === 'read') {
+                                this.state.currentOp.progressPct = pct
+                                // We can extend CfImagerCurrentOp later to store bytes/total if desired.
+                            }
+                        }
+                    }
+                }
+            })
+
+            // Optional: stderr logging for debugging
+            child.stderr.setEncoding('utf8')
+            child.stderr.on('data', (chunk: string) => {
+                const text = String(chunk).trim()
+                if (text) {
+                    console.error('[cf-imager] read-image stderr:', text)
+                }
+            })
+
+            child.on('error', (err) => {
+                console.error('[cf-imager] readDeviceToImage spawn error:', err)
+                this.child = null
+                this.emitError(`readDeviceToImage failed to start: ${(err as Error).message}`)
+                this.state.phase = 'idle'
+                this.state.currentOp = undefined
+            })
+
+            child.on('close', (code, signal) => {
+                this.child = null
+
+                if (code === 0) {
+                    // Successful completion
+                    this.state.phase = 'idle'
+                    this.state.message = 'Read complete'
+                    // Optionally emit a cf-op-completed event later
+                } else {
+                    const reason =
+                        code !== null
+                            ? `exit code ${code}`
+                            : signal
+                            ? `signal ${signal}`
+                            : 'unknown failure'
+                    this.emitError(`readDeviceToImage script failed (${reason})`)
+                }
+
+                this.state.currentOp = undefined
+            })
+        } catch (err) {
+            this.child = null
+            this.emitError(`readDeviceToImage: spawn failed: ${(err as Error).message}`)
+            this.state.phase = 'idle'
+            this.state.currentOp = undefined
+        }
     }
 
     /* ---------------------------------------------------------------------- */
@@ -911,6 +993,42 @@ function sanitizeName(name: string | undefined): string {
     if (trimmed.includes('/') || trimmed.includes('\\')) return ''
     if (trimmed === '.' || trimmed === '..') return ''
     return trimmed
+}
+
+/**
+ * Parse a PROGRESS line from the read-image scripts.
+ *
+ * Expected formats (both platforms share the same keys):
+ *   PROGRESS bytes=281018368 total=12572352512 pct=2.235 rate=46299681 elapsed=6.069553
+ *   PROGRESS bytes=880925230 total=12584646144 pct=7
+ */
+function parseProgressLine(line: string): { bytes: number; total: number; pct: number } | null {
+    // Strip leading "PROGRESS " and split into key=value tokens
+    const rest = line.slice('PROGRESS'.length).trim()
+    if (!rest) return null
+
+    const parts = rest.split(/\s+/)
+    const kv: Record<string, string> = {}
+
+    for (const p of parts) {
+        const eqIdx = p.indexOf('=')
+        if (eqIdx === -1) continue
+        const key = p.slice(0, eqIdx)
+        const value = p.slice(eqIdx + 1)
+        if (key && value !== undefined) {
+            kv[key] = value
+        }
+    }
+
+    const bytes = Number(kv.bytes)
+    const total = Number(kv.total)
+    const pct = Number(kv.pct)
+
+    if (!Number.isFinite(bytes) || !Number.isFinite(total) || !Number.isFinite(pct)) {
+        return null
+    }
+
+    return { bytes, total, pct }
 }
 
 /**
