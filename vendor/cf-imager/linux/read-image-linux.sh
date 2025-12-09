@@ -195,6 +195,15 @@ dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
 
 dd_pid=$!
 
+# Background pinger: periodically send SIGUSR1 so dd prints a status line
+(
+  while kill -0 "$dd_pid" 2>/dev/null; do
+    kill -USR1 "$dd_pid" 2>/dev/null || true
+    sleep 1
+  done
+) &
+info_pinger_pid=$!
+
 # Background watcher: read dd stderr while dd is running
 (
   # We read from the temp file; as dd appends, read will wake up.
@@ -226,6 +235,11 @@ fi
 # Kill the watcher if still running
 if kill -0 "$status_watcher_pid" 2>/dev/null; then
   kill "$status_watcher_pid" 2>/dev/null || true
+fi
+
+# Kill the pinger if still running
+if kill -0 "$info_pinger_pid" 2>/dev/null; then
+  kill "$info_pinger_pid" 2>/dev/null || true
 fi
 
 if [[ $dd_rc -ne 0 ]]; then
