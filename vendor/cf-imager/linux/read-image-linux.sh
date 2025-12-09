@@ -16,14 +16,6 @@ set -euo pipefail
 #
 # Stderr:
 #   Human-oriented logs, including any error explanation.
-#
-# Notes:
-#   - Non-interactive: no prompts.
-#   - DEVICE_PATH is the whole CF device (e.g. /dev/sda) OR a partition (e.g. /dev/sda1).
-#   - If DEVICE_PATH is a whole-disk node, we image the first partition.
-#   - Progress:
-#       * Uses `stdbuf` + `dd bs=4M status=progress` and forwards stderr lines
-#         with both DD_STATUS and PROGRESS.
 
 log() { printf '[cf-read-linux] %s\n' "$*" >&2; }
 
@@ -104,7 +96,6 @@ get_partition_size_bytes() {
 
   name="${dev#/dev/}"
 
-  # Try partition-style and disk-style /sys paths
   for blkdir in "/sys/block/$name" "/sys/block/${name%%[0-9]*}"; do
     if [[ -d "$blkdir" ]]; then
       # Partition-style: /sys/block/<disk>/<part>/size
@@ -181,11 +172,10 @@ emit_progress_from_line() {
 }
 
 # ---------------------------------------------------------------------------
-# Run dd with status=progress, streaming stderr through a parser.
+# Run dd with status=progress, streaming stderr through our parser.
 #
-# We use stdbuf to make dd's stderr unbuffered, then convert carriage-return
-# progress updates into newline-terminated lines so the while-loop can read
-# them incrementally.
+# We use stdbuf so dd's output isn't block-buffered when going through a pipe,
+# then send stderr+stdout together (2>&1) into a while-loop.
 # ---------------------------------------------------------------------------
 
 if ! command -v stdbuf >/dev/null 2>&1; then
@@ -193,14 +183,16 @@ if ! command -v stdbuf >/dev/null 2>&1; then
   exit 1
 fi
 
-stdbuf -o0 -e0 dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
-  2> >(tr '\r' '\n' | while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    echo "DD_STATUS $line"
-    emit_progress_from_line "$line"
-  done)
+# Foreground pipeline: dd -> while loop
+stdbuf -o0 -e0 dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync 2>&1 |
+while IFS= read -r line; do
+  # Forward raw dd status
+  [[ -z "$line" ]] && continue
+  echo "DD_STATUS $line"
+  emit_progress_from_line "$line"
+done
 
-dd_rc=$?
+dd_rc=${PIPESTATUS[0]}
 
 if [[ $dd_rc -ne 0 ]]; then
   log "ERROR: dd failed with exit code $dd_rc"
