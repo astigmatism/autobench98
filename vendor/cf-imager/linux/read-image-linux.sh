@@ -182,65 +182,25 @@ emit_progress_from_line() {
 
 # ---------------------------------------------------------------------------
 # Run dd with status=progress.
-# We capture stderr in a temp file and stream it as DD_STATUS + PROGRESS
-# while dd runs, mirroring your original structure.
+# We use process substitution to intercept stderr, convert progress into
+# DD_STATUS + PROGRESS lines, and keep dd in the foreground.
 # ---------------------------------------------------------------------------
 
-tmp_err="$(mktemp)"
-trap 'rm -f "$tmp_err"' EXIT
+# Save original stdout as FD 3 so the process-substitution can write back to it.
+exec 3>&1
 
-# Start dd; redirect its stderr to a temp file
 dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
-  2> "$tmp_err" &
-
-dd_pid=$!
-
-# Background pinger: periodically send SIGUSR1 so dd prints a status line
-(
-  while kill -0 "$dd_pid" 2>/dev/null; do
-    kill -USR1 "$dd_pid" 2>/dev/null || true
-    sleep 1
-  done
-) &
-info_pinger_pid=$!
-
-# Background watcher: read dd stderr while dd is running
-(
-  # We read from the temp file; as dd appends, read will wake up.
-  while kill -0 "$dd_pid" 2>/dev/null; do
-    if IFS= read -r line; then
+  2> >(
+    # dd writes its progress lines to stderr. Convert any '\r' updates
+    # into newline-terminated lines and prefix them.
+    tr '\r' '\n' | while IFS= read -r line; do
       [[ -z "$line" ]] && continue
-      echo "DD_STATUS $line"
-      emit_progress_from_line "$line"
-    else
-      # Small sleep to avoid a busy loop when no new data
-      sleep 0.5
-    fi
-  done
-) < "$tmp_err" &
-status_watcher_pid=$!
+      echo "DD_STATUS $line" >&3
+      emit_progress_from_line "$line" >&3
+    done
+  )
 
-wait "$dd_pid"
 dd_rc=$?
-
-# One last drain of any remaining stderr lines (including final dd summary)
-if [[ -s "$tmp_err" ]]; then
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    echo "DD_STATUS $line"
-    emit_progress_from_line "$line"
-  done < "$tmp_err"
-fi
-
-# Kill the watcher if still running
-if kill -0 "$status_watcher_pid" 2>/dev/null; then
-  kill "$status_watcher_pid" 2>/dev/null || true
-fi
-
-# Kill the pinger if still running
-if kill -0 "$info_pinger_pid" 2>/dev/null; then
-  kill "$info_pinger_pid" 2>/dev/null || true
-fi
 
 if [[ $dd_rc -ne 0 ]]; then
   log "ERROR: dd failed with exit code $dd_rc"
