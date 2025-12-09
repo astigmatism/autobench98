@@ -189,9 +189,10 @@ port_in_use() {
   fi
 }
 
-if port_in_use="${SIDECAR_PORT}"; then
+if port_in_use "${SIDECAR_PORT}"; then
   die "Port ${SIDECAR_PORT} already in use. Stop the existing process or change SIDECAR_PORT."
 fi
+
 if port_in_use "${API_PORT}"; then
   die "Port ${API_PORT} already in use. Stop the existing process or change API_PORT."
 fi
