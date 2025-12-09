@@ -22,8 +22,8 @@ set -euo pipefail
 #   - DEVICE_PATH is the whole CF device (e.g. /dev/sda) OR a partition (e.g. /dev/sda1).
 #   - If DEVICE_PATH is a whole-disk node, we image the first partition.
 #   - Progress:
-#       * Uses `dd bs=4M status=progress` and forwards stderr lines with
-#         both DD_STATUS and PROGRESS.
+#       * Uses `stdbuf` + `dd bs=4M status=progress` and forwards stderr lines
+#         with both DD_STATUS and PROGRESS.
 
 log() { printf '[cf-read-linux] %s\n' "$*" >&2; }
 
@@ -182,29 +182,30 @@ emit_progress_from_line() {
 
 # ---------------------------------------------------------------------------
 # Run dd with status=progress.
-# Instead of writing stderr to a file and tailing it, we:
-#   - Merge stderr into stdout (2>&1)
-#   - Turn carriage returns into newlines (tr '\r' '\n')
-#   - Stream each line as DD_STATUS + PROGRESS in real time.
+#
+# IMPORTANT: to see progress lines *while* dd is running (not all at the end),
+# we must defeat stdio's block buffering when stderr is redirected.
+# We do this with `stdbuf -o0 -e0` so stderr is unbuffered, then pipe it
+# through a small while-loop that echoes DD_STATUS + PROGRESS.
 # ---------------------------------------------------------------------------
 
-dd_rc=0
+if ! command -v stdbuf >/dev/null 2>&1; then
+  log "ERROR: stdbuf is required for streaming dd progress (usually in coreutils)."
+  exit 1
+fi
 
-# Temporarily disable "exit on error" while we run the pipeline
-set +e
-
-dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync 2>&1 \
-  | tr '\r' '\n' \
-  | while IFS= read -r line; do
+# Run dd with unbuffered stderr, capture that stderr stream in a while-loop.
+# stderr (fd 2) goes to the pipe; stdout is unused.
+stdbuf -o0 -e0 dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
+  2> >( # process substitution runs in a subshell; we can still call our function
+    while IFS= read -r line; do
       [[ -z "$line" ]] && continue
       echo "DD_STATUS $line"
       emit_progress_from_line "$line"
     done
+  )
 
-dd_rc=${PIPESTATUS[0]}
-
-# Re-enable strict mode
-set -e
+dd_rc=$?
 
 if [[ $dd_rc -ne 0 ]]; then
   log "ERROR: dd failed with exit code $dd_rc"
