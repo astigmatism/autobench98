@@ -9,13 +9,22 @@ set -euo pipefail
 # Stdout protocol (for Node/CfImagerService to consume):
 #   CAPACITY bytes=<totalBytes>
 #   BEGIN_READ source=<partition> dest=<dest-img-path>
-#   DD_STATUS <raw dd status line>
-#   PROGRESS bytes=<n> total=<totalBytes> pct=<pct> rate=<bps> elapsed=<secs>
+#   DD_STATUS <raw status line>        # here: any non-numeric stderr from pv
+#   PROGRESS bytes=<n> total=<totalBytes> pct=<pct> rate=<bps?> elapsed=<secs?>
 #   ...
 #   READ_COMPLETE dest=<dest-img-path>
 #
 # Stderr:
 #   Human-oriented logs, including any error explanation.
+#
+# Notes:
+#   - Non-interactive: no prompts.
+#   - DEVICE_PATH is the whole CF device (e.g. /dev/sda) OR a partition (e.g. /dev/sda1).
+#   - If DEVICE_PATH is a whole-disk node, we image the first partition.
+#   - Progress:
+#       * Uses `pv -n -s TOTAL_BYTES` to emit a numeric percentage to stderr.
+#       * We derive "bytes" from pct * TOTAL_BYTES.
+#       * Rate/elapsed are left blank (can be extended if needed later).
 
 log() { printf '[cf-read-linux] %s\n' "$*" >&2; }
 
@@ -43,6 +52,16 @@ if [[ ! -d "$DEST_DIR" ]]; then
   exit 1
 fi
 
+if ! command -v pv >/dev/null 2>&1; then
+  log "ERROR: pv is required for streaming progress. Install it (e.g. 'sudo apt-get install pv')."
+  exit 1
+fi
+
+if ! command -v lsblk >/dev/null 2>&1; then
+  log "ERROR: lsblk is required to discover partitions"
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Determine what to image: either DEVICE (if already a partition) or its
 # first partition via lsblk.
@@ -55,11 +74,6 @@ PARTITION="$DEVICE"
 if [[ "$DEVICE" =~ [0-9]$ ]]; then
   log "Using DEVICE as partition: $PARTITION"
 else
-  if ! command -v lsblk >/dev/null 2>&1; then
-    log "ERROR: lsblk is required to discover partitions"
-    exit 1
-  fi
-
   PARTITION="$(
     lsblk -lnpo NAME,TYPE "$DEVICE" 2>/dev/null | awk '$2=="part" {print $1; exit}'
   )"
@@ -141,62 +155,51 @@ echo "CAPACITY bytes=${TOTAL_BYTES}"
 echo "BEGIN_READ source=${PARTITION} dest=${DEST_IMG}"
 
 # ---------------------------------------------------------------------------
-# Helper: parse Linux dd "bytes copied" lines into PROGRESS lines
+# Run pv and stream progress.
 #
-# Typical dd status=progress summary line:
-#   1073741824 bytes (1.1 GB, 1.0 GiB) copied, 10 s, 107 MB/s
+# We use:
+#   pv -n -s TOTAL_BYTES "$PARTITION" > "$DEST_IMG"
+#
+# - `-n` makes pv emit a bare numeric percentage (0–100) to stderr.
+# - `-s TOTAL_BYTES` gives pv the total size for ETA and accurate percent.
+#
+# We redirect that stderr through a loop that:
+#   - treats numeric lines as percentages -> PROGRESS
+#   - treats anything else as DD_STATUS (for completeness/future-proofing)
 # ---------------------------------------------------------------------------
 
-emit_progress_from_line() {
-  local line="$1"
-  local bytes elapsed rate pct
+copy_rc=0
 
-  if [[ "$line" =~ ^([0-9]+)\ bytes.*\ copied,\ ([0-9.]+)\ s,\ ([0-9]+)\ bytes/s ]]; then
-    bytes="${BASH_REMATCH[1]}"
-    elapsed="${BASH_REMATCH[2]}"
-    rate="${BASH_REMATCH[3]}"
+{
+  pv -n -s "$TOTAL_BYTES" "$PARTITION" > "$DEST_IMG"
+  copy_rc=$?
+} 2> >(
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
 
-    if [[ "$TOTAL_BYTES" -gt 0 ]]; then
-      pct="$(
-        awk -v b="$bytes" -v t="$TOTAL_BYTES" 'BEGIN {
-          if (t > 0) printf "%.3f", (b * 100.0) / t;
-          else print "0.000";
-        }'
-      )"
+    # Numeric-only lines from `pv -n` are percentages.
+    if [[ "$line" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      pct="$line"
+      bytes=0
+      if [[ "$TOTAL_BYTES" -gt 0 ]]; then
+        bytes="$(
+          awk -v p="$pct" -v t="$TOTAL_BYTES" 'BEGIN {
+            printf "%.0f", (p / 100.0) * t;
+          }'
+        )"
+      fi
+      # rate / elapsed left blank; can be filled in later if needed.
+      echo "PROGRESS bytes=${bytes} total=${TOTAL_BYTES} pct=${pct} rate= elapsed="
     else
-      pct=""
+      # Fallback: anything non-numeric becomes a DD_STATUS line.
+      echo "DD_STATUS $line"
     fi
+  done
+)
 
-    echo "PROGRESS bytes=${bytes} total=${TOTAL_BYTES} pct=${pct} rate=${rate} elapsed=${elapsed}"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Run dd with status=progress, streaming stderr through our parser.
-#
-# We use stdbuf so dd's output isn't block-buffered when going through a pipe,
-# then send stderr+stdout together (2>&1) into a while-loop.
-# ---------------------------------------------------------------------------
-
-if ! command -v stdbuf >/dev/null 2>&1; then
-  log "ERROR: stdbuf is required for streaming dd progress (usually in coreutils)."
-  exit 1
-fi
-
-# Foreground pipeline: dd -> while loop
-stdbuf -o0 -e0 dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync 2>&1 |
-while IFS= read -r line; do
-  # Forward raw dd status
-  [[ -z "$line" ]] && continue
-  echo "DD_STATUS $line"
-  emit_progress_from_line "$line"
-done
-
-dd_rc=${PIPESTATUS[0]}
-
-if [[ $dd_rc -ne 0 ]]; then
-  log "ERROR: dd failed with exit code $dd_rc"
-  exit "$dd_rc"
+if [[ $copy_rc -ne 0 ]]; then
+  log "ERROR: pv copy failed with exit code $copy_rc"
+  exit "$copy_rc"
 fi
 
 sync || true
