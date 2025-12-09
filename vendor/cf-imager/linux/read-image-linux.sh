@@ -18,13 +18,11 @@ set -euo pipefail
 #   Human-oriented logs, including any error explanation.
 #
 # Notes:
-#   - Non-interactive: no prompts, no zenity.
-#   - DEVICE_PATH is the whole CF device (e.g. /dev/sdc) OR a partition (e.g. /dev/sdc1).
+#   - Non-interactive: no prompts.
+#   - DEVICE_PATH is the whole CF device (e.g. /dev/sda) OR a partition (e.g. /dev/sda1).
 #   - If DEVICE_PATH is a whole-disk node, we image the first partition.
 #   - Progress:
-#       * Uses `dd bs=4M status=progress` and forwards stderr lines as
-#         "DD_STATUS <raw-line>" on stdout, plus parsed "PROGRESS ..." lines.
-#   - Partition table is dumped with sfdisk -d DEVICE_PATH into a .part file.
+#       * Uses `dd bs=4M status=progress` and parses its stderr lines.
 
 log() { printf '[cf-read-linux] %s\n' "$*" >&2; }
 
@@ -59,8 +57,8 @@ fi
 
 PARTITION="$DEVICE"
 
-# Heuristic: if the device name ends with a digit (e.g. /dev/sdc1, /dev/nvme0n1p1),
-# assume it's already a partition (common Linux naming).
+# Heuristic: if the device name ends with a digit (e.g. /dev/sda1, /dev/nvme0n1p1),
+# assume it's already a partition.
 if [[ "$DEVICE" =~ [0-9]$ ]]; then
   log "Using DEVICE as partition: $PARTITION"
 else
@@ -89,7 +87,7 @@ fi
 get_partition_size_bytes() {
   local dev="$1"
 
-  # First try blockdev if available
+  # Try blockdev first
   if command -v blockdev >/dev/null 2>&1; then
     local sz
     if sz="$(blockdev --getsize64 "$dev" 2>/dev/null)"; then
@@ -101,25 +99,14 @@ get_partition_size_bytes() {
   fi
 
   # Fallback: /sys/block
-  # dev might be /dev/sdc1 or /dev/nvme0n1p1, etc.
-  local name base blkdir sizefile sectors
+  local name blkdir sizefile sectors
 
   name="${dev#/dev/}"
 
-  # If this is a partition, /sys/block/<parent>/<name>/size usually exists,
-  # e.g. /sys/block/sdc/sdc1/size
-  # For whole disk, /sys/block/<name>/size exists, e.g. /sys/block/sdc/size
-  # Try partition-style path first, then disk-style.
-
-  # Parent is everything up to the first digit (covers sdX, mmcblk0, nvme0n1, etc.)
-  base="$name"
-  # /sys/block parent directory (heuristic)
-  # We don't strictly need parent; we can probe a couple of likely paths.
-
-  # Try /sys/block/<disk>/<part>/size
+  # Try partition-style and disk-style /sys paths
   for blkdir in "/sys/block/$name" "/sys/block/${name%%[0-9]*}"; do
     if [[ -d "$blkdir" ]]; then
-      # Partition-style dir
+      # Partition-style: /sys/block/<disk>/<part>/size
       if [[ -d "$blkdir/$name" ]]; then
         sizefile="$blkdir/$name/size"
         if [[ -f "$sizefile" ]]; then
@@ -131,7 +118,7 @@ get_partition_size_bytes() {
         fi
       fi
 
-      # Disk-style dir
+      # Disk-style: /sys/block/<disk>/size
       sizefile="$blkdir/size"
       if [[ -f "$sizefile" ]]; then
         sectors="$(cat "$sizefile" 2>/dev/null || echo "0")"
@@ -162,15 +149,12 @@ echo "CAPACITY bytes=${TOTAL_BYTES}"
 echo "BEGIN_READ source=${PARTITION} dest=${DEST_IMG}"
 
 # ---------------------------------------------------------------------------
-# Run dd and stream progress
+# Helper: parse Linux dd "bytes copied" lines into PROGRESS lines
+#
+# Typical dd status=progress summary line:
+#   1073741824 bytes (1.1 GB, 1.0 GiB) copied, 10 s, 107 MB/s
 # ---------------------------------------------------------------------------
 
-tmp_err="$(mktemp)"
-trap 'rm -f "$tmp_err"' EXIT
-
-# Helper: parse a Linux dd "bytes copied" line into a PROGRESS line.
-# Typical line:
-#   1073741824 bytes (1.1 GB, 1.0 GiB) copied, 10 s, 107 MB/s
 emit_progress_from_line() {
   local line="$1"
   local bytes elapsed rate pct
@@ -195,52 +179,37 @@ emit_progress_from_line() {
   fi
 }
 
-# Start dd; redirect its stderr to a temp file
-dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
-  2> "$tmp_err" &
-dd_pid=$!
+# ---------------------------------------------------------------------------
+# Run dd and stream progress directly from stderr
+# ---------------------------------------------------------------------------
 
-# Background: follow dd's stderr and echo as DD_STATUS + PROGRESS lines.
-(
-  tail -F "$tmp_err" 2>/dev/null | while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    echo "DD_STATUS $line"
-    emit_progress_from_line "$line"
-  done
-) &
-status_watcher_pid=$!
-
-# Wait for dd to finish.
-wait "$dd_pid"
-dd_rc=$?
-
-# Stop watcher if still running.
-if kill -0 "$status_watcher_pid" 2>/dev/null; then
-  kill "$status_watcher_pid" 2>/dev/null || true
-fi
-
-# One last drain of stderr so we don't miss the final summary.
-if [[ -s "$tmp_err" ]]; then
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    echo "DD_STATUS $line"
-    emit_progress_from_line "$line"
-  done < "$tmp_err"
-fi
+# We run dd and attach a process-substitution reader to its stderr that:
+#   - echoes each line as DD_STATUS ...
+#   - additionally emits PROGRESS ... when the line matches the dd summary pattern.
+dd_rc=0
+{
+  dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
+    2> >(
+      # This subshell runs in parallel, reading dd's stderr.
+      # Avoid -e semantics here so a parse miss doesn't kill the script.
+      set +e
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        echo "DD_STATUS $line"
+        emit_progress_from_line "$line"
+      done
+    )
+} || dd_rc=$?
 
 if [[ $dd_rc -ne 0 ]]; then
   log "ERROR: dd failed with exit code $dd_rc"
-  if [[ -s "$tmp_err" ]]; then
-    log "dd stderr (tail):"
-    tail -n 10 "$tmp_err" >&2
-  fi
   exit "$dd_rc"
 fi
 
 sync || true
 
 # ---------------------------------------------------------------------------
-# Dump partition table with sfdisk (if available)
+# Dump partition table (sidecar .part) with sfdisk if available
 # ---------------------------------------------------------------------------
 
 if command -v sfdisk >/dev/null 2>&1; then
