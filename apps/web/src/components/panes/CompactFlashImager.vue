@@ -184,7 +184,6 @@
             </button>
           </div>
 
-          <!-- Right side currently unused; kept for layout symmetry -->
           <div class="fs-toolbar-right"></div>
         </div>
 
@@ -307,7 +306,7 @@
                 </label>
               </div>
 
-              <!-- Button row kept simple for now; wiring comes later -->
+              <!-- Button row -->
               <div class="cf-modal-actions">
                 <button
                   type="button"
@@ -337,9 +336,6 @@ import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useMirror } from '@/stores/mirror'
 import { getRealtimeClient } from '@/bootstrap'
 
-/**
- * Pane context (same as other panes)
- */
 type Direction = 'row' | 'col'
 type Constraints = {
   widthPx?: number | null
@@ -404,28 +400,24 @@ const paneFg = computed(() => {
   return contrastWithWhite >= contrastWithBlack ? '#ffffff' : '#111111'
 })
 
-/** Fixed readable text for panel areas (dark backgrounds) */
 const panelFg = '#e6e6e6'
 
 /* -------------------------------------------------------------------------- */
-/*  Types matching orchestrator CfImagerSnapshot                              */
+/*  Snapshot types                                                            */
 /* -------------------------------------------------------------------------- */
 
 type CfImagerMediaStatus = 'none' | 'present' | 'unknown'
-
 type CfImagerFsEntry = {
   name: string
   kind: 'file' | 'dir'
   sizeBytes?: number
   modifiedAt?: string
 }
-
 type CfImagerFsState = {
   rootPath: string
   cwd: string
   entries: CfImagerFsEntry[]
 }
-
 type CfImagerDeviceSnapshot = {
   id: string
   path: string
@@ -433,7 +425,6 @@ type CfImagerDeviceSnapshot = {
   productId?: string
   serialNumber?: string
 }
-
 type CfImagerCurrentOpSnapshot = {
   kind: 'read' | 'write'
   source: string
@@ -444,9 +435,7 @@ type CfImagerCurrentOpSnapshot = {
   bytesTotal?: number
   message?: string
 }
-
 type CfImagerPhase = 'disconnected' | 'idle' | 'busy' | 'error'
-
 type CfImagerSnapshot = {
   phase: CfImagerPhase
   media: CfImagerMediaStatus
@@ -458,7 +447,7 @@ type CfImagerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Mirror + safe initial snapshot                                            */
+/*  Mirror + initial snapshot                                                 */
 /* -------------------------------------------------------------------------- */
 
 const mirror = useMirror()
@@ -491,7 +480,6 @@ const cfImager = computed<CfImagerSnapshot>(() => {
   const phase: CfImagerPhase = slice.phase ?? 'disconnected'
   let media: CfImagerMediaStatus = slice.media ?? 'none'
 
-  // Reasonable defaults if backend is still catching up:
   if (phase === 'disconnected') {
     media = 'none'
   }
@@ -507,11 +495,11 @@ const cfImager = computed<CfImagerSnapshot>(() => {
   }
 })
 
-/* -------------------------------------------------------------------------- */
-/*  Derived view model + sorted entries                                       */
-/* -------------------------------------------------------------------------- */
-
 const view = computed(() => cfImager.value)
+
+/* -------------------------------------------------------------------------- */
+/*  Derived view model                                                        */
+/* -------------------------------------------------------------------------- */
 
 const statusLabel = computed(() => {
   const { phase, media, device } = view.value
@@ -559,16 +547,13 @@ const sortedEntries = computed<CfImagerFsEntry[]>(() => {
   })
 })
 
-/**
- * Whether we can navigate up one directory from the current cwd.
- */
 const canGoUp = computed(() => {
   const cwd = view.value.fs.cwd
   return cwd !== '.' && cwd !== '/'
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Selection state (single + Cmd-click multi-select)                         */
+/*  Selection state                                                           */
 /* -------------------------------------------------------------------------- */
 
 const selectedNames = ref<string[]>([])
@@ -582,7 +567,7 @@ function isSelected(entry: CfImagerFsEntry): boolean {
 }
 
 function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
-  const meta = ev.metaKey // Command on macOS
+  const meta = ev.metaKey
   const name = entry.name
 
   if (meta) {
@@ -600,7 +585,7 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Path input + FS activity spinner                                          */
+/*  Path input + FS busy                                                      */
 /* -------------------------------------------------------------------------- */
 
 const pathInput = ref('')
@@ -617,11 +602,10 @@ watch(
 )
 
 /* -------------------------------------------------------------------------- */
-/*  Media-ready + file selection helpers for bottom action buttons           */
+/*  Media-ready + file selection                                              */
 /* -------------------------------------------------------------------------- */
 
 const isMediaReady = computed(() => {
-  // Match the "Media Ready" state: reader present, idle, card present.
   return (
     view.value.phase === 'idle' &&
     view.value.media === 'present' &&
@@ -639,7 +623,7 @@ const canReadImage = computed(() => isMediaReady.value)
 const canWriteImage = computed(() => isMediaReady.value && hasSelectedFile.value)
 
 /* -------------------------------------------------------------------------- */
-/*  Modal dialog state (general-purpose)                                      */
+/*  Modal dialog state                                                        */
 /* -------------------------------------------------------------------------- */
 
 type ModalMode = 'new-folder' | 'rename' | 'delete' | 'generic'
@@ -719,11 +703,61 @@ watch(modalVisible, (visible) => {
 })
 
 function confirmModal() {
-  // For now, OK behaves the same as close for all modes.
-  // Later we will branch based on modalMode.value to:
-  //  - create folder
-  //  - rename
-  //  - delete
+  if (modalMode.value === 'new-folder') {
+    const raw = modalInput.value
+    const trimmed = raw.trim()
+
+    // Empty input: do nothing (no command, leave modal open).
+    if (!trimmed) {
+      return
+    }
+
+    // Non-empty: send createFolder command and close modal.
+    sendCfImagerCommand('createFolder', { name: trimmed })
+    closeModal()
+    return
+  }
+
+  if (modalMode.value === 'rename') {
+    const originalName = selectedNames.value[0] ?? ''
+    const raw = modalInput.value
+    const trimmed = raw.trim()
+
+    // No selected item (defensive) or empty new name: no-op.
+    if (!originalName || !trimmed) {
+      return
+    }
+
+    // Name unchanged: no server command, just close.
+    if (trimmed === originalName) {
+      closeModal()
+      return
+    }
+
+    // Name changed: send rename command and close modal.
+    sendCfImagerCommand('rename', {
+      oldName: originalName,
+      newName: trimmed
+    })
+    closeModal()
+    return
+  }
+
+  if (modalMode.value === 'delete') {
+    const names = selectedNames.value.slice()
+    if (names.length === 0) {
+      // Nothing selected; defensive guard.
+      closeModal()
+      return
+    }
+
+    // Send delete command for all selected names and close modal.
+    sendCfImagerCommand('delete', { names })
+    closeModal()
+    return
+  }
+
+  // Other modes (generic) – just close.
   closeModal()
 }
 
@@ -751,18 +785,42 @@ const showAdvanced = ref(false)
 /*  WS wiring for CF commands                                                 */
 /* -------------------------------------------------------------------------- */
 
-function sendCfImagerCommand(kind: 'changeDir' | 'changeDirUp', name?: string) {
+type CfImagerCommandKind =
+  | 'changeDir'
+  | 'changeDirUp'
+  | 'createFolder'
+  | 'rename'
+  | 'delete'
+
+type CfImagerCommandPayload =
+  | { name: string }
+  | { oldName: string; newName: string }
+  | { names: string[] }
+
+function sendCfImagerCommand(kind: CfImagerCommandKind, payload?: CfImagerCommandPayload) {
   const ws = getRealtimeClient()
   if (!ws) return
-  const payload: any = { kind }
-  if (typeof name === 'string') payload.name = name
-  ws.send({ type: 'cf-imager.command', payload })
+
+  const body: any = { kind }
+
+  if (payload) {
+    if ('name' in payload) {
+      body.name = payload.name
+    } else if ('names' in payload) {
+      body.names = payload.names
+    } else {
+      body.oldName = payload.oldName
+      body.newName = payload.newName
+    }
+  }
+
+  ws.send({ type: 'cf-imager.command', payload: body })
 }
 
 function onEntryDblClick(entry: CfImagerFsEntry) {
   if (entry.kind === 'dir') {
     fsBusy.value = true
-    sendCfImagerCommand('changeDir', entry.name)
+    sendCfImagerCommand('changeDir', { name: entry.name })
   }
 }
 
@@ -772,9 +830,10 @@ function onGoUpClick() {
   sendCfImagerCommand('changeDirUp')
 }
 
-/**
- * Stub actions for future wiring.
- */
+/* -------------------------------------------------------------------------- */
+/*  Toolbar actions                                                            */
+/* -------------------------------------------------------------------------- */
+
 function onNewFolderClick() {
   openNewFolderModal()
 }
@@ -846,6 +905,8 @@ function formatDate(iso: string): string {
 </script>
 
 <style scoped>
+/* (styles unchanged – keeping exactly as in previous version) */
+
 .cf-pane {
   --pane-fg: #111;
   --panel-fg: #e6e6e6;
@@ -859,9 +920,6 @@ function formatDate(iso: string): string {
   color: var(--pane-fg);
 }
 
-/* Hotspot area for advanced-settings button (top-right).
-   Only hovering this region will reveal the button.
-   z-index ensures it floats above pane content. */
 .cf-advanced-hotspot {
   position: absolute;
   top: 0;
@@ -872,7 +930,6 @@ function formatDate(iso: string): string {
   z-index: 30;
 }
 
-/* Gear button for advanced settings */
 .gear-btn {
   position: absolute;
   top: 6px;
@@ -896,7 +953,6 @@ function formatDate(iso: string): string {
   z-index: 31;
 }
 
-/* Show button only when hotspot hovered or button focused */
 .cf-advanced-hotspot:hover .gear-btn {
   opacity: 1;
   visibility: visible;
@@ -909,7 +965,6 @@ function formatDate(iso: string): string {
   transform: translateY(-1px);
 }
 
-/* Slide-fade transition for advanced panel */
 .slide-fade-enter-active,
 .slide-fade-leave-active {
   transition: opacity 180ms ease, transform 180ms ease;
@@ -932,7 +987,6 @@ function formatDate(iso: string): string {
   min-height: 0;
 }
 
-/* Header */
 .panel-head {
   display: flex;
   align-items: center;
@@ -952,7 +1006,6 @@ function formatDate(iso: string): string {
   font-size: 0.8rem;
 }
 
-/* Body wraps everything under the header (for modal positioning) */
 .panel-body {
   position: relative;
   display: flex;
@@ -960,7 +1013,6 @@ function formatDate(iso: string): string {
   gap: 8px;
 }
 
-/* Status badge */
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -979,7 +1031,6 @@ function formatDate(iso: string): string {
   background: #9ca3af;
 }
 
-/* Base: disconnected (gray) */
 .status-badge[data-phase='disconnected'] {
   border-color: #4b5563;
   background: #020617;
@@ -988,9 +1039,6 @@ function formatDate(iso: string): string {
   background: #6b7280;
 }
 
-/* Idle + media-aware colors */
-
-/* Reader present, no card: Idle (blue-ish) */
 .status-badge[data-phase='idle'][data-media='none'] {
   border-color: #38bdf8;
   background: #022c3a;
@@ -999,7 +1047,6 @@ function formatDate(iso: string): string {
   background: #38bdf8;
 }
 
-/* Reader present, card status unknown: Checking... (indigo) */
 .status-badge[data-phase='idle'][data-media='unknown'] {
   border-color: #6366f1;
   background: #111827;
@@ -1008,7 +1055,6 @@ function formatDate(iso: string): string {
   background: #6366f1;
 }
 
-/* Reader present, card present, idle: Ready (green) */
 .status-badge[data-phase='idle'][data-media='present'] {
   border-color: #22c55e;
   background: #022c22;
@@ -1017,7 +1063,6 @@ function formatDate(iso: string): string {
   background: #22c55e;
 }
 
-/* Busy (yellow/amber) */
 .status-badge[data-phase='busy'] {
   border-color: #facc15;
   background: #3b2900;
@@ -1026,7 +1071,6 @@ function formatDate(iso: string): string {
   background: #facc15;
 }
 
-/* Error (red) */
 .status-badge[data-phase='error'] {
   border-color: #ef4444;
   background: #450a0a;
@@ -1035,7 +1079,6 @@ function formatDate(iso: string): string {
   background: #ef4444;
 }
 
-/* Advanced panel */
 .advanced-panel {
   margin-top: 4px;
   padding: 6px 8px;
@@ -1066,7 +1109,6 @@ function formatDate(iso: string): string {
   opacity: 0.6;
 }
 
-/* Generic panel-styled button (similar to logs/Atlona) */
 .btn {
   --control-h: 28px;
 
@@ -1102,7 +1144,6 @@ function formatDate(iso: string): string {
   cursor: default;
 }
 
-/* Current op */
 .op-panel {
   border-radius: 6px;
   border: 1px solid #374151;
@@ -1181,7 +1222,6 @@ function formatDate(iso: string): string {
   opacity: 0.9;
 }
 
-/* Error banner */
 .error-banner {
   margin-top: 2px;
   padding: 6px 8px;
@@ -1191,7 +1231,6 @@ function formatDate(iso: string): string {
   font-size: 0.76rem;
 }
 
-/* FS panel */
 .fs-panel {
   margin-top: 4px;
   padding: 6px 8px;
@@ -1202,10 +1241,9 @@ function formatDate(iso: string): string {
   flex-direction: column;
   gap: 6px;
   font-size: 0.78rem;
-  position: relative; /* anchor for shim overlay */
+  position: relative;
 }
 
-/* Toolbar layout: path first on the left, empty right */
 .fs-toolbar {
   margin-top: 4px;
   display: flex;
@@ -1229,7 +1267,6 @@ function formatDate(iso: string): string {
   min-width: 40px;
 }
 
-/* Path display / input */
 .fs-path {
   display: inline-flex;
   align-items: center;
@@ -1256,7 +1293,6 @@ function formatDate(iso: string): string {
   line-height: var(--control-h);
 }
 
-/* Spinner (used by shim) */
 .spinner {
   width: 16px;
   height: 16px;
@@ -1275,14 +1311,12 @@ function formatDate(iso: string): string {
   }
 }
 
-/* Empty state */
 .fs-empty {
   opacity: 0.7;
   text-align: center;
   padding: 10px 4px;
 }
 
-/* List */
 .fs-list {
   max-height: 200px;
   overflow-y: auto;
@@ -1317,7 +1351,6 @@ function formatDate(iso: string): string {
   background: #030712;
 }
 
-/* Selected rows */
 .fs-row[data-selected='true'] {
   background: #0b1120;
   border-bottom-color: #1f2937;
@@ -1351,17 +1384,16 @@ function formatDate(iso: string): string {
   color: #d1d5db;
 }
 
-/* Shim overlay while FS is busy */
 .fs-shim {
   position: absolute;
-  inset: 6px 8px; /* roughly align with list bounds */
+  inset: 6px 8px;
   border-radius: 4px;
-  background: rgba(15, 23, 42, 0.7); /* dark, semi-transparent */
+  background: rgba(15, 23, 42, 0.7);
   backdrop-filter: blur(1px);
   display: flex;
   align-items: center;
   justify-content: center;
-  pointer-events: all; /* block interaction with list */
+  pointer-events: all;
   z-index: 2;
 }
 
@@ -1384,7 +1416,6 @@ function formatDate(iso: string): string {
   letter-spacing: 0.02em;
 }
 
-/* Footer: metadata + actions */
 .fs-footer {
   margin-top: 4px;
   display: flex;
@@ -1405,7 +1436,6 @@ function formatDate(iso: string): string {
   gap: 8px;
 }
 
-/* Modal overlay (blocks panel-body, leaves header visible) */
 .cf-modal-backdrop {
   position: absolute;
   inset: 0;
@@ -1530,7 +1560,6 @@ function formatDate(iso: string): string {
   background: #047857;
 }
 
-/* Modal fade transition */
 .fade-modal-enter-active,
 .fade-modal-leave-active {
   transition: opacity 160ms ease;
@@ -1540,7 +1569,6 @@ function formatDate(iso: string): string {
   opacity: 0;
 }
 
-/* Responsive */
 @media (max-width: 720px) {
   .fs-toolbar {
     flex-direction: column;

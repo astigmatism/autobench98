@@ -240,12 +240,25 @@ export class CfImagerService {
         try {
             const safeName = sanitizeName(name)
             if (!safeName) {
-                throw new Error('Folder name is required')
+                // Treat empty/unsafe names as no-op, per UI contract.
+                return
             }
 
             const target = resolveUnderRoot(this.config.rootDir, join(this.relCwd(), safeName))
-            await fsp.mkdir(target, { recursive: false })
 
+            try {
+                await fsp.mkdir(target, { recursive: false })
+            } catch (err) {
+                const e = err as NodeJS.ErrnoException
+                // If the folder already exists, silently drop the request.
+                // No overwrite, no rename, and no error surfaced to UI.
+                if (e && e.code === 'EEXIST') {
+                    return
+                }
+                throw err
+            }
+
+            // On successful creation, refresh FS snapshot so the UI shows the new folder.
             this.emitFsUpdated()
         } catch (err) {
             this.emitError(`createFolder failed: ${(err as Error).message}`)
@@ -257,6 +270,21 @@ export class CfImagerService {
         try {
             const fromAbs = resolveUnderRoot(this.config.rootDir, fromRel)
             const toAbs = resolveUnderRoot(this.config.rootDir, toRel)
+
+            // Silently reject if the target already exists (file or directory).
+            // We do this before attempting the rename so we don't overwrite.
+            try {
+                await fsp.stat(toAbs)
+                // If stat succeeded, something exists at toAbs -> no-op, no error.
+                return
+            } catch (err) {
+                const e = err as NodeJS.ErrnoException
+                // ENOENT / ENOTDIR => target does not exist; proceed with rename.
+                if (!e || (e.code !== 'ENOENT' && e.code !== 'ENOTDIR')) {
+                    // Unexpected error looking up target; surface as a normal failure.
+                    throw err
+                }
+            }
 
             // Rename main path
             await fsp.rename(fromAbs, toAbs)
@@ -794,6 +822,7 @@ export class CfImagerService {
             } catch (err) {
                 const e = err as NodeJS.ErrnoException
                 if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) {
+                    /*
                     console.warn(
                         '[cf-imager] pollFsOnce: cwd no longer exists on disk, resetting to rootDir',
                         {
@@ -802,6 +831,7 @@ export class CfImagerService {
                             err: e.message,
                         }
                     )
+                    */
 
                     // Hard reset to rootDir and emit a fresh snapshot.
                     this.cwdAbs = this.config.rootDir

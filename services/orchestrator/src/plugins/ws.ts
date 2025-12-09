@@ -198,12 +198,13 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
         const payload = msg?.payload ?? {}
         const kind = payload.kind
-        const nameRaw = payload.name
 
         if (typeof kind !== 'string') {
             logWs.warn('cf-imager.command: missing kind')
             return
         }
+
+        const nameRaw = payload.name
 
         if (kind === 'changeDir') {
             const name = typeof nameRaw === 'string' ? nameRaw.trim() : ''
@@ -255,6 +256,104 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 await cfImager.changeDirectory(parent)
             } catch (e) {
                 logWs.warn('cf-imager.command changeDirUp failed', {
+                    err: (e as Error).message
+                })
+            }
+            return
+        }
+
+        if (kind === 'createFolder') {
+            const name = typeof nameRaw === 'string' ? nameRaw.trim() : ''
+            if (!name) {
+                logWs.warn('cf-imager.command createFolder: empty name')
+                return
+            }
+
+            try {
+                await cfImager.createFolder(name)
+            } catch (e) {
+                logWs.warn('cf-imager.command createFolder failed', {
+                    name: nameRaw,
+                    err: (e as Error).message
+                })
+            }
+            return
+        }
+
+        if (kind === 'rename') {
+            const oldNameRaw = payload.oldName
+            const newNameRaw = payload.newName
+
+            const oldName =
+                typeof oldNameRaw === 'string' ? oldNameRaw.trim() : ''
+            const newName =
+                typeof newNameRaw === 'string' ? newNameRaw.trim() : ''
+
+            if (!oldName || !newName) {
+                logWs.warn('cf-imager.command rename: missing names', {
+                    oldName: oldNameRaw,
+                    newName: newNameRaw
+                })
+                return
+            }
+
+            if (oldName === newName) {
+                // No-op rename; UI already checks, but guard defensively.
+                logWs.debug('cf-imager.command rename: names identical, no-op', {
+                    name: oldName
+                })
+                return
+            }
+
+            try {
+                const state = cfImager.getState()
+                const cwd = state.fs?.cwd ?? '.'
+
+                const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+
+                const fromRel = base ? `${base}/${oldName}` : oldName
+                const toRel = base ? `${base}/${newName}` : newName
+
+                await cfImager.renamePath(fromRel, toRel)
+            } catch (e) {
+                logWs.warn('cf-imager.command rename failed', {
+                    oldName: oldNameRaw,
+                    newName: newNameRaw,
+                    err: (e as Error).message
+                })
+            }
+            return
+        }
+
+        if (kind === 'delete') {
+            const namesRaw = payload.names
+            const names: string[] = Array.isArray(namesRaw)
+                ? namesRaw
+                      .map((n: unknown) =>
+                          typeof n === 'string' ? n.trim() : ''
+                      )
+                      .filter(Boolean)
+                : []
+
+            if (names.length === 0) {
+                logWs.warn('cf-imager.command delete: empty names payload', {
+                    names: namesRaw
+                })
+                return
+            }
+
+            try {
+                const state = cfImager.getState()
+                const cwd = state.fs?.cwd ?? '.'
+                const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+
+                for (const name of names) {
+                    const rel = base ? `${base}/${name}` : name
+                    await cfImager.deletePath(rel)
+                }
+            } catch (e) {
+                logWs.warn('cf-imager.command delete failed', {
+                    names: namesRaw,
                     err: (e as Error).message
                 })
             }
