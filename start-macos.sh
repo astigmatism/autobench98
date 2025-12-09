@@ -7,6 +7,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
 
 log() { printf "\033[1;36m[autobench98]\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m[autobench98]\033[0m %s\n" "$*"; }
 err() { printf "\033[1;31m[autobench98]\033[0m %s\n" "$*\n" >&2; }
 die() { err "$1"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing '$1'. Please install it."; }
@@ -54,6 +55,32 @@ if [[ -f .env ]]; then
   set +a
 else
   log "No .env found (that’s fine). Using defaults."
+fi
+
+# --- ensure CF imager scripts are executable (if configured) -----------------
+if [[ -n "${CF_IMAGER_READ_SCRIPT:-}" || -n "${CF_IMAGER_WRITE_SCRIPT:-}" ]]; then
+  log "Ensuring CF imager scripts are executable (macOS)"
+  (
+    cd services/orchestrator || exit 0
+
+    if [[ -n "${CF_IMAGER_READ_SCRIPT:-}" ]]; then
+      if [[ -f "$CF_IMAGER_READ_SCRIPT" ]]; then
+        chmod +x "$CF_IMAGER_READ_SCRIPT" 2>/dev/null || \
+          warn "Failed to chmod +x CF_IMAGER_READ_SCRIPT ($CF_IMAGER_READ_SCRIPT)"
+      else
+        warn "CF_IMAGER_READ_SCRIPT not found: $CF_IMAGER_READ_SCRIPT"
+      fi
+    fi
+
+    if [[ -n "${CF_IMAGER_WRITE_SCRIPT:-}" ]]; then
+      if [[ -f "$CF_IMAGER_WRITE_SCRIPT" ]]; then
+        chmod +x "$CF_IMAGER_WRITE_SCRIPT" 2>/dev/null || \
+          warn "Failed to chmod +x CF_IMAGER_WRITE_SCRIPT ($CF_IMAGER_WRITE_SCRIPT)"
+      else
+        warn "CF_IMAGER_WRITE_SCRIPT not found: $CF_IMAGER_WRITE_SCRIPT"
+      fi
+    fi
+  )
 fi
 
 # --- ensure CF_IMAGER_ROOT exists and is writable ----------------------------

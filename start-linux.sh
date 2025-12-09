@@ -123,6 +123,53 @@ else
   warn "SERIAL_PM_WATTSUP_PATH is not set. Orchestrator will fall back to 'wattsup' on \$PATH."
 fi
 
+# --- ensure CF imager scripts are executable ---------------------------------
+# Like SERIAL_PM_WATTSUP_PATH, we honor CF_IMAGER_* paths as seen from
+# services/orchestrator (the orchestrator's cwd).
+if [[ -n "${CF_IMAGER_READ_SCRIPT:-}" || -n "${CF_IMAGER_WRITE_SCRIPT:-}" ]]; then
+  log "Ensuring CF imager scripts are executable (Linux)"
+
+  ORCH_DIR="${script_dir}/services/orchestrator"
+
+  if [[ -n "${CF_IMAGER_READ_SCRIPT:-}" ]]; then
+    if [[ "${CF_IMAGER_READ_SCRIPT}" = /* ]]; then
+      CF_READ_PATH="${CF_IMAGER_READ_SCRIPT}"
+    else
+      CF_READ_PATH="${ORCH_DIR}/${CF_IMAGER_READ_SCRIPT}"
+    fi
+
+    if [[ -f "$CF_READ_PATH" ]]; then
+      if [[ ! -x "$CF_READ_PATH" ]]; then
+        log "Making CF_IMAGER_READ_SCRIPT executable: $CF_READ_PATH"
+        chmod +x "$CF_READ_PATH" || warn "Failed to chmod +x CF_IMAGER_READ_SCRIPT ($CF_READ_PATH)"
+      else
+        log "CF_IMAGER_READ_SCRIPT already executable: $CF_READ_PATH"
+      fi
+    else
+      warn "CF_IMAGER_READ_SCRIPT not found at: $CF_READ_PATH"
+    fi
+  fi
+
+  if [[ -n "${CF_IMAGER_WRITE_SCRIPT:-}" ]]; then
+    if [[ "${CF_IMAGER_WRITE_SCRIPT}" = /* ]]; then
+      CF_WRITE_PATH="${CF_IMAGER_WRITE_SCRIPT}"
+    else
+      CF_WRITE_PATH="${ORCH_DIR}/${CF_IMAGER_WRITE_SCRIPT}"
+    fi
+
+    if [[ -f "$CF_WRITE_PATH" ]]; then
+      if [[ ! -x "$CF_WRITE_PATH" ]]; then
+        log "Making CF_IMAGER_WRITE_SCRIPT executable: $CF_WRITE_PATH"
+        chmod +x "$CF_WRITE_PATH" || warn "Failed to chmod +x CF_IMAGER_WRITE_SCRIPT ($CF_WRITE_PATH)"
+      else
+        log "CF_IMAGER_WRITE_SCRIPT already executable: $CF_WRITE_PATH"
+      fi
+    else
+      warn "CF_IMAGER_WRITE_SCRIPT not found at: $CF_WRITE_PATH"
+    fi
+  fi
+fi
+
 # --- ensure CF_IMAGER_ROOT exists and is writable ----------------------------
 if [[ -n "${CF_IMAGER_ROOT:-}" ]]; then
   # Expand leading ~ to $HOME if present

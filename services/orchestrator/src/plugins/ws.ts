@@ -360,6 +360,73 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             return
         }
 
+        if (kind === 'readImage') {
+            const cwdRaw = payload.cwd
+            const imageNameRaw = payload.imageName
+
+            const cwd =
+                typeof cwdRaw === 'string' && cwdRaw.trim()
+                    ? cwdRaw.trim()
+                    : '.'
+            const imageName =
+                typeof imageNameRaw === 'string' ? imageNameRaw.trim() : ''
+
+            if (!imageName) {
+                logWs.warn('cf-imager.command readImage: empty imageName', {
+                    cwd: cwdRaw,
+                    imageName: imageNameRaw
+                })
+                return
+            }
+
+            try {
+                await cfImager.readDeviceToImage(cwd, imageName)
+            } catch (e) {
+                logWs.warn('cf-imager.command readImage failed', {
+                    cwd: cwdRaw,
+                    imageName: imageNameRaw,
+                    err: (e as Error).message
+                })
+            }
+
+            return
+        }
+
+        if (kind === 'writeImage') {
+            const cwdRaw = payload.cwd
+            const fileNameRaw = payload.fileName
+
+            const cwd =
+                typeof cwdRaw === 'string' && cwdRaw.trim()
+                    ? cwdRaw.trim()
+                    : '.'
+            const fileName =
+                typeof fileNameRaw === 'string' ? fileNameRaw.trim() : ''
+
+            if (!fileName) {
+                logWs.warn('cf-imager.command writeImage: empty fileName', {
+                    cwd: cwdRaw,
+                    fileName: fileNameRaw
+                })
+                return
+            }
+
+            try {
+                const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+                const rel = base ? `${base}/${fileName}` : fileName
+
+                await cfImager.writeImageToDevice(rel)
+            } catch (e) {
+                logWs.warn('cf-imager.command writeImage failed', {
+                    cwd: cwdRaw,
+                    fileName: fileNameRaw,
+                    err: (e as Error).message
+                })
+            }
+
+            return
+        }
+
         // Unknown / unsupported command kind
         logWs.warn('cf-imager.command: unknown kind', { kind })
     }

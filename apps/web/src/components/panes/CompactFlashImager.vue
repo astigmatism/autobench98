@@ -239,7 +239,7 @@
               type="button"
               :disabled="!canReadImage"
               @click="onReadImageClick"
-              title="Read image from CF media (not yet wired)"
+              title="Read an image file from the CF media into this folder"
             >
               Read image from media
             </button>
@@ -248,7 +248,7 @@
               type="button"
               :disabled="!canWriteImage"
               @click="onWriteImageClick"
-              title="Write image to CF media (not yet wired)"
+              title="Write the selected image file to the CF media"
             >
               Write image to media
             </button>
@@ -288,7 +288,7 @@
                   {{ modalMessage }}
                 </p>
 
-                <!-- Input mode (new folder / rename) -->
+                <!-- Input mode (new folder / rename / read image) -->
                 <label
                   v-if="modalHasInput"
                   class="cf-modal-field"
@@ -626,7 +626,7 @@ const canWriteImage = computed(() => isMediaReady.value && hasSelectedFile.value
 /*  Modal dialog state                                                        */
 /* -------------------------------------------------------------------------- */
 
-type ModalMode = 'new-folder' | 'rename' | 'delete' | 'generic'
+type ModalMode = 'new-folder' | 'rename' | 'delete' | 'read-image' | 'generic'
 
 const modalVisible = ref(false)
 const modalMode = ref<ModalMode>('generic')
@@ -636,7 +636,10 @@ const modalInput = ref('')
 const modalInputRef = ref<HTMLInputElement | null>(null)
 
 const modalHasInput = computed(
-  () => modalMode.value === 'new-folder' || modalMode.value === 'rename'
+  () =>
+    modalMode.value === 'new-folder' ||
+    modalMode.value === 'rename' ||
+    modalMode.value === 'read-image'
 )
 
 function openNewFolderModal() {
@@ -675,6 +678,14 @@ function openDeleteModal() {
     modalMessage.value = 'Are you sure you want to delete the selected item(s)?'
   }
 
+  modalInput.value = ''
+  modalVisible.value = true
+}
+
+function openReadImageModal() {
+  modalMode.value = 'read-image'
+  modalTitle.value = 'Read image from CF media'
+  modalMessage.value = 'Enter a name for the new image file (without extension)'
   modalInput.value = ''
   modalVisible.value = true
 }
@@ -757,6 +768,26 @@ function confirmModal() {
     return
   }
 
+  if (modalMode.value === 'read-image') {
+    const raw = modalInput.value
+    const trimmed = raw.trim()
+
+    if (!trimmed) {
+      // Do not send a command for empty names; keep the modal open.
+      return
+    }
+
+    const cwd = view.value.fs.cwd || '.'
+
+    sendCfImagerCommand('readImage', {
+      cwd,
+      imageName: trimmed
+    })
+
+    closeModal()
+    return
+  }
+
   // Other modes (generic) – just close.
   closeModal()
 }
@@ -791,27 +822,18 @@ type CfImagerCommandKind =
   | 'createFolder'
   | 'rename'
   | 'delete'
+  | 'readImage'
+  | 'writeImage'
 
-type CfImagerCommandPayload =
-  | { name: string }
-  | { oldName: string; newName: string }
-  | { names: string[] }
+type CfImagerCommandPayload = Record<string, unknown>
 
 function sendCfImagerCommand(kind: CfImagerCommandKind, payload?: CfImagerCommandPayload) {
   const ws = getRealtimeClient()
   if (!ws) return
 
-  const body: any = { kind }
-
-  if (payload) {
-    if ('name' in payload) {
-      body.name = payload.name
-    } else if ('names' in payload) {
-      body.names = payload.names
-    } else {
-      body.oldName = payload.oldName
-      body.newName = payload.newName
-    }
+  const body: any = {
+    kind,
+    ...(payload ?? {})
   }
 
   ws.send({ type: 'cf-imager.command', payload: body })
@@ -849,11 +871,30 @@ function onDeleteClick() {
 }
 
 function onReadImageClick() {
-  // TODO: implement "read image from media" operation
+  if (!canReadImage.value) return
+  openReadImageModal()
 }
 
 function onWriteImageClick() {
-  // TODO: implement "write image to media" operation
+  if (!canWriteImage.value) return
+
+  const cwd = view.value.fs.cwd || '.'
+
+  // Prefer the first selected file in the current directory.
+  const fileName =
+    selectedNames.value.find(name =>
+      sortedEntries.value.some(e => e.kind === 'file' && e.name === name)
+    ) ?? null
+
+  if (!fileName) {
+    // Defensive guard: no valid file selection.
+    return
+  }
+
+  sendCfImagerCommand('writeImage', {
+    cwd,
+    fileName
+  })
 }
 
 /* -------------------------------------------------------------------------- */
