@@ -22,7 +22,8 @@ set -euo pipefail
 #   - DEVICE_PATH is the whole CF device (e.g. /dev/sda) OR a partition (e.g. /dev/sda1).
 #   - If DEVICE_PATH is a whole-disk node, we image the first partition.
 #   - Progress:
-#       * Uses `dd bs=4M status=progress` and parses its stderr lines.
+#       * Uses `dd bs=4M status=progress` and forwards stderr lines with
+#         both DD_STATUS and PROGRESS.
 
 log() { printf '[cf-read-linux] %s\n' "$*" >&2; }
 
@@ -180,26 +181,52 @@ emit_progress_from_line() {
 }
 
 # ---------------------------------------------------------------------------
-# Run dd and stream progress directly from stderr
+# Run dd with status=progress.
+# We capture stderr in a temp file and stream it as DD_STATUS + PROGRESS
+# while dd runs, mirroring your original structure.
 # ---------------------------------------------------------------------------
 
-# We run dd and attach a process-substitution reader to its stderr that:
-#   - echoes each line as DD_STATUS ...
-#   - additionally emits PROGRESS ... when the line matches the dd summary pattern.
-dd_rc=0
-{
-  dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
-    2> >(
-      # This subshell runs in parallel, reading dd's stderr.
-      # Avoid -e semantics here so a parse miss doesn't kill the script.
-      set +e
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        echo "DD_STATUS $line"
-        emit_progress_from_line "$line"
-      done
-    )
-} || dd_rc=$?
+tmp_err="$(mktemp)"
+trap 'rm -f "$tmp_err"' EXIT
+
+# Start dd; redirect its stderr to a temp file
+dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
+  2> "$tmp_err" &
+
+dd_pid=$!
+
+# Background watcher: read dd stderr while dd is running
+(
+  # We read from the temp file; as dd appends, read will wake up.
+  while kill -0 "$dd_pid" 2>/dev/null; do
+    if IFS= read -r line; then
+      [[ -z "$line" ]] && continue
+      echo "DD_STATUS $line"
+      emit_progress_from_line "$line"
+    else
+      # Small sleep to avoid a busy loop when no new data
+      sleep 0.5
+    fi
+  done
+) < "$tmp_err" &
+status_watcher_pid=$!
+
+wait "$dd_pid"
+dd_rc=$?
+
+# One last drain of any remaining stderr lines (including final dd summary)
+if [[ -s "$tmp_err" ]]; then
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    echo "DD_STATUS $line"
+    emit_progress_from_line "$line"
+  done < "$tmp_err"
+fi
+
+# Kill the watcher if still running
+if kill -0 "$status_watcher_pid" 2>/dev/null; then
+  kill "$status_watcher_pid" 2>/dev/null || true
+fi
 
 if [[ $dd_rc -ne 0 ]]; then
   log "ERROR: dd failed with exit code $dd_rc"
