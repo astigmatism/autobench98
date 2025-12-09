@@ -181,12 +181,11 @@ emit_progress_from_line() {
 }
 
 # ---------------------------------------------------------------------------
-# Run dd with status=progress.
+# Run dd with status=progress, streaming stderr through a parser.
 #
-# IMPORTANT: to see progress lines *while* dd is running (not all at the end),
-# we must defeat stdio's block buffering when stderr is redirected.
-# We do this with `stdbuf -o0 -e0` so stderr is unbuffered, then pipe it
-# through a small while-loop that echoes DD_STATUS + PROGRESS.
+# We use stdbuf to make dd's stderr unbuffered, then convert carriage-return
+# progress updates into newline-terminated lines so the while-loop can read
+# them incrementally.
 # ---------------------------------------------------------------------------
 
 if ! command -v stdbuf >/dev/null 2>&1; then
@@ -194,16 +193,12 @@ if ! command -v stdbuf >/dev/null 2>&1; then
   exit 1
 fi
 
-# Run dd with unbuffered stderr, capture that stderr stream in a while-loop.
-# stderr (fd 2) goes to the pipe; stdout is unused.
 stdbuf -o0 -e0 dd if="$PARTITION" of="$DEST_IMG" bs=4M status=progress conv=fsync \
-  2> >( # process substitution runs in a subshell; we can still call our function
-    while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      echo "DD_STATUS $line"
-      emit_progress_from_line "$line"
-    done
-  )
+  2> >(tr '\r' '\n' | while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    echo "DD_STATUS $line"
+    emit_progress_from_line "$line"
+  done)
 
 dd_rc=$?
 
