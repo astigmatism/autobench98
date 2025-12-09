@@ -123,6 +123,30 @@ else
   warn "SERIAL_PM_WATTSUP_PATH is not set. Orchestrator will fall back to 'wattsup' on \$PATH."
 fi
 
+# --- ensure CF_IMAGER_ROOT exists and is writable ----------------------------
+if [[ -n "${CF_IMAGER_ROOT:-}" ]]; then
+  # Expand leading ~ to $HOME if present
+  CF_ROOT="${CF_IMAGER_ROOT/#\~/$HOME}"
+  log "CF_IMAGER_ROOT => ${CF_ROOT}"
+
+  if [[ -e "$CF_ROOT" ]]; then
+    if [[ ! -d "$CF_ROOT" ]]; then
+      die "CF_IMAGER_ROOT exists but is not a directory: ${CF_ROOT}"
+    fi
+  else
+    log "Creating CF_IMAGER_ROOT directory at ${CF_ROOT}"
+    mkdir -p "$CF_ROOT" || die "Failed to create CF_IMAGER_ROOT directory: ${CF_ROOT}"
+  fi
+
+  # Ensure it is writable by the current user
+  if [[ ! -w "$CF_ROOT" ]]; then
+    warn "CF_IMAGER_ROOT is not writable by $(id -un). Attempting to adjust permissions..."
+    chmod u+rwx "$CF_ROOT" 2>/dev/null || warn "Failed to chmod CF_IMAGER_ROOT (${CF_ROOT}); CF operations may fail with EACCES."
+  fi
+else
+  warn "CF_IMAGER_ROOT is not set. CfImagerService will use its default root (if any)."
+fi
+
 # --- host-friendly defaults ---------------------------------------------------
 : "${API_PORT:=3000}"
 : "${SIDECAR_PORT:=3100}"
@@ -165,7 +189,7 @@ port_in_use() {
   fi
 }
 
-if port_in_use "${SIDECAR_PORT}"; then
+if port_in_use="${SIDECAR_PORT}"; then
   die "Port ${SIDECAR_PORT} already in use. Stop the existing process or change SIDECAR_PORT."
 fi
 if port_in_use "${API_PORT}"; then

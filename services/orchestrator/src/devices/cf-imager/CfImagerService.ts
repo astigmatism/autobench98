@@ -44,6 +44,9 @@ export class CfImagerService {
     /** Single in-flight child process for read/write (if any). */
     private child: ChildProcessWithoutNullStreams | null = null
 
+    /** Optional periodic FS polling timer for out-of-band changes. */
+    private fsPollTimer: NodeJS.Timeout | null = null
+
     constructor(config: CfImagerConfig, deps: CfImagerServiceDeps) {
         this.config = config
         this.deps = deps
@@ -54,7 +57,8 @@ export class CfImagerService {
         const fs: CfImagerFsState = listDirectoryState(
             root,
             this.cwdAbs,
-            this.config.maxEntriesPerDir
+            this.config.maxEntriesPerDir,
+            this.config.visibleExtensions
         )
 
         this.state = {
@@ -63,6 +67,7 @@ export class CfImagerService {
             fs,
         }
 
+        /*
         console.log(
             '[cf-imager] service constructed',
             JSON.stringify({
@@ -70,8 +75,11 @@ export class CfImagerService {
                 maxEntriesPerDir: this.config.maxEntriesPerDir,
                 readScriptPath: this.config.readScriptPath,
                 writeScriptPath: this.config.writeScriptPath,
+                visibleExtensions: this.config.visibleExtensions,
+                fsPollIntervalMs: this.config.fsPollIntervalMs ?? 0,
             })
         )
+        */
     }
 
     /* ---------------------------------------------------------------------- */
@@ -79,12 +87,34 @@ export class CfImagerService {
     /* ---------------------------------------------------------------------- */
 
     public async start(): Promise<void> {
-        console.log('[cf-imager] start() called (no-op; waiting for device discovery)')
-        // No-op for now; device lifecycle is fully driven by discovery.
+        // console.log('[cf-imager] start() called (initializing FS polling, waiting for device discovery)')
+
+        // Initial FS snapshot is already in this.state from the constructor.
+        // Start a lightweight polling watcher if configured.
+        const interval = this.config.fsPollIntervalMs ?? 0
+        if (interval > 0) {
+            if (this.fsPollTimer) {
+                clearInterval(this.fsPollTimer)
+                this.fsPollTimer = null
+            }
+
+            // Immediate initial poll to sync any changes after process start.
+            void this.pollFsOnce()
+
+            this.fsPollTimer = setInterval(() => {
+                void this.pollFsOnce()
+            }, interval)
+        }
     }
 
     public async stop(): Promise<void> {
-        console.log('[cf-imager] stop() called')
+        // console.log('[cf-imager] stop() called')
+
+        if (this.fsPollTimer) {
+            clearInterval(this.fsPollTimer)
+            this.fsPollTimer = null
+        }
+
         await this.cancelCurrentChild('explicit-close')
         this.device = null
         this.state.phase = 'disconnected'
@@ -190,7 +220,7 @@ export class CfImagerService {
     /* ---------------------------------------------------------------------- */
 
     public async listDirectory(relPath: string | undefined): Promise<void> {
-        console.log('[cf-imager] listDirectory', { relPath })
+        // console.log('[cf-imager] listDirectory', { relPath })
         try {
             const abs = resolveUnderRoot(this.config.rootDir, relPath ?? '.')
             this.cwdAbs = abs
@@ -201,12 +231,12 @@ export class CfImagerService {
     }
 
     public async changeDirectory(newRel: string): Promise<void> {
-        console.log('[cf-imager] changeDirectory', { newRel })
+        // console.log('[cf-imager] changeDirectory', { newRel })
         await this.listDirectory(newRel)
     }
 
     public async createFolder(name: string): Promise<void> {
-        console.log('[cf-imager] createFolder', { name })
+        // console.log('[cf-imager] createFolder', { name })
         try {
             const safeName = sanitizeName(name)
             if (!safeName) {
@@ -223,7 +253,7 @@ export class CfImagerService {
     }
 
     public async renamePath(fromRel: string, toRel: string): Promise<void> {
-        console.log('[cf-imager] renamePath', { fromRel, toRel })
+        // console.log('[cf-imager] renamePath', { fromRel, toRel })
         try {
             const fromAbs = resolveUnderRoot(this.config.rootDir, fromRel)
             const toAbs = resolveUnderRoot(this.config.rootDir, toRel)
@@ -252,7 +282,7 @@ export class CfImagerService {
     }
 
     public async deletePath(relPath: string): Promise<void> {
-        console.log('[cf-imager] deletePath', { relPath })
+        // console.log('[cf-imager] deletePath', { relPath })
         try {
             const abs = resolveUnderRoot(this.config.rootDir, relPath)
 
@@ -285,12 +315,14 @@ export class CfImagerService {
     /* ---------------------------------------------------------------------- */
 
     private async ensureDeviceAndMediaForOp(opName: string): Promise<boolean> {
+        /*
         console.log('[cf-imager] ensureDeviceAndMediaForOp', {
             opName,
             hasDevice: !!this.device,
             hasChild: !!this.child,
             media: this.state.media,
         })
+        */
 
         if (!this.device) {
             this.emitError(`${opName}: device not connected`)
@@ -319,7 +351,7 @@ export class CfImagerService {
     }
 
     public async writeImageToDevice(imageRelPath: string): Promise<void> {
-        console.log('[cf-imager] writeImageToDevice requested', { imageRelPath })
+        // console.log('[cf-imager] writeImageToDevice requested', { imageRelPath })
         if (!await this.ensureDeviceAndMediaForOp('writeImageToDevice')) return
 
         const now = new Date().toISOString()
@@ -353,11 +385,11 @@ export class CfImagerService {
         this.state.currentOp = undefined
         this.state.message = 'Write not yet implemented'
 
-        console.log('[cf-imager] writeImageToDevice stub completed')
+        // console.log('[cf-imager] writeImageToDevice stub completed')
     }
 
     public async readDeviceToImage(targetDirRel: string, imageName: string): Promise<void> {
-        console.log('[cf-imager] readDeviceToImage requested', { targetDirRel, imageName })
+        // console.log('[cf-imager] readDeviceToImage requested', { targetDirRel, imageName })
         if (!await this.ensureDeviceAndMediaForOp('readDeviceToImage')) return
 
         const safeName = sanitizeName(imageName)
@@ -402,7 +434,7 @@ export class CfImagerService {
         this.state.currentOp = undefined
         this.state.message = 'Read not yet implemented'
 
-        console.log('[cf-imager] readDeviceToImage stub completed')
+        // console.log('[cf-imager] readDeviceToImage stub completed')
     }
 
     /* ---------------------------------------------------------------------- */
@@ -417,7 +449,7 @@ export class CfImagerService {
 
         if (!child) return
 
-        console.log('[cf-imager] cancelCurrentChild', { reason })
+        // console.log('[cf-imager] cancelCurrentChild', { reason })
 
         try {
             child.removeAllListeners()
@@ -469,8 +501,8 @@ export class CfImagerService {
         if (!this.device) {
             this.state.media = 'none'
             if (prev !== this.state.media) {
-                const message = '[cf-imager] media status -> none (no device)'
-                console.log(message)
+                // const message = '[cf-imager] media status -> none (no device)'
+                // console.log(message)
                 this.deps.events.publish({
                     kind: 'cf-media-updated',
                     at: Date.now(),
@@ -487,8 +519,8 @@ export class CfImagerService {
         if (!devPath || devPath === 'unmounted') {
             this.state.media = 'none'
             if (prev !== this.state.media) {
-                const message = '[cf-imager] media status -> none (reader has no media path)'
-                console.log(message)
+                // const message = '[cf-imager] media status -> none (reader has no media path)'
+                // console.log(message)
                 this.deps.events.publish({
                     kind: 'cf-media-updated',
                     at: Date.now(),
@@ -511,9 +543,9 @@ export class CfImagerService {
             } else {
                 this.state.media = 'unknown'
                 if (prev !== this.state.media) {
-                    const message =
-                        `[cf-imager] media status -> unknown (unsupported platform=${process.platform})`
-                    console.log(message)
+                    // const message =
+                    //     `[cf-imager] media status -> unknown (unsupported platform=${process.platform})`
+                    // console.log(message)
                     this.deps.events.publish({
                         kind: 'cf-media-updated',
                         at: Date.now(),
@@ -528,9 +560,9 @@ export class CfImagerService {
         } catch (err) {
             this.state.media = 'unknown'
             if (prev !== this.state.media) {
-                const message =
-                    `[cf-imager] media status -> unknown (probe failed err="${(err as Error).message}")`
-                console.log(message)
+                // const message =
+                 //    `[cf-imager] media status -> unknown (probe failed err="${(err as Error).message}")`
+                // console.log(message)
                 this.deps.events.publish({
                     kind: 'cf-media-updated',
                     at: Date.now(),
@@ -564,7 +596,7 @@ export class CfImagerService {
                     : 'CF media status changed'
             }
 
-            console.log(logMsg)
+            // console.log(logMsg)
 
             this.deps.events.publish({
                 kind: 'cf-media-updated',
@@ -719,15 +751,24 @@ export class CfImagerService {
     }
 
     private relFromRoot(absPath: string): string {
-        const fs = listDirectoryState(this.config.rootDir, absPath, this.config.maxEntriesPerDir)
+        const fs = listDirectoryState(
+            this.config.rootDir,
+            absPath,
+            this.config.maxEntriesPerDir,
+            this.config.visibleExtensions
+        )
         return fs.cwd
     }
 
+    /**
+     * Emit a fresh FS snapshot unconditionally (used by direct FS APIs).
+     */
     private emitFsUpdated(): void {
         const fs = listDirectoryState(
             this.config.rootDir,
             this.cwdAbs,
-            this.config.maxEntriesPerDir
+            this.config.maxEntriesPerDir,
+            this.config.visibleExtensions
         )
         this.state.fs = fs
 
@@ -736,6 +777,72 @@ export class CfImagerService {
             at: Date.now(),
             fs,
         })
+    }
+
+    /**
+     * Poll the current cwd for changes and emit cf-fs-updated only when the
+     * snapshot actually differs from the last known state.
+     *
+     * This is used by the optional periodic watcher so we don't spam clients
+     * when nothing has changed.
+     */
+    private async pollFsOnce(): Promise<void> {
+        try {
+            // Explicitly check whether the current cwd still exists.
+            try {
+                await fsp.stat(this.cwdAbs)
+            } catch (err) {
+                const e = err as NodeJS.ErrnoException
+                if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) {
+                    console.warn(
+                        '[cf-imager] pollFsOnce: cwd no longer exists on disk, resetting to rootDir',
+                        {
+                            cwdAbs: this.cwdAbs,
+                            rootDir: this.config.rootDir,
+                            err: e.message,
+                        }
+                    )
+
+                    // Hard reset to rootDir and emit a fresh snapshot.
+                    this.cwdAbs = this.config.rootDir
+                    this.emitFsUpdated()
+                    return
+                }
+
+                // Other stat errors: log and bail out of this poll cycle.
+                console.warn(
+                    '[cf-imager] pollFsOnce: stat failed for cwd',
+                    { cwdAbs: this.cwdAbs, err: e?.message ?? String(err) }
+                )
+                return
+            }
+
+            const nextFs = listDirectoryState(
+                this.config.rootDir,
+                this.cwdAbs,
+                this.config.maxEntriesPerDir,
+                this.config.visibleExtensions
+            )
+
+            if (fsStateEquals(this.state.fs, nextFs)) {
+                return
+            }
+
+            this.state.fs = nextFs
+
+            this.deps.events.publish({
+                kind: 'cf-fs-updated',
+                at: Date.now(),
+                fs: nextFs,
+            })
+        } catch (err) {
+            const e = err as NodeJS.ErrnoException
+
+            console.warn(
+                '[cf-imager] pollFsOnce: failed to refresh directory state',
+                { err: e?.message ?? String(err) }
+            )
+        }
     }
 
     private emitError(msg: string): void {
@@ -774,4 +881,33 @@ function sanitizeName(name: string | undefined): string {
     if (trimmed.includes('/') || trimmed.includes('\\')) return ''
     if (trimmed === '.' || trimmed === '..') return ''
     return trimmed
+}
+
+/**
+ * Cheap structural equality for FS snapshots so we avoid emitting identical
+ * cf-fs-updated events on every poll.
+ */
+function fsStateEquals(a: CfImagerFsState, b: CfImagerFsState): boolean {
+    if (a === b) return true
+    if (!a || !b) return false
+
+    if (a.rootPath !== b.rootPath) return false
+    if (a.cwd !== b.cwd) return false
+
+    const ea = a.entries
+    const eb = b.entries
+
+    if (ea.length !== eb.length) return false
+
+    for (let i = 0; i < ea.length; i++) {
+        const x = ea[i]
+        const y = eb[i]
+        if (!y) return false
+        if (x.name !== y.name) return false
+        if (x.kind !== y.kind) return false
+        if (x.sizeBytes !== y.sizeBytes) return false
+        if (x.modifiedAt !== y.modifiedAt) return false
+    }
+
+    return true
 }

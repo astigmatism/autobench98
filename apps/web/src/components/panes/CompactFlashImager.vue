@@ -127,38 +127,78 @@
         ⚠️ {{ view.lastError }}
       </div>
 
-      <!-- File system browser (very simple, read-only for now) -->
-      <div class="fs-panel">
-        <div class="fs-header">
-          <div class="fs-path">
+      <!-- File system toolbar (outside the browsing window) -->
+      <div class="fs-toolbar">
+        <div class="fs-toolbar-left">
+          <button
+            class="btn"
+            type="button"
+            :disabled="!canGoUp"
+            @click="onGoUpClick"
+            title="Go to parent folder"
+          >
+            Parent
+          </button>
+
+          <label class="fs-path">
             <span class="label">Path:</span>
-            <span class="value">{{ view.fs.cwd }}</span>
-          </div>
-          <div class="fs-meta">
-            <span class="chip">
-              {{ view.fs.entries.length }} item<span v-if="view.fs.entries.length !== 1">s</span>
-            </span>
-          </div>
+            <input
+              class="fs-path-input"
+              type="text"
+              v-model="pathInput"
+              spellcheck="false"
+            />
+          </label>
+
+          <button
+            class="btn"
+            type="button"
+            @click="onNewFolderClick"
+            title="Create new folder (not yet wired)"
+          >
+            New Folder
+          </button>
+
+          <button
+            class="btn"
+            type="button"
+            :disabled="!canRename"
+            @click="onRenameClick"
+            title="Rename selected item (not yet wired)"
+          >
+            Rename
+          </button>
+
+          <button
+            class="btn"
+            type="button"
+            :disabled="!canDelete"
+            @click="onDeleteClick"
+            title="Delete selected item(s) (not yet wired)"
+          >
+            Delete
+          </button>
         </div>
 
-        <div v-if="view.fs.entries.length === 0" class="fs-empty">
-          <template v-if="view.phase === 'disconnected'">
-            No CF device connected.
-          </template>
-          <template v-else-if="view.media === 'none'">
-            CF reader detected, but no card inserted.
-          </template>
-          <template v-else>
-            No entries in this directory.
-          </template>
+        <!-- Right side currently unused; kept for layout symmetry -->
+        <div class="fs-toolbar-right"></div>
+      </div>
+
+      <!-- File system browser window -->
+      <div class="fs-panel">
+        <div v-if="sortedEntries.length === 0" class="fs-empty">
+          No entries in this directory.
         </div>
 
         <div v-else class="fs-list">
           <div
-            v-for="entry in view.fs.entries"
-            :key="entry.name + '::' + entry.kind"
+            v-for="entry in sortedEntries"
+            :key="entryKey(entry)"
             class="fs-row"
             :data-kind="entry.kind"
+            :data-selected="isSelected(entry) ? 'true' : 'false'"
+            @click.stop.prevent="onEntryClick($event, entry)"
+            @dblclick.stop.prevent="onEntryDblClick(entry)"
           >
             <span class="name">
               <span class="icon">{{ entry.kind === 'dir' ? '📁' : '📄' }}</span>
@@ -174,14 +214,51 @@
             </span>
           </div>
         </div>
+
+        <!-- Shim overlay while FS is busy (blocks clicks, dims content) -->
+        <div v-if="fsBusy" class="fs-shim">
+          <div class="fs-shim-inner">
+            <span class="spinner shim-spinner"></span>
+            <span class="fs-shim-text">Refreshing…</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer: metadata (left) + actions (right) -->
+      <div class="fs-footer">
+        <div class="fs-meta-text">
+          {{ sortedEntries.length }} item<span v-if="sortedEntries.length !== 1">s</span>
+        </div>
+
+        <div class="fs-actions">
+          <button
+            class="btn"
+            type="button"
+            :disabled="!canReadImage"
+            @click="onReadImageClick"
+            title="Read image from CF media (not yet wired)"
+          >
+            Read image from media
+          </button>
+          <button
+            class="btn"
+            type="button"
+            :disabled="!canWriteImage"
+            @click="onWriteImageClick"
+            title="Write image to CF media (not yet wired)"
+          >
+            Write image to media
+          </button>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useMirror } from '@/stores/mirror'
+import { getRealtimeClient } from '@/bootstrap'
 
 /**
  * Pane context (same as other panes)
@@ -238,7 +315,7 @@ function relLuminance(hex: string): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 function contrastRatio(l1: number, l2: number): number {
-  const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, l1]
+  const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, 1]
   return (L1 + 0.05) / (L2 + 0.05)
 }
 
@@ -354,7 +431,7 @@ const cfImager = computed<CfImagerSnapshot>(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Derived view model                                                        */
+/*  Derived view model + sorted entries                                       */
 /* -------------------------------------------------------------------------- */
 
 const view = computed(() => cfImager.value)
@@ -362,36 +439,12 @@ const view = computed(() => cfImager.value)
 const statusLabel = computed(() => {
   const { phase, media, device } = view.value
 
-  // Reader not present at all
-  if (phase === 'disconnected' || !device) {
-    return 'Disconnected'
-  }
-
-  // Operations trump everything else
-  if (phase === 'busy') {
-    return 'Busy'
-  }
-
-  if (phase === 'error') {
-    return 'Error'
-  }
-
-  // phase === 'idle' (or similar non-terminal)
-  if (media === 'unknown') {
-    return 'Checking...'
-  }
-
-  if (media === 'none') {
-    // Reader is present, no card: "No Media"
-    return 'No Media'
-  }
-
-  if (media === 'present') {
-    // Reader + card present, idle: "Ready"
-    return 'Media Ready'
-  }
-
-  // Fallback
+  if (phase === 'disconnected' || !device) return 'Disconnected'
+  if (phase === 'busy') return 'Busy'
+  if (phase === 'error') return 'Error'
+  if (media === 'unknown') return 'Checking...'
+  if (media === 'none') return 'No Media'
+  if (media === 'present') return 'Media Ready'
   return 'No Media'
 })
 
@@ -416,6 +469,98 @@ const bytesDisplay = computed(() => {
   return `${formatSize(op.bytesDone)} / ${formatSize(op.bytesTotal)}`
 })
 
+const sortedEntries = computed<CfImagerFsEntry[]>(() => {
+  const entries = view.value.fs?.entries ?? []
+  return [...entries].sort((a, b) => {
+    if (a.kind === 'dir' && b.kind !== 'dir') return -1
+    if (a.kind !== 'dir' && b.kind === 'dir') return 1
+    const an = a.name.toLowerCase()
+    const bn = b.name.toLowerCase()
+    if (an < bn) return -1
+    if (an > bn) return 1
+    return 0
+  })
+})
+
+/**
+ * Whether we can navigate up one directory from the current cwd.
+ */
+const canGoUp = computed(() => {
+  const cwd = view.value.fs.cwd
+  return cwd !== '.' && cwd !== '/'
+})
+
+/* -------------------------------------------------------------------------- */
+/*  Selection state (single + Cmd-click multi-select)                         */
+/* -------------------------------------------------------------------------- */
+
+const selectedNames = ref<string[]>([])
+
+const selectedCount = computed(() => selectedNames.value.length)
+const canRename = computed(() => selectedCount.value === 1)
+const canDelete = computed(() => selectedCount.value > 0)
+
+function isSelected(entry: CfImagerFsEntry): boolean {
+  return selectedNames.value.includes(entry.name)
+}
+
+function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
+  const meta = ev.metaKey // Command on macOS
+  const name = entry.name
+
+  if (meta) {
+    const idx = selectedNames.value.indexOf(name)
+    if (idx >= 0) {
+      const next = selectedNames.value.slice()
+      next.splice(idx, 1)
+      selectedNames.value = next
+    } else {
+      selectedNames.value = [...selectedNames.value, name]
+    }
+  } else {
+    selectedNames.value = [name]
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Path input + FS activity spinner                                          */
+/* -------------------------------------------------------------------------- */
+
+const pathInput = ref('')
+const fsBusy = ref(false)
+
+watch(
+  () => view.value.fs.cwd,
+  (cwd) => {
+    pathInput.value = cwd
+    fsBusy.value = false
+    selectedNames.value = []
+  },
+  { immediate: true }
+)
+
+/* -------------------------------------------------------------------------- */
+/*  Media-ready + file selection helpers for bottom action buttons           */
+/* -------------------------------------------------------------------------- */
+
+const isMediaReady = computed(() => {
+  // Match the "Media Ready" state: reader present, idle, card present.
+  return (
+    view.value.phase === 'idle' &&
+    view.value.media === 'present' &&
+    !!view.value.device
+  )
+})
+
+const hasSelectedFile = computed(() =>
+  sortedEntries.value.some(
+    (e) => e.kind === 'file' && selectedNames.value.includes(e.name)
+  )
+)
+
+const canReadImage = computed(() => isMediaReady.value)
+const canWriteImage = computed(() => isMediaReady.value && hasSelectedFile.value)
+
 /* -------------------------------------------------------------------------- */
 /*  Advanced toggle                                                           */
 /* -------------------------------------------------------------------------- */
@@ -423,8 +568,60 @@ const bytesDisplay = computed(() => {
 const showAdvanced = ref(false)
 
 /* -------------------------------------------------------------------------- */
+/*  WS wiring for CF commands                                                 */
+/* -------------------------------------------------------------------------- */
+
+function sendCfImagerCommand(kind: 'changeDir' | 'changeDirUp', name?: string) {
+  const ws = getRealtimeClient()
+  if (!ws) return
+  const payload: any = { kind }
+  if (typeof name === 'string') payload.name = name
+  ws.send({ type: 'cf-imager.command', payload })
+}
+
+function onEntryDblClick(entry: CfImagerFsEntry) {
+  if (entry.kind === 'dir') {
+    fsBusy.value = true
+    sendCfImagerCommand('changeDir', entry.name)
+  }
+}
+
+function onGoUpClick() {
+  if (!canGoUp.value) return
+  fsBusy.value = true
+  sendCfImagerCommand('changeDirUp')
+}
+
+/**
+ * Stub actions for future wiring.
+ */
+function onNewFolderClick() {
+  // TODO: implement "create folder"
+}
+
+function onRenameClick() {
+  // TODO: implement "rename" using selectedNames.value
+}
+
+function onDeleteClick() {
+  // TODO: implement "delete" using selectedNames.value
+}
+
+function onReadImageClick() {
+  // TODO: implement "read image from media" operation
+}
+
+function onWriteImageClick() {
+  // TODO: implement "write image to media" operation
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Helpers                                                                   */
 /* -------------------------------------------------------------------------- */
+
+function entryKey(entry: CfImagerFsEntry): string {
+  return `${entry.kind}::${entry.name}`
+}
 
 function formatSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return ''
@@ -649,16 +846,40 @@ function formatDate(iso: string): string {
   opacity: 0.6;
 }
 
-/* Chips */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
+/* Generic panel-styled button (similar to logs/Atlona) */
+.btn {
+  --control-h: 28px;
+
+  padding: 0 10px;
+  border-radius: 6px;
   border: 1px solid #374151;
   background: #020617;
-  font-size: 0.72rem;
+  color: var(--panel-fg);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 500;
+  text-align: center;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    transform 60ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease;
+  user-select: none;
+  white-space: nowrap;
+  height: var(--control-h);
+  line-height: var(--control-h);
+}
+
+.btn:hover:not(:disabled) {
+  background: #030712;
+  border-color: #4b5563;
+  transform: translateY(-1px);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* Current op */
@@ -761,36 +982,95 @@ function formatDate(iso: string): string {
   flex-direction: column;
   gap: 6px;
   font-size: 0.78rem;
+  position: relative; /* anchor for shim overlay */
 }
 
-.fs-header {
+/* Toolbar layout: path first on the left, empty right */
+.fs-toolbar {
+  margin-top: 4px;
   display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 10px;
+  font-size: 0.78rem;
+}
+
+.fs-toolbar-left {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.fs-toolbar-right {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 40px;
+}
+
+/* Path display / input */
+.fs-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .fs-path .label {
   opacity: 0.7;
-  margin-right: 4px;
-}
-.fs-path .value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
-    'Courier New', monospace;
 }
 
+.fs-path-input {
+  --control-h: 28px;
+
+  background: #020617;
+  color: var(--panel-fg);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 0 8px;
+  min-width: 180px;
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+  height: var(--control-h);
+  line-height: var(--control-h);
+}
+
+/* Spinner (used by shim) */
+.spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid #4b5563;
+  border-top-color: #e5e7eb;
+  animation: cf-spin 700ms linear infinite;
+}
+
+@keyframes cf-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Empty state */
 .fs-empty {
   opacity: 0.7;
   text-align: center;
   padding: 10px 4px;
 }
 
+/* List */
 .fs-list {
   max-height: 200px;
   overflow-y: auto;
   border-radius: 4px;
   border: 1px solid #111827;
   background: #020617;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .fs-row {
@@ -800,9 +1080,30 @@ function formatDate(iso: string): string {
   gap: 6px;
   padding: 4px 8px;
   border-bottom: 1px solid #030712;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
 }
+.fs-row * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .fs-row:last-child {
   border-bottom: none;
+}
+
+.fs-row:hover {
+  background: #030712;
+}
+
+/* Selected rows */
+.fs-row[data-selected='true'] {
+  background: #0b1120;
+  border-bottom-color: #1f2937;
+}
+.fs-row[data-selected='true'] .name {
+  color: #e5e7eb;
 }
 
 .fs-row .name {
@@ -830,11 +1131,79 @@ function formatDate(iso: string): string {
   color: #d1d5db;
 }
 
+/* Shim overlay while FS is busy */
+.fs-shim {
+  position: absolute;
+  inset: 6px 8px; /* roughly align with list bounds */
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.7); /* dark, semi-transparent */
+  backdrop-filter: blur(1px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: all; /* block interaction with list */
+  z-index: 2;
+}
+
+.fs-shim-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: #e5e7eb;
+  opacity: 0.95;
+}
+
+.shim-spinner {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+
+.fs-shim-text {
+  letter-spacing: 0.02em;
+}
+
+/* Footer: metadata + actions */
+.fs-footer {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fs-meta-text {
+  font-size: 0.72rem;
+  opacity: 0.75;
+  align-self: flex-start;
+}
+
+.fs-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Responsive */
 @media (max-width: 720px) {
-  .fs-header {
+  .fs-toolbar {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .fs-toolbar-right {
+    align-self: stretch;
+    justify-content: flex-start;
+  }
+
+  .fs-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .fs-actions {
+    align-self: flex-end;
   }
 
   .op-head {

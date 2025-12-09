@@ -16,6 +16,7 @@ import {
     onLog as onLogSubscribe
 } from '../adapters/logs.adapter.js'
 import type { AtlonaControllerService } from '../devices/atlona-controller/AtlonaControllerService.js'
+import type { CfImagerService } from '../devices/cf-imager/CfImagerService.js'
 
 // ---------------------------
 // Log filtering configuration
@@ -186,6 +187,84 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
         }
     }
 
+    // Helper: handle CF imager commands from a WS message
+    async function handleCfImagerCommand(msg: any) {
+        const cfImager = (app as unknown as { cfImager?: CfImagerService }).cfImager
+
+        if (!cfImager) {
+            logWs.warn('received cf-imager.command but cfImager service is not attached')
+            return
+        }
+
+        const payload = msg?.payload ?? {}
+        const kind = payload.kind
+        const nameRaw = payload.name
+
+        if (typeof kind !== 'string') {
+            logWs.warn('cf-imager.command: missing kind')
+            return
+        }
+
+        if (kind === 'changeDir') {
+            const name = typeof nameRaw === 'string' ? nameRaw.trim() : ''
+            if (!name) {
+                logWs.warn('cf-imager.command changeDir: empty name')
+                return
+            }
+
+            try {
+                const state = cfImager.getState()
+                const cwd = state.fs?.cwd ?? '.'
+
+                // Build a relative path from the current cwd plus the entry name.
+                // Example: cwd="images", name="foo" -> "images/foo"
+                //          cwd="." , name="foo"     -> "foo"
+                const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+                const relPath = base ? `${base}/${name}` : name
+
+                await cfImager.changeDirectory(relPath)
+            } catch (e) {
+                logWs.warn('cf-imager.command changeDir failed', {
+                    name: nameRaw,
+                    err: (e as Error).message
+                })
+            }
+            return
+        }
+
+        if (kind === 'changeDirUp') {
+            try {
+                const state = cfImager.getState()
+                const cwd = state.fs?.cwd ?? '.'
+
+                // Root guard: cwd is relative and POSIX-style.
+                // Treat ".", "/", and "" as root; no-op in that case.
+                if (cwd === '.' || cwd === '/' || cwd === '') {
+                    logWs.debug('cf-imager.command changeDirUp: already at root', { cwd })
+                    return
+                }
+
+                // Compute parent:
+                //  - "foo/bar" -> "foo"
+                //  - "foo"     -> "."
+                //  - defensive trim of trailing slashes.
+                const trimmed = cwd.replace(/\/+$/, '')
+                const idx = trimmed.lastIndexOf('/')
+                const parent = idx <= 0 ? '.' : trimmed.slice(0, idx)
+
+                await cfImager.changeDirectory(parent)
+            } catch (e) {
+                logWs.warn('cf-imager.command changeDirUp failed', {
+                    err: (e as Error).message
+                })
+            }
+            return
+        }
+
+        // Unknown / unsupported command kind
+        logWs.warn('cf-imager.command: unknown kind', { kind })
+    }
+
     // Handler signature: (socket, request)
     app.get('/ws', { websocket: true }, (socket: WSSocket, _req: FastifyRequest) => {
         sockets.add(socket)
@@ -331,6 +410,12 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 // --- Atlona front-end commands --------------------------------
                 if (msg?.type === 'atlona.command') {
                     void handleAtlonaCommand(msg)
+                    return
+                }
+
+                // --- CF imager front-end commands -----------------------------
+                if (msg?.type === 'cf-imager.command') {
+                    void handleCfImagerCommand(msg)
                     return
                 }
             } catch {

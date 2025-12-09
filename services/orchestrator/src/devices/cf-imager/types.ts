@@ -28,6 +28,24 @@ export interface CfImagerConfig {
      * This can be relative to the orchestrator working directory or absolute.
      */
     writeScriptPath: string
+
+    /**
+     * Optional list of file extensions (lowercase, without dots) that are
+     * allowed to appear in the CF image browser. Directories are always shown.
+     *
+     * Example: ['img', 'iso']
+     *
+     * If omitted or empty, all file types are visible (except internal
+     * companions like .part, which are always hidden).
+     */
+    visibleExtensions?: string[]
+
+    /**
+     * Optional polling cadence (ms) for refreshing the filesystem view.
+     *  - If <= 0 or undefined, periodic polling is disabled.
+     *  - Default is configured via CF_IMAGER_FS_POLL_MS (see utils.ts).
+     */
+    fsPollIntervalMs?: number
 }
 
 /* -------------------------------------------------------------------------- */
