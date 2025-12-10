@@ -48,10 +48,10 @@ export class CfImagerService {
     private fsPollTimer: NodeJS.Timeout | null = null
 
     /**
-     * Sliding window of recent PROGRESS samples used to compute
-     * a smoothed bytes/sec rate during imaging operations.
+     * Recent progress samples for computing a moving-average transfer speed.
+     * We store the last few (time, bytesDone) points.
      */
-    private progressWindow: { t: number; bytes: number }[] = []
+    private progressSamples: { t: number; bytes: number }[] = []
 
     constructor(config: CfImagerConfig, deps: CfImagerServiceDeps) {
         this.config = config
@@ -389,7 +389,7 @@ export class CfImagerService {
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  Imaging operations (still stubbed, but media-aware)                   */
+    /*  Imaging operations (still stubbed for write, real for read)           */
     /* ---------------------------------------------------------------------- */
 
     private async ensureDeviceAndMediaForOp(opName: string): Promise<boolean> {
@@ -424,6 +424,9 @@ export class CfImagerService {
             this.emitError(`${opName}: CF media status unknown; please refresh or reinsert card`)
             return false
         }
+
+        // Reset progress samples for the new operation.
+        this.progressSamples = []
 
         return true
     }
@@ -480,22 +483,24 @@ export class CfImagerService {
         const imgPathAbs = join(targetDirAbs, `${safeName}.img`)
 
         const imgRel = this.relFromRoot(imgPathAbs)
-        const now = new Date().toISOString()
+        const nowIso = new Date().toISOString()
 
         const op: CfImagerCurrentOp = {
             kind: 'read',
             source: this.device!.path,
             destination: imgRel,
-            startedAt: now,
+            startedAt: nowIso,
             progressPct: 0,
+            // bytesDone/bytesTotal/bytesPerSec/mbPerSec will be filled in as
+            // PROGRESS lines arrive.
         }
 
         this.state.phase = 'busy'
         this.state.currentOp = op
         this.state.message = undefined
 
-        // Reset progress window for this op
-        this.progressWindow = []
+        // Reset progress samples for this op specifically.
+        this.progressSamples = [{ t: Date.now(), bytes: 0 }]
 
         this.deps.events.publish({
             kind: 'cf-op-started',
@@ -527,7 +532,7 @@ export class CfImagerService {
             // partially-written image.
             this.pauseFsWatchdogForOp()
 
-            // Stream stdout line-by-line, looking for PROGRESS lines
+            // Stream stdout line-by-line, looking for PROGRESS (and later, other) lines
             child.stdout.setEncoding('utf8')
             let stdoutBuf = ''
 
@@ -550,33 +555,33 @@ export class CfImagerService {
                                 `bytes=${bytes} total=${total} pct=${pct}`
                             )
 
-                            // Update current op snapshot, including bytes & rate
+                            // Update our moving progress window for speed calculation.
+                            this.recordProgressSample(bytes)
+
+                            const speedBps = this.computeAverageSpeedBps()
+                            const mbPerSec =
+                                speedBps > 0
+                                    ? speedBps / (1024 * 1024)
+                                    : 0
+
+                            // Update current op (service-local) and emit a cf-op-progress
                             if (this.state.currentOp && this.state.currentOp.kind === 'read') {
-                                this.state.currentOp.progressPct = pct
-                                // These are optional in the snapshot type the pane uses.
-                                this.state.currentOp.bytesDone = bytes
-                                this.state.currentOp.bytesTotal = total
-
-                                // Update sliding window + compute smoothed rate.
-                                const rate = this.updateProgressWindowAndComputeRate(bytes)
-                                if (rate != null && total > 0) {
-                                    const pctStr =
-                                        Number.isFinite(pct) ? pct.toFixed(1) : String(pct)
-                                    const doneStr = formatBytes(bytes)
-                                    const totalStr = formatBytes(total)
-                                    const rateStr = formatBytes(rate) + '/s'
-
-                                    this.state.currentOp.message =
-                                        `${doneStr} / ${totalStr} (${pctStr}%), ~${rateStr}`
-                                } else if (total > 0) {
-                                    // Early in the transfer, still provide a decent message
-                                    const pctStr =
-                                        Number.isFinite(pct) ? pct.toFixed(1) : String(pct)
-                                    const doneStr = formatBytes(bytes)
-                                    const totalStr = formatBytes(total)
-                                    this.state.currentOp.message =
-                                        `${doneStr} / ${totalStr} (${pctStr}%)`
+                                const updatedOp: CfImagerCurrentOp = {
+                                    ...this.state.currentOp,
+                                    progressPct: pct,
+                                    bytesDone: bytes,
+                                    bytesTotal: total,
+                                    bytesPerSec: speedBps,
+                                    mbPerSec,
                                 }
+
+                                this.state.currentOp = updatedOp
+
+                                this.deps.events.publish({
+                                    kind: 'cf-op-progress',
+                                    at: Date.now(),
+                                    op: updatedOp,
+                                })
                             }
                         }
                     }
@@ -598,7 +603,6 @@ export class CfImagerService {
                 this.emitError(`readDeviceToImage failed to start: ${(err as Error).message}`)
                 this.state.phase = 'idle'
                 this.state.currentOp = undefined
-                this.progressWindow = []
 
                 // Resume watchdog; the op has effectively terminated.
                 this.resumeFsWatchdogAfterOp({ refreshFs: false })
@@ -606,12 +610,35 @@ export class CfImagerService {
 
             child.on('close', (code, signal) => {
                 this.child = null
-                this.progressWindow = []
 
                 if (code === 0) {
                     // Successful completion
                     this.state.phase = 'idle'
                     this.state.message = 'Read complete'
+
+                    // Final progress snapshot for clients: force 100% and full bytes.
+                    const finalOp: CfImagerCurrentOp = this.state.currentOp
+                        ? {
+                              ...this.state.currentOp,
+                              progressPct: 100,
+                              // If bytes/total weren't set for some reason, fall back defensively.
+                              bytesDone:
+                                  typeof this.state.currentOp.bytesDone === 'number'
+                                      ? this.state.currentOp.bytesDone
+                                      : this.state.currentOp.bytesTotal ?? 0,
+                          }
+                        : {
+                              ...op,
+                              progressPct: 100,
+                          }
+
+                    // Emit cf-op-completed so the adapter can flip phase to idle
+                    // and clear currentOp in AppState.
+                    this.deps.events.publish({
+                        kind: 'cf-op-completed',
+                        at: Date.now(),
+                        op: finalOp,
+                    })
 
                     // After a successful read, refresh once so the new image
                     // shows up exactly when the operation has finished.
@@ -626,56 +653,24 @@ export class CfImagerService {
                     this.emitError(`readDeviceToImage script failed (${reason})`)
 
                     // On failure, we still want to resume watchdog polling,
-                    // and a refresh helps clear any transient FS view.
+                    // and a full refresh is helpful to show whatever landed on disk.
                     this.resumeFsWatchdogAfterOp({ refreshFs: true })
                 }
 
                 this.state.currentOp = undefined
+                // Reset progress samples for the next op.
+                this.progressSamples = []
             })
         } catch (err) {
             this.child = null
-            this.progressWindow = []
             this.emitError(`readDeviceToImage: spawn failed: ${(err as Error).message}`)
             this.state.phase = 'idle'
             this.state.currentOp = undefined
 
             // Ensure watchdog is resumed even if spawn throws.
             this.resumeFsWatchdogAfterOp({ refreshFs: false })
+            this.progressSamples = []
         }
-    }
-
-    /**
-     * Update the sliding window with the latest byte count and compute a
-     * smoothed bytes/sec rate over the window.
-     *
-     * Returns:
-     *   - number (bytes/sec) if we have enough samples and a positive Δt
-     *   - null otherwise
-     */
-    private updateProgressWindowAndComputeRate(bytes: number): number | null {
-        const now = Date.now()
-        const windowSize = 5
-
-        this.progressWindow.push({ t: now, bytes })
-
-        if (this.progressWindow.length > windowSize) {
-            this.progressWindow.splice(0, this.progressWindow.length - windowSize)
-        }
-
-        if (this.progressWindow.length < 2) {
-            return null
-        }
-
-        const first = this.progressWindow[0]
-        const last = this.progressWindow[this.progressWindow.length - 1]
-        const dtMs = last.t - first.t
-        if (dtMs <= 0) return null
-
-        const dBytes = last.bytes - first.bytes
-        if (dBytes <= 0) return null
-
-        const dtSec = dtMs / 1000
-        return dBytes / dtSec
     }
 
     /* ---------------------------------------------------------------------- */
@@ -699,11 +694,12 @@ export class CfImagerService {
             // ignore
         }
 
-        this.progressWindow = []
-
         // If we canceled an in-flight operation, make sure the watchdog can
         // resume. We don't force a refresh here; the caller can decide.
         this.resumeFsWatchdogAfterOp({ refreshFs: false })
+
+        // Reset progress samples when an op is aborted.
+        this.progressSamples = []
 
         if (this.device) {
             this.deps.events.publish({
@@ -808,7 +804,7 @@ export class CfImagerService {
             this.state.media = 'unknown'
             if (prev !== this.state.media) {
                 // const message =
-                 //    `[cf-imager] media status -> unknown (probe failed err="${(err as Error).message}")`
+                //     `[cf-imager] media status -> unknown (probe failed err="${(err as Error).message}")`
                 // console.log(message)
                 this.deps.events.publish({
                     kind: 'cf-media-updated',
@@ -1080,6 +1076,40 @@ export class CfImagerService {
     }
 
     /**
+     * Record a new (time, bytesDone) sample and keep only a small trailing window
+     * so we can compute a moving-average transfer speed.
+     */
+    private recordProgressSample(bytes: number): void {
+        const now = Date.now()
+        this.progressSamples.push({ t: now, bytes })
+
+        // Keep the last few samples (e.g., 5) so short bursts don't dominate.
+        const MAX_SAMPLES = 5
+        if (this.progressSamples.length > MAX_SAMPLES) {
+            this.progressSamples.splice(0, this.progressSamples.length - MAX_SAMPLES)
+        }
+    }
+
+    /**
+     * Compute average bytes/sec over the current progress sample window.
+     */
+    private computeAverageSpeedBps(): number {
+        if (this.progressSamples.length < 2) return 0
+
+        const first = this.progressSamples[0]
+        const last = this.progressSamples[this.progressSamples.length - 1]
+
+        const dtMs = last.t - first.t
+        if (dtMs <= 0) return 0
+
+        const dBytes = last.bytes - first.bytes
+        if (dBytes <= 0) return 0
+
+        const dtSec = dtMs / 1000
+        return dBytes / dtSec
+    }
+
+    /**
      * Poll the current cwd for changes and emit cf-fs-updated only when the
      * snapshot actually differs from the last known state.
      *
@@ -1219,22 +1249,6 @@ function parseProgressLine(line: string): { bytes: number; total: number; pct: n
     }
 
     return { bytes, total, pct }
-}
-
-/**
- * Format a byte count into a human-readable string (B, KB, MB, GB, TB).
- */
-function formatBytes(bytes: number): string {
-    if (!Number.isFinite(bytes) || bytes < 0) return ''
-    const units = ['B', 'KB', 'MB', 'GB', 'TB']
-    let v = bytes
-    let idx = 0
-    while (v >= 1024 && idx < units.length - 1) {
-        v /= 1024
-        idx++
-    }
-    const num = idx === 0 ? v.toFixed(0) : v.toFixed(1)
-    return `${num} ${units[idx]}`
 }
 
 /**

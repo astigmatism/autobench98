@@ -30,7 +30,7 @@
         </span>
       </div>
 
-      <!-- Body (everything below the header, including modal overlay) -->
+      <!-- Body (everything below the header, including modal overlays) -->
       <div class="panel-body">
         <!-- Advanced device/media details (hidden by default) -->
         <transition name="slide-fade">
@@ -93,38 +93,6 @@
             </div>
           </div>
         </transition>
-
-        <!-- Current operation (if any) -->
-        <div v-if="view.currentOp" class="op-panel">
-          <div class="op-head">
-            <span class="op-kind">
-              <span class="dot dot-small"></span>
-              {{ opLabel }}
-            </span>
-            <span class="op-paths">
-              {{ view.currentOp.source }} → {{ view.currentOp.destination }}
-            </span>
-          </div>
-
-          <div class="op-progress-row">
-            <div class="op-progress-bar">
-              <div
-                class="op-progress-fill"
-                :style="{ width: progressPctDisplay + '%' }"
-              ></div>
-            </div>
-            <div class="op-progress-meta">
-              <span class="pct">{{ progressPctDisplay.toFixed(1) }}%</span>
-              <span v-if="bytesDisplay" class="bytes">
-                {{ bytesDisplay }}
-              </span>
-            </div>
-          </div>
-
-          <div v-if="view.currentOp.message" class="op-message">
-            {{ view.currentOp.message }}
-          </div>
-        </div>
 
         <!-- Last error (if any and not already shown in currentOp) -->
         <div v-if="view.lastError && !view.currentOp" class="error-banner">
@@ -255,7 +223,7 @@
           </div>
         </div>
 
-        <!-- General-purpose modal dialog overlay -->
+        <!-- General-purpose modal dialog overlay (new folder / rename / delete / read-name) -->
         <transition name="fade-modal">
           <div
             v-if="modalVisible"
@@ -323,6 +291,61 @@
                   OK
                 </button>
               </div>
+            </div>
+          </div>
+        </transition>
+
+        <!-- Progress modal overlay (shown while read/write is in progress) -->
+        <transition name="fade-modal">
+          <div
+            v-if="opProgressVisible"
+            class="cf-modal-backdrop"
+          >
+            <div
+              class="cf-modal"
+              role="dialog"
+              aria-label="CF imaging in progress"
+            >
+              <h3 class="cf-modal-title">
+                {{ opLabel }}
+              </h3>
+
+              <div class="cf-modal-body">
+                <p class="cf-modal-message" v-if="opPathsDisplay">
+                  {{ opPathsDisplay }}
+                </p>
+
+                <div class="cf-modal-progress-block">
+                  <div class="cf-modal-progress-bar">
+                    <div
+                      class="cf-modal-progress-fill"
+                      :style="{ width: progressPctDisplay + '%' }"
+                    ></div>
+                  </div>
+                  <div class="cf-modal-progress-meta">
+                    <span class="pct">
+                      {{ progressPctDisplay.toFixed(1) }}%
+                    </span>
+                    <span class="rate" v-if="opRateDisplay">
+                      {{ opRateDisplay }}
+                    </span>
+                  </div>
+                </div>
+
+                <div class="cf-modal-stats">
+                  <div class="cf-modal-stat-row" v-if="opBytesDisplay">
+                    <span class="label">Bytes:</span>
+                    <span class="value monospace">{{ opBytesDisplay }}</span>
+                  </div>
+                  <div class="cf-modal-stat-row" v-if="opTotalGiBDisplay">
+                    <span class="label">Total size:</span>
+                    <span class="value monospace">{{ opTotalGiBDisplay }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- No buttons: this dialog is informational and closes automatically
+                   when the operation completes. -->
             </div>
           </div>
         </transition>
@@ -433,6 +456,8 @@ type CfImagerCurrentOpSnapshot = {
   progressPct: number
   bytesDone?: number
   bytesTotal?: number
+  bytesPerSec?: number
+  mbPerSec?: number
   message?: string
 }
 type CfImagerPhase = 'disconnected' | 'idle' | 'busy' | 'error'
@@ -528,10 +553,41 @@ const progressPctDisplay = computed(() => {
   return op.progressPct
 })
 
-const bytesDisplay = computed(() => {
+/* Progress modal-specific derived state */
+
+const opProgressVisible = computed(() => {
+  return view.value.phase === 'busy' && !!view.value.currentOp
+})
+
+const opPathsDisplay = computed(() => {
+  const op = view.value.currentOp
+  if (!op) return ''
+  return `${op.source} → ${op.destination}`
+})
+
+const opBytesDisplay = computed(() => {
   const op = view.value.currentOp
   if (!op || op.bytesDone == null || op.bytesTotal == null) return ''
-  return `${formatSize(op.bytesDone)} / ${formatSize(op.bytesTotal)}`
+  const done = formatBytesRaw(op.bytesDone)
+  const total = formatBytesRaw(op.bytesTotal)
+  return `${done} / ${total}`
+})
+
+const opTotalGiBDisplay = computed(() => {
+  const op = view.value.currentOp
+  if (!op || op.bytesTotal == null || op.bytesTotal <= 0) return ''
+  return `${formatGiB(op.bytesTotal)} GiB`
+})
+
+const opRateDisplay = computed(() => {
+  const op = view.value.currentOp
+  if (!op) return ''
+  let mbPerSec = op.mbPerSec
+  if (mbPerSec == null && typeof op.bytesPerSec === 'number') {
+    mbPerSec = op.bytesPerSec / (1024 * 1024)
+  }
+  if (mbPerSec == null || !Number.isFinite(mbPerSec) || mbPerSec <= 0) return ''
+  return `~${mbPerSec.toFixed(1)} MB/s`
 })
 
 const sortedEntries = computed<CfImagerFsEntry[]>(() => {
@@ -631,7 +687,7 @@ const canReadImage = computed(() => isMediaReady.value)
 const canWriteImage = computed(() => isMediaReady.value && hasSelectedFile.value)
 
 /* -------------------------------------------------------------------------- */
-/*  Modal dialog state                                                        */
+/*  Modal dialog state (general-purpose)                                      */
 /* -------------------------------------------------------------------------- */
 
 type ModalMode = 'new-folder' | 'rename' | 'delete' | 'read-image' | 'generic'
@@ -954,10 +1010,21 @@ function formatDate(iso: string): string {
     return iso
   }
 }
+
+function formatBytesRaw(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return ''
+  return Math.round(bytes).toLocaleString('en-US')
+}
+
+function formatGiB(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return ''
+  const gib = bytes / (1024 * 1024 * 1024)
+  return gib.toFixed(2)
+}
 </script>
 
 <style scoped>
-/* (styles unchanged – keeping exactly as in previous version) */
+/* (styles unchanged – plus a few extras for the progress modal) */
 
 .cf-pane {
   --pane-fg: #111;
@@ -1194,84 +1261,6 @@ function formatDate(iso: string): string {
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-.op-panel {
-  border-radius: 6px;
-  border: 1px solid #374151;
-  background: #020617;
-  padding: 6px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 0.78rem;
-}
-
-.op-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 6px;
-  align-items: baseline;
-}
-
-.op-kind {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.dot-small {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: #22c55e;
-}
-
-.op-paths {
-  opacity: 0.8;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
-    'Courier New', monospace;
-  font-size: 0.72rem;
-}
-
-.op-progress-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.op-progress-bar {
-  position: relative;
-  width: 100%;
-  height: 6px;
-  border-radius: 999px;
-  background: #020617;
-  overflow: hidden;
-  border: 1px solid #1f2937;
-}
-.op-progress-fill {
-  position: absolute;
-  inset: 0;
-  width: 0%;
-  background: linear-gradient(90deg, #22c55e, #a3e635);
-  transition: width 120ms linear;
-}
-
-.op-progress-meta {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.72rem;
-  opacity: 0.85;
-}
-.op-progress-meta .pct {
-  font-variant-numeric: tabular-nums;
-}
-.op-progress-meta .bytes {
-  font-variant-numeric: tabular-nums;
-}
-
-.op-message {
-  font-size: 0.76rem;
-  opacity: 0.9;
 }
 
 .error-banner {
@@ -1612,6 +1601,71 @@ function formatDate(iso: string): string {
   background: #047857;
 }
 
+/* Progress modal extras */
+
+.cf-modal-progress-block {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cf-modal-progress-bar {
+  position: relative;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #020617;
+  overflow: hidden;
+  border: 1px solid #1f2937;
+}
+
+.cf-modal-progress-fill {
+  position: absolute;
+  inset: 0;
+  width: 0%;
+  background: linear-gradient(90deg, #22c55e, #a3e635);
+  transition: width 120ms linear;
+}
+
+.cf-modal-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  opacity: 0.9;
+  margin-top: 2px;
+}
+.cf-modal-progress-meta .pct {
+  font-variant-numeric: tabular-nums;
+}
+.cf-modal-progress-meta .rate {
+  font-variant-numeric: tabular-nums;
+}
+
+.cf-modal-stats {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.74rem;
+}
+
+.cf-modal-stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+.cf-modal-stat-row .label {
+  opacity: 0.8;
+}
+.cf-modal-stat-row .value {
+  text-align: right;
+}
+.monospace {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+}
+
 .fade-modal-enter-active,
 .fade-modal-leave-active {
   transition: opacity 160ms ease;
@@ -1639,11 +1693,6 @@ function formatDate(iso: string): string {
 
   .fs-actions {
     align-self: flex-end;
-  }
-
-  .op-head {
-    flex-direction: column;
-    align-items: flex-start;
   }
 
   .advanced-row {
