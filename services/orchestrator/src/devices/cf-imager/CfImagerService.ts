@@ -2,7 +2,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { promises as fsp } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import type {
     CfImagerConfig,
@@ -313,10 +313,63 @@ export class CfImagerService {
         // console.log('[cf-imager] deletePath', { relPath })
         try {
             const abs = resolveUnderRoot(this.config.rootDir, relPath)
+            const dirAbs = dirname(abs)
+            const base = basename(abs)
+
+            // -------------------------------------------------------------------
+            // Case 1: UI hides extensions and sends just "foo", but the actual
+            // files are "foo.img" and "foo.part" in the same directory.
+            //
+            // If either <base>.img or <base>.part exists, treat this as an image
+            // delete and remove those files explicitly.
+            // -------------------------------------------------------------------
+
+            const imgFromBase = join(dirAbs, `${base}.img`)
+            const partFromBase = join(dirAbs, `${base}.part`)
+
+            const imgFromBaseExists = await fsp
+                .stat(imgFromBase)
+                .then(() => true)
+                .catch(() => false)
+
+            const partFromBaseExists = await fsp
+                .stat(partFromBase)
+                .then(() => true)
+                .catch(() => false)
+
+            if (imgFromBaseExists || partFromBaseExists) {
+                // Delete the .img payload if present
+                if (imgFromBaseExists) {
+                    try {
+                        await fsp.unlink(imgFromBase)
+                    } catch {
+                        // ignore unlink errors; we'll still try to clean up .part
+                    }
+                }
+
+                // Delete the .part sidecar if present
+                if (partFromBaseExists) {
+                    try {
+                        await fsp.unlink(partFromBase)
+                    } catch {
+                        // ignore unlink errors
+                    }
+                }
+
+                this.emitFsUpdated()
+                return
+            }
+
+            // -------------------------------------------------------------------
+            // Case 2: Fall back to existing behavior.
+            // - relPath points to the actual file/folder.
+            // - If it's an explicit .img path, also remove its .part companion.
+            // -------------------------------------------------------------------
+
+            const baseAbs = basename(abs)
 
             // If file looks like an .img, try to remove .part as well.
-            const base = basename(abs)
-            if (base.toLowerCase().endsWith('.img')) {
+            if (baseAbs.toLowerCase().endsWith('.img')) {
                 const part = abs.replace(/\.img$/i, '.part')
                 try {
                     await fsp.unlink(part)
@@ -329,7 +382,14 @@ export class CfImagerService {
             try {
                 await fsp.rm(abs, { recursive: true, force: true })
             } catch {
-                await fsp.unlink(abs)
+                // If rm fails (e.g. not a directory), fall back to unlink.
+                try {
+                    await fsp.unlink(abs)
+                } catch {
+                    // If this also fails, surface as a single error below.
+                    // We'll let emitError catch it via the outer try/catch.
+                    throw new Error(`Failed to delete path "${relPath}"`)
+                }
             }
 
             this.emitFsUpdated()
