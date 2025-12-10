@@ -333,6 +333,10 @@
                     <span class="label">Transfer:</span>
                     <span class="value monospace">{{ opBytesDisplay }}</span>
                   </div>
+                  <div class="cf-modal-stat-row" v-if="opEtaDisplay">
+                    <span class="label">Estimated time:</span>
+                    <span class="value">{{ opEtaDisplay }}</span>
+                  </div>
                 </div>
               </div>
 
@@ -583,6 +587,43 @@ const opRateDisplay = computed(() => {
   }
   if (mbPerSec == null || !Number.isFinite(mbPerSec) || mbPerSec <= 0) return ''
   return `~${mbPerSec.toFixed(1)} MB/s`
+})
+
+const opEtaDisplay = computed(() => {
+  const op = view.value.currentOp
+  if (!op) return ''
+
+  const { bytesDone, bytesTotal } = op
+  if (
+    bytesDone == null ||
+    bytesTotal == null ||
+    !Number.isFinite(bytesDone) ||
+    !Number.isFinite(bytesTotal) ||
+    bytesTotal <= 0
+  ) {
+    return ''
+  }
+
+  let bytesPerSec = op.bytesPerSec
+  if ((bytesPerSec == null || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) && typeof op.mbPerSec === 'number') {
+    bytesPerSec = op.mbPerSec * 1024 * 1024
+  }
+
+  if (bytesPerSec == null || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) {
+    return ''
+  }
+
+  const remainingBytes = bytesTotal - bytesDone
+  if (remainingBytes <= 0) {
+    return '0s'
+  }
+
+  const seconds = remainingBytes / bytesPerSec
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return ''
+  }
+
+  return formatEta(seconds)
 })
 
 const sortedEntries = computed<CfImagerFsEntry[]>(() => {
@@ -1047,10 +1088,28 @@ function formatGiB(bytes: number): string {
   const gib = bytes / (1024 * 1024 * 1024)
   return gib.toFixed(2)
 }
+
+function formatEta(totalSeconds: number): string {
+  // Round to nearest second for display
+  const secs = Math.round(totalSeconds)
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  const s = secs % 60
+
+  const parts: string[] = []
+  if (h > 0) parts.push(`${h}h`)
+  if (m > 0) parts.push(`${m}m`)
+  // Always show seconds if we have no hours, or if seconds are non-zero
+  if (s > 0 || parts.length === 0) {
+    parts.push(`${s}s`)
+  }
+
+  return parts.join(' ')
+}
 </script>
 
 <style scoped>
-/* (styles unchanged – layout-tweaks already applied earlier) */
+/* (styles unchanged – layout-tweaks and modal refinements applied) */
 
 .cf-pane {
   --pane-fg: #111;
@@ -1543,11 +1602,11 @@ function formatGiB(bytes: number): string {
 .cf-modal-title {
   font-size: 0.86rem;
   font-weight: 600;
-  margin-right: 20px;
+  margin: 0 20px 2px 0;
 }
 
 .cf-modal-body {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .cf-modal-message {
@@ -1679,7 +1738,7 @@ function formatGiB(bytes: number): string {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 0.74rem;
+  /* inherit font-size from .cf-modal for consistent text size */
 }
 
 .cf-modal-stat-row {
