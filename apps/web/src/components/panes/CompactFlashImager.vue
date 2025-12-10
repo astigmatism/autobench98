@@ -324,7 +324,7 @@
                   </div>
                   <div class="cf-modal-progress-meta">
                     <span class="pct">
-                      {{ progressPctDisplay.toFixed(1) }}%
+                      {{ progressPctInt }}%
                     </span>
                     <span class="rate" v-if="opRateDisplay">
                       {{ opRateDisplay }}
@@ -334,12 +334,8 @@
 
                 <div class="cf-modal-stats">
                   <div class="cf-modal-stat-row" v-if="opBytesDisplay">
-                    <span class="label">Bytes:</span>
+                    <span class="label">Transfer:</span>
                     <span class="value monospace">{{ opBytesDisplay }}</span>
-                  </div>
-                  <div class="cf-modal-stat-row" v-if="opTotalGiBDisplay">
-                    <span class="label">Total size:</span>
-                    <span class="value monospace">{{ opTotalGiBDisplay }}</span>
                   </div>
                 </div>
               </div>
@@ -553,6 +549,12 @@ const progressPctDisplay = computed(() => {
   return op.progressPct
 })
 
+const progressPctInt = computed(() => {
+  const v = progressPctDisplay.value
+  if (!Number.isFinite(v)) return 0
+  return Math.round(v)
+})
+
 /* Progress modal-specific derived state */
 
 const opProgressVisible = computed(() => {
@@ -568,15 +570,10 @@ const opPathsDisplay = computed(() => {
 const opBytesDisplay = computed(() => {
   const op = view.value.currentOp
   if (!op || op.bytesDone == null || op.bytesTotal == null) return ''
-  const done = formatBytesRaw(op.bytesDone)
-  const total = formatBytesRaw(op.bytesTotal)
-  return `${done} / ${total}`
-})
-
-const opTotalGiBDisplay = computed(() => {
-  const op = view.value.currentOp
-  if (!op || op.bytesTotal == null || op.bytesTotal <= 0) return ''
-  return `${formatGiB(op.bytesTotal)} GiB`
+  const doneGiB = formatGiB(op.bytesDone)
+  const totalGiB = formatGiB(op.bytesTotal)
+  if (!doneGiB || !totalGiB) return ''
+  return `${doneGiB} / ${totalGiB} GiB`
 })
 
 const opRateDisplay = computed(() => {
@@ -1009,11 +1006,6 @@ function formatDate(iso: string): string {
   } catch {
     return iso
   }
-}
-
-function formatBytesRaw(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return ''
-  return Math.round(bytes).toLocaleString('en-US')
 }
 
 function formatGiB(bytes: number): string {
