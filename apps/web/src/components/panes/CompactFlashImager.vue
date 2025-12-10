@@ -186,13 +186,11 @@
             </div>
           </div>
 
-          <!-- Shim overlay while FS is busy / op pending / op in progress -->
-          <div v-if="isShimActive" class="fs-shim">
+          <!-- Shim overlay while FS is busy (dir changes / delete refresh) -->
+          <div v-if="fsBusy" class="fs-shim">
             <div class="fs-shim-inner">
               <span class="spinner shim-spinner"></span>
-              <span class="fs-shim-text">
-                {{ opProgressVisible ? 'Imaging…' : 'Refreshing…' }}
-              </span>
+              <span class="fs-shim-text">Refreshing…</span>
             </div>
           </div>
         </div>
@@ -225,13 +223,15 @@
           </div>
         </div>
 
-        <!-- General-purpose modal dialog overlay (new folder / rename / delete / read-name) -->
+        <!-- Shared modal backdrop: dialog + sticky + progress -->
         <transition name="fade-modal">
           <div
-            v-if="modalVisible"
+            v-if="overlayActive"
             class="cf-modal-backdrop"
           >
+            <!-- General-purpose modal dialog (new folder / rename / delete / read-name) -->
             <div
+              v-if="modalVisible"
               class="cf-modal"
               role="dialog"
               :aria-label="modalTitle || 'Dialog'"
@@ -294,16 +294,10 @@
                 </button>
               </div>
             </div>
-          </div>
-        </transition>
 
-        <!-- Progress modal overlay (shown while read/write is in progress) -->
-        <transition name="fade-modal">
-          <div
-            v-if="opProgressVisible"
-            class="cf-modal-backdrop"
-          >
+            <!-- Progress modal overlay (shown while read/write is in progress) -->
             <div
+              v-else-if="opProgressVisible"
               class="cf-modal"
               role="dialog"
               aria-label="CF imaging in progress"
@@ -345,6 +339,8 @@
               <!-- No buttons: this dialog is informational and closes automatically
                    when the operation completes. -->
             </div>
+            <!-- If overlayActive is true only because of stickyOverlay, we just show
+                 the bare backdrop with no inner modal, so the UI is blocked but silent. -->
           </div>
         </transition>
       </div>
@@ -640,18 +636,29 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Path input + FS / op busy                                                 */
+/*  Path input + FS busy + overlay glue                                       */
 /* -------------------------------------------------------------------------- */
 
 const pathInput = ref('')
 const fsBusy = ref(false)
 
-// transient flag for: command sent, waiting for backend to flip to busy/currentOp
-const opPending = ref(false)
+/**
+ * stickyOverlay:
+ *  - true while we've sent a read/write command but haven't yet seen
+ *    currentOp/phase=busy from the backend.
+ *  - keeps the full-panel modal backdrop in place (blocking UI) even
+ *    after the input dialog is closed and before the progress modal appears.
+ */
+const stickyOverlay = ref(false)
 
-// unified shim flag for all "no touchy" states
-const isShimActive = computed(
-  () => fsBusy.value || opPending.value || opProgressVisible.value
+/**
+ * overlayActive drives the shared modal backdrop:
+ *  - dialog visible
+ *  - OR progress modal visible
+ *  - OR stickyOverlay (in-between state)
+ */
+const overlayActive = computed(
+  () => modalVisible.value || opProgressVisible.value || stickyOverlay.value
 )
 
 watch(
@@ -664,7 +671,7 @@ watch(
   { immediate: true }
 )
 
-// Also clear busy state and selection when the entries list changes
+// Clear busy state and selection when entries list changes (e.g., delete completes)
 watch(
   () => view.value.fs.entries.length,
   () => {
@@ -673,19 +680,17 @@ watch(
   }
 )
 
-// Clear opPending once we actually see the op in progress
+// When the backend flips into an active imaging op, we no longer need stickyOverlay
 watch(opProgressVisible, (vis) => {
-  if (vis) {
-    opPending.value = false
-  }
+  if (vis) stickyOverlay.value = false
 })
 
-// Defensive: clear opPending if we go back to idle with no op
+// Defensive: if we go idle with no current op, clear sticky overlay too
 watch(
   () => view.value.phase,
   (phase) => {
     if (phase === 'idle' && !view.value.currentOp) {
-      opPending.value = false
+      stickyOverlay.value = false
     }
   }
 )
@@ -781,6 +786,8 @@ function openReadImageModal() {
 
 function closeModal() {
   modalVisible.value = false
+  // If user cancels, ensure we don't leave a sticky overlay around
+  stickyOverlay.value = false
 }
 
 /* -------------------------------------------------------------------------- */
@@ -863,15 +870,16 @@ function confirmModal() {
 
     const cwd = view.value.fs.cwd || '.'
 
-    // Block interactions immediately while waiting for backend
-    opPending.value = true
+    // Immediately block the UI while we wait for backend to flip to busy/currentOp
+    stickyOverlay.value = true
 
     sendCfImagerCommand('readImage', {
       cwd,
       imageName: trimmed
     })
 
-    closeModal()
+    // Hide the dialog but keep the backdrop (overlayActive thanks to stickyOverlay)
+    modalVisible.value = false
     return
   }
 
@@ -976,13 +984,15 @@ function onWriteImageClick() {
     return
   }
 
-  // Block interactions immediately while waiting for backend
-  opPending.value = true
+  // Same UX as read: block UI between command send and progress modal
+  stickyOverlay.value = true
 
   sendCfImagerCommand('writeImage', {
     cwd,
     fileName
   })
+
+  // No dialog to close here, but overlayActive stays true via stickyOverlay
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1040,7 +1050,7 @@ function formatGiB(bytes: number): string {
 </script>
 
 <style scoped>
-/* (styles unchanged – plus a few extras for the progress modal) */
+/* (styles unchanged – layout-tweaks already applied earlier) */
 
 .cf-pane {
   --pane-fg: #111;
