@@ -792,8 +792,8 @@ const showAdvanced = ref(false)
     display: flex;
     flex-direction: column;
     gap: 8px;
-    height: 100%;
     width: 100%;
+    height: 100%;
     color: var(--pane-fg);
 }
 
@@ -865,8 +865,11 @@ const showAdvanced = ref(false)
     color: var(--panel-fg);
     display: flex;
     flex-direction: column;
-    min-height: 0;
     gap: 8px;
+
+    /* Key for adaptive layout: let the panel fill its pane */
+    flex: 1 1 0%;
+    min-height: 0;
 }
 
 /* When advanced view is open, allow vertical scrolling */
@@ -1094,6 +1097,10 @@ const showAdvanced = ref(false)
     font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
         sans-serif;
     color: #111827;
+
+    /* Key: allow this block to take remaining vertical space */
+    flex: 1 1 0%;
+    min-height: 0;
 }
 
 .histogram-header {
@@ -1134,7 +1141,11 @@ const showAdvanced = ref(false)
 /* Chart.js canvas wrapper */
 .histogram-chart-container {
     width: 100%;
-    height: 120px;
+
+    /* Let the chart grow to fill free space */
+    flex: 1 1 0%;
+    min-height: 0;
+    height: auto;
 }
 
 .histogram-chart {

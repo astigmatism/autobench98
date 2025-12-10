@@ -672,8 +672,9 @@ function resetSpeed() {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    height: 100%;
     width: 100%;
+    height: 100%;
+    min-height: 0;
     color: var(--pane-fg);
 }
 
@@ -745,10 +746,13 @@ function resetSpeed() {
     color: var(--panel-fg);
     display: flex;
     flex-direction: column;
-    min-height: 0;
     gap: 8px;
     font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
         sans-serif;
+
+    /* Fill the entire pane area */
+    flex: 1 1 0%;
+    min-height: 0;
 }
 
 /* Panel header */
@@ -845,20 +849,24 @@ function resetSpeed() {
     background: #ef4444;
 }
 
-/* Tape viewport */
+/* Tape viewport: scrollable area, fills remaining panel space.
+   Made a flex container with NO padding so child 100%/flex height matches it exactly. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 4px 0;
     position: relative;
+
+    display: flex;
+    align-items: stretch;
 }
 
-/* Tape surface */
+/* Tape surface: flex child that stretches to fill viewport height in empty state.
+   No min-height:100%; that plus viewport padding was causing the early scrollbar. */
 .tape {
     position: relative;
-    margin: 0 auto;
+    margin: 4px auto; /* replaces viewport padding */
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -866,6 +874,11 @@ function resetSpeed() {
     box-shadow:
         0 0 0 1px rgba(15, 23, 42, 0.4),
         0 10px 24px rgba(15, 23, 42, 0.7);
+
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 /* Perforation strip */
@@ -883,13 +896,13 @@ function resetSpeed() {
     mask-image: linear-gradient(to bottom, black, transparent);
 }
 
-/* Tape footer deep shadow */
+/* Tape footer deep shadow (inside tape so it doesn't add scroll height) */
 .tape-footer {
     position: absolute;
     left: 8px;
     right: 8px;
-    bottom: -8px;
-    height: 12px;
+    bottom: 0;
+    height: 10px;
     background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.45), transparent 60%);
     opacity: 0.8;
     pointer-events: none;
