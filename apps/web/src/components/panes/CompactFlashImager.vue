@@ -186,11 +186,13 @@
             </div>
           </div>
 
-          <!-- Shim overlay while FS is busy (blocks clicks, dims content) -->
-          <div v-if="fsBusy" class="fs-shim">
+          <!-- Shim overlay while FS is busy / op pending / op in progress -->
+          <div v-if="isShimActive" class="fs-shim">
             <div class="fs-shim-inner">
               <span class="spinner shim-spinner"></span>
-              <span class="fs-shim-text">Refreshing…</span>
+              <span class="fs-shim-text">
+                {{ opProgressVisible ? 'Imaging…' : 'Refreshing…' }}
+              </span>
             </div>
           </div>
         </div>
@@ -638,30 +640,53 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Path input + FS busy                                                      */
+/*  Path input + FS / op busy                                                 */
 /* -------------------------------------------------------------------------- */
 
 const pathInput = ref('')
 const fsBusy = ref(false)
+
+// transient flag for: command sent, waiting for backend to flip to busy/currentOp
+const opPending = ref(false)
+
+// unified shim flag for all "no touchy" states
+const isShimActive = computed(
+  () => fsBusy.value || opPending.value || opProgressVisible.value
+)
 
 watch(
   () => view.value.fs.cwd,
   (cwd) => {
     pathInput.value = cwd
     fsBusy.value = false
-    // Clear any stale selection when directory changes
     selectedNames.value = []
   },
   { immediate: true }
 )
 
 // Also clear busy state and selection when the entries list changes
-// (e.g., delete completes but cwd stays the same)
 watch(
   () => view.value.fs.entries.length,
   () => {
     fsBusy.value = false
     selectedNames.value = []
+  }
+)
+
+// Clear opPending once we actually see the op in progress
+watch(opProgressVisible, (vis) => {
+  if (vis) {
+    opPending.value = false
+  }
+})
+
+// Defensive: clear opPending if we go back to idle with no op
+watch(
+  () => view.value.phase,
+  (phase) => {
+    if (phase === 'idle' && !view.value.currentOp) {
+      opPending.value = false
+    }
   }
 )
 
@@ -782,12 +807,10 @@ function confirmModal() {
     const raw = modalInput.value
     const trimmed = raw.trim()
 
-    // Empty input: do nothing (no command, leave modal open).
     if (!trimmed) {
       return
     }
 
-    // Non-empty: send createFolder command and close modal.
     sendCfImagerCommand('createFolder', { name: trimmed })
     closeModal()
     return
@@ -798,18 +821,15 @@ function confirmModal() {
     const raw = modalInput.value
     const trimmed = raw.trim()
 
-    // No selected item (defensive) or empty new name: no-op.
     if (!originalName || !trimmed) {
       return
     }
 
-    // Name unchanged: no server command, just close.
     if (trimmed === originalName) {
       closeModal()
       return
     }
 
-    // Name changed: send rename command and close modal.
     sendCfImagerCommand('rename', {
       oldName: originalName,
       newName: trimmed
@@ -821,7 +841,6 @@ function confirmModal() {
   if (modalMode.value === 'delete') {
     const names = selectedNames.value.slice()
     if (names.length === 0) {
-      // Nothing selected; defensive guard.
       closeModal()
       return
     }
@@ -829,7 +848,6 @@ function confirmModal() {
     // Mark FS as busy while we wait for the backend to process delete
     fsBusy.value = true
 
-    // Send delete command for all selected names and close modal.
     sendCfImagerCommand('delete', { names })
     closeModal()
     return
@@ -840,11 +858,13 @@ function confirmModal() {
     const trimmed = raw.trim()
 
     if (!trimmed) {
-      // Do not send a command for empty names; keep the modal open.
       return
     }
 
     const cwd = view.value.fs.cwd || '.'
+
+    // Block interactions immediately while waiting for backend
+    opPending.value = true
 
     sendCfImagerCommand('readImage', {
       cwd,
@@ -947,16 +967,17 @@ function onWriteImageClick() {
 
   const cwd = view.value.fs.cwd || '.'
 
-  // Prefer the first selected file in the current directory.
   const fileName =
     selectedNames.value.find(name =>
       sortedEntries.value.some(e => e.kind === 'file' && e.name === name)
     ) ?? null
 
   if (!fileName) {
-    // Defensive guard: no valid file selection.
     return
   }
+
+  // Block interactions immediately while waiting for backend
+  opPending.value = true
 
   sendCfImagerCommand('writeImage', {
     cwd,

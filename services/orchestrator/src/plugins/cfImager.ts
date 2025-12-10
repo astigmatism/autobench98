@@ -73,9 +73,9 @@ class CfImagerLoggerEventSink implements CfImagerEventSink {
 
             case 'cf-op-progress': {
                 const op = evt.op
-                this.log.debug(
-                    `ts=${ts} kind=${evt.kind} op=${op.kind} pct=${op.progressPct.toFixed(1)}`
-                )
+                // this.log.debug(
+                //     `ts=${ts} kind=${evt.kind} op=${op.kind} pct=${op.progressPct.toFixed(1)}`
+                // )
                 break
             }
 
