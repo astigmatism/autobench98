@@ -91,29 +91,13 @@ export class CfImagerService {
 
         // Initial FS snapshot is already in this.state from the constructor.
         // Start a lightweight polling watcher if configured.
-        const interval = this.config.fsPollIntervalMs ?? 0
-        if (interval > 0) {
-            if (this.fsPollTimer) {
-                clearInterval(this.fsPollTimer)
-                this.fsPollTimer = null
-            }
-
-            // Immediate initial poll to sync any changes after process start.
-            void this.pollFsOnce()
-
-            this.fsPollTimer = setInterval(() => {
-                void this.pollFsOnce()
-            }, interval)
-        }
+        this.startFsPolling()
     }
 
     public async stop(): Promise<void> {
         // console.log('[cf-imager] stop() called')
 
-        if (this.fsPollTimer) {
-            clearInterval(this.fsPollTimer)
-            this.fsPollTimer = null
-        }
+        this.stopFsPolling()
 
         await this.cancelCurrentChild('explicit-close')
         this.device = null
@@ -529,6 +513,11 @@ export class CfImagerService {
 
             this.child = child
 
+            // While the imaging operation is in progress, pause the FS watchdog
+            // so it doesn't constantly rescan the directory and surface the
+            // partially-written image.
+            this.pauseFsWatchdogForOp()
+
             // Stream stdout line-by-line, looking for PROGRESS lines
             child.stdout.setEncoding('utf8')
             let stdoutBuf = ''
@@ -577,6 +566,9 @@ export class CfImagerService {
                 this.emitError(`readDeviceToImage failed to start: ${(err as Error).message}`)
                 this.state.phase = 'idle'
                 this.state.currentOp = undefined
+
+                // Resume watchdog; the op has effectively terminated.
+                this.resumeFsWatchdogAfterOp({ refreshFs: false })
             })
 
             child.on('close', (code, signal) => {
@@ -586,7 +578,10 @@ export class CfImagerService {
                     // Successful completion
                     this.state.phase = 'idle'
                     this.state.message = 'Read complete'
-                    // Optionally emit a cf-op-completed event later
+
+                    // After a successful read, refresh once so the new image
+                    // shows up exactly when the operation has finished.
+                    this.resumeFsWatchdogAfterOp({ refreshFs: true })
                 } else {
                     const reason =
                         code !== null
@@ -595,6 +590,10 @@ export class CfImagerService {
                             ? `signal ${signal}`
                             : 'unknown failure'
                     this.emitError(`readDeviceToImage script failed (${reason})`)
+
+                    // On failure, we still want to resume watchdog polling,
+                    // but a full refresh is less critical.
+                    this.resumeFsWatchdogAfterOp({ refreshFs: true })
                 }
 
                 this.state.currentOp = undefined
@@ -604,6 +603,9 @@ export class CfImagerService {
             this.emitError(`readDeviceToImage: spawn failed: ${(err as Error).message}`)
             this.state.phase = 'idle'
             this.state.currentOp = undefined
+
+            // Ensure watchdog is resumed even if spawn throws.
+            this.resumeFsWatchdogAfterOp({ refreshFs: false })
         }
     }
 
@@ -627,6 +629,10 @@ export class CfImagerService {
         } catch {
             // ignore
         }
+
+        // If we canceled an in-flight operation, make sure the watchdog can
+        // resume. We don't force a refresh here; the caller can decide.
+        this.resumeFsWatchdogAfterOp({ refreshFs: false })
 
         if (this.device) {
             this.deps.events.publish({
@@ -947,6 +953,59 @@ export class CfImagerService {
             at: Date.now(),
             fs,
         })
+    }
+
+    /**
+     * Start the periodic FS watchdog if configured.
+     */
+    private startFsPolling(): void {
+        const interval = this.config.fsPollIntervalMs ?? 0
+        if (interval <= 0) {
+            return
+        }
+
+        if (this.fsPollTimer) {
+            // Already running
+            return
+        }
+
+        // Immediate initial poll to sync any changes after process start.
+        void this.pollFsOnce()
+
+        this.fsPollTimer = setInterval(() => {
+            void this.pollFsOnce()
+        }, interval)
+    }
+
+    /**
+     * Stop the periodic FS watchdog (used when the service stops or when
+     * a long-running imaging operation is in progress).
+     */
+    private stopFsPolling(): void {
+        if (this.fsPollTimer) {
+            clearInterval(this.fsPollTimer)
+            this.fsPollTimer = null
+        }
+    }
+
+    /**
+     * Pause watchdog specifically for a long-running imaging operation so
+     * partial files (e.g., the image being written) don't surface mid-flight.
+     */
+    private pauseFsWatchdogForOp(): void {
+        this.stopFsPolling()
+    }
+
+    /**
+     * Resume the watchdog after an imaging operation has completed or failed.
+     * Optionally emit a one-shot FS refresh so the UI sees the final state.
+     */
+    private resumeFsWatchdogAfterOp(opts: { refreshFs: boolean }): void {
+        if (opts.refreshFs) {
+            this.emitFsUpdated()
+        }
+
+        this.startFsPolling()
     }
 
     /**
