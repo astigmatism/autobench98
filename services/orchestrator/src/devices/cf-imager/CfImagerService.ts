@@ -550,10 +550,12 @@ export class CfImagerService {
                             const { bytes, total, pct } = progress
 
                             // Debug logging so you can verify on macOS + Linux
+                            /*
                             console.log(
                                 '[cf-imager] progress (read):',
                                 `bytes=${bytes} total=${total} pct=${pct}`
                             )
+                            */
 
                             // Update our moving progress window for speed calculation.
                             this.recordProgressSample(bytes)
