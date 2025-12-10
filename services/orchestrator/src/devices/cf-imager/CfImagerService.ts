@@ -47,6 +47,12 @@ export class CfImagerService {
     /** Optional periodic FS polling timer for out-of-band changes. */
     private fsPollTimer: NodeJS.Timeout | null = null
 
+    /**
+     * Sliding window of recent PROGRESS samples used to compute
+     * a smoothed bytes/sec rate during imaging operations.
+     */
+    private progressWindow: { t: number; bytes: number }[] = []
+
     constructor(config: CfImagerConfig, deps: CfImagerServiceDeps) {
         this.config = config
         this.deps = deps
@@ -488,6 +494,9 @@ export class CfImagerService {
         this.state.currentOp = op
         this.state.message = undefined
 
+        // Reset progress window for this op
+        this.progressWindow = []
+
         this.deps.events.publish({
             kind: 'cf-op-started',
             at: Date.now(),
@@ -541,10 +550,33 @@ export class CfImagerService {
                                 `bytes=${bytes} total=${total} pct=${pct}`
                             )
 
-                            // Update current op for future UI wiring
+                            // Update current op snapshot, including bytes & rate
                             if (this.state.currentOp && this.state.currentOp.kind === 'read') {
                                 this.state.currentOp.progressPct = pct
-                                // We can extend CfImagerCurrentOp later to store bytes/total if desired.
+                                // These are optional in the snapshot type the pane uses.
+                                this.state.currentOp.bytesDone = bytes
+                                this.state.currentOp.bytesTotal = total
+
+                                // Update sliding window + compute smoothed rate.
+                                const rate = this.updateProgressWindowAndComputeRate(bytes)
+                                if (rate != null && total > 0) {
+                                    const pctStr =
+                                        Number.isFinite(pct) ? pct.toFixed(1) : String(pct)
+                                    const doneStr = formatBytes(bytes)
+                                    const totalStr = formatBytes(total)
+                                    const rateStr = formatBytes(rate) + '/s'
+
+                                    this.state.currentOp.message =
+                                        `${doneStr} / ${totalStr} (${pctStr}%), ~${rateStr}`
+                                } else if (total > 0) {
+                                    // Early in the transfer, still provide a decent message
+                                    const pctStr =
+                                        Number.isFinite(pct) ? pct.toFixed(1) : String(pct)
+                                    const doneStr = formatBytes(bytes)
+                                    const totalStr = formatBytes(total)
+                                    this.state.currentOp.message =
+                                        `${doneStr} / ${totalStr} (${pctStr}%)`
+                                }
                             }
                         }
                     }
@@ -566,6 +598,7 @@ export class CfImagerService {
                 this.emitError(`readDeviceToImage failed to start: ${(err as Error).message}`)
                 this.state.phase = 'idle'
                 this.state.currentOp = undefined
+                this.progressWindow = []
 
                 // Resume watchdog; the op has effectively terminated.
                 this.resumeFsWatchdogAfterOp({ refreshFs: false })
@@ -573,6 +606,7 @@ export class CfImagerService {
 
             child.on('close', (code, signal) => {
                 this.child = null
+                this.progressWindow = []
 
                 if (code === 0) {
                     // Successful completion
@@ -592,7 +626,7 @@ export class CfImagerService {
                     this.emitError(`readDeviceToImage script failed (${reason})`)
 
                     // On failure, we still want to resume watchdog polling,
-                    // but a full refresh is less critical.
+                    // and a refresh helps clear any transient FS view.
                     this.resumeFsWatchdogAfterOp({ refreshFs: true })
                 }
 
@@ -600,6 +634,7 @@ export class CfImagerService {
             })
         } catch (err) {
             this.child = null
+            this.progressWindow = []
             this.emitError(`readDeviceToImage: spawn failed: ${(err as Error).message}`)
             this.state.phase = 'idle'
             this.state.currentOp = undefined
@@ -607,6 +642,40 @@ export class CfImagerService {
             // Ensure watchdog is resumed even if spawn throws.
             this.resumeFsWatchdogAfterOp({ refreshFs: false })
         }
+    }
+
+    /**
+     * Update the sliding window with the latest byte count and compute a
+     * smoothed bytes/sec rate over the window.
+     *
+     * Returns:
+     *   - number (bytes/sec) if we have enough samples and a positive Δt
+     *   - null otherwise
+     */
+    private updateProgressWindowAndComputeRate(bytes: number): number | null {
+        const now = Date.now()
+        const windowSize = 5
+
+        this.progressWindow.push({ t: now, bytes })
+
+        if (this.progressWindow.length > windowSize) {
+            this.progressWindow.splice(0, this.progressWindow.length - windowSize)
+        }
+
+        if (this.progressWindow.length < 2) {
+            return null
+        }
+
+        const first = this.progressWindow[0]
+        const last = this.progressWindow[this.progressWindow.length - 1]
+        const dtMs = last.t - first.t
+        if (dtMs <= 0) return null
+
+        const dBytes = last.bytes - first.bytes
+        if (dBytes <= 0) return null
+
+        const dtSec = dtMs / 1000
+        return dBytes / dtSec
     }
 
     /* ---------------------------------------------------------------------- */
@@ -629,6 +698,8 @@ export class CfImagerService {
         } catch {
             // ignore
         }
+
+        this.progressWindow = []
 
         // If we canceled an in-flight operation, make sure the watchdog can
         // resume. We don't force a refresh here; the caller can decide.
@@ -1148,6 +1219,22 @@ function parseProgressLine(line: string): { bytes: number; total: number; pct: n
     }
 
     return { bytes, total, pct }
+}
+
+/**
+ * Format a byte count into a human-readable string (B, KB, MB, GB, TB).
+ */
+function formatBytes(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes < 0) return ''
+    const units = ['B', 'KB', 'MB', 'GB', 'TB']
+    let v = bytes
+    let idx = 0
+    while (v >= 1024 && idx < units.length - 1) {
+        v /= 1024
+        idx++
+    }
+    const num = idx === 0 ? v.toFixed(0) : v.toFixed(1)
+    return `${num} ${units[idx]}`
 }
 
 /**

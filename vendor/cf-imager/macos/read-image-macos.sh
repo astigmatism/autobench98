@@ -232,14 +232,5 @@ fi
 
 sync || true
 
-# ---------------------------------------------------------------------------
-# Capture partition layout (for .part sidecar file)
-# ---------------------------------------------------------------------------
-
-log "Saving partition layout for '$DEVICE' to '$PART_TABLE'"
-if ! diskutil list "$DEVICE" > "$PART_TABLE" 2>/dev/null; then
-  log "WARNING: failed to save partition layout via diskutil; continuing"
-fi
-
 echo "READ_COMPLETE dest=${DEST_IMG}"
 exit 0

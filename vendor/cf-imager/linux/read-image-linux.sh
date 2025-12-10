@@ -208,18 +208,5 @@ fi
 
 sync || true
 
-# ---------------------------------------------------------------------------
-# Dump partition table (sidecar .part) with sfdisk if available
-# ---------------------------------------------------------------------------
-
-if command -v sfdisk >/dev/null 2>&1; then
-  log "Saving partition table for '$DEVICE' to '$PART_TABLE'"
-  if ! sfdisk -d "$DEVICE" > "$PART_TABLE" 2>/dev/null; then
-    log "WARNING: failed to save partition table with sfdisk; continuing"
-  fi
-else
-  log "WARNING: sfdisk not available; partition table will not be saved"
-fi
-
 echo "READ_COMPLETE dest=${DEST_IMG}"
 exit 0
