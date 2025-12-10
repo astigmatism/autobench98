@@ -104,14 +104,14 @@ export type CfImagerOpKind = 'read' | 'write'
 
 export interface CfImagerCurrentOp {
     kind: CfImagerOpKind
-    /** For write: relative image path; for read: device id/path. */
     source: string
-    /** For write: device id/path; for read: relative image path. */
     destination: string
     startedAt: string
     progressPct: number
     bytesDone?: number
     bytesTotal?: number
+    bytesPerSec?: number
+    mbPerSec?: number
     message?: string
 }
 
