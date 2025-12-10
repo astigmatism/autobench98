@@ -649,16 +649,19 @@ watch(
   (cwd) => {
     pathInput.value = cwd
     fsBusy.value = false
+    // Clear any stale selection when directory changes
     selectedNames.value = []
   },
   { immediate: true }
 )
 
-// Also clear busy state when the entries list changes (e.g., delete completes)
+// Also clear busy state and selection when the entries list changes
+// (e.g., delete completes but cwd stays the same)
 watch(
   () => view.value.fs.entries.length,
   () => {
     fsBusy.value = false
+    selectedNames.value = []
   }
 )
 
@@ -1096,6 +1099,7 @@ function formatGiB(bytes: number): string {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  flex: 1 1 0%;
 }
 
 .panel-head {
@@ -1122,6 +1126,8 @@ function formatGiB(bytes: number): string {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1 1 0%;
+  min-height: 0;
 }
 
 .status-badge {
@@ -1275,6 +1281,8 @@ function formatGiB(bytes: number): string {
   gap: 6px;
   font-size: 0.78rem;
   position: relative;
+  flex: 1 1 0%;
+  min-height: 0;
 }
 
 .fs-toolbar {
@@ -1351,13 +1359,14 @@ function formatGiB(bytes: number): string {
 }
 
 .fs-list {
-  max-height: 200px;
   overflow-y: auto;
   border-radius: 4px;
   border: 1px solid #111827;
   background: #020617;
   -webkit-user-select: none;
   user-select: none;
+  flex: 1 1 0%;
+  min-height: 0;
 }
 
 .fs-row {
