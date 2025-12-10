@@ -331,7 +331,7 @@
                 <div class="cf-modal-stats">
                   <div class="cf-modal-stat-row" v-if="opBytesDisplay">
                     <span class="label">Transfer:</span>
-                    <span class="value monospace">{{ opBytesDisplay }}</span>
+                    <span class="value">{{ opBytesDisplay }}</span>
                   </div>
                   <div class="cf-modal-stat-row" v-if="opEtaDisplay">
                     <span class="label">Estimated time:</span>
@@ -605,7 +605,10 @@ const opEtaDisplay = computed(() => {
   }
 
   let bytesPerSec = op.bytesPerSec
-  if ((bytesPerSec == null || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) && typeof op.mbPerSec === 'number') {
+  if (
+    (bytesPerSec == null || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) &&
+    typeof op.mbPerSec === 'number'
+  ) {
     bytesPerSec = op.mbPerSec * 1024 * 1024
   }
 
