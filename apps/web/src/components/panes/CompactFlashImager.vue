@@ -1725,13 +1725,15 @@ function formatEta(totalSeconds: number): string {
 .cf-modal-progress-meta {
   display: flex;
   justify-content: space-between;
-  font-size: 0.72rem;
+  font-size: 0.8rem;      /* was 0.72rem */
   opacity: 0.9;
   margin-top: 2px;
 }
+
 .cf-modal-progress-meta .pct {
   font-variant-numeric: tabular-nums;
 }
+
 .cf-modal-progress-meta .rate {
   font-variant-numeric: tabular-nums;
 }
