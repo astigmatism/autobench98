@@ -601,6 +601,14 @@ watch(
   { immediate: true }
 )
 
+// Also clear busy state when the entries list changes (e.g., delete completes)
+watch(
+  () => view.value.fs.entries.length,
+  () => {
+    fsBusy.value = false
+  }
+)
+
 /* -------------------------------------------------------------------------- */
 /*  Media-ready + file selection                                              */
 /* -------------------------------------------------------------------------- */
@@ -761,6 +769,9 @@ function confirmModal() {
       closeModal()
       return
     }
+
+    // Mark FS as busy while we wait for the backend to process delete
+    fsBusy.value = true
 
     // Send delete command for all selected names and close modal.
     sendCfImagerCommand('delete', { names })
