@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure common sbin paths are on PATH for non-root users so we can find tools
+# like sfdisk even when sudo is not used.
+export PATH="/usr/sbin:/sbin:$PATH"
+
 # read-image-linux.sh
 #
 # Usage:
