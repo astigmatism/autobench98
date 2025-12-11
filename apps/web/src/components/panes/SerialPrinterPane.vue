@@ -724,7 +724,7 @@ const isReconnecting = computed(() => {
  * - disconnected        → "Disconnected" or "Reconnecting…"
  * - streaming text      → "Printing"
  * - backend has job     → "Spooling…" (device is receiving / job has started)
- * - connected & idle    → "Ready"
+ * - connected & idle    → "Idle"
  */
 const statusLabel = computed(() => {
     if (printer.value.phase === 'error') {
@@ -748,7 +748,7 @@ const statusLabel = computed(() => {
     }
 
     // Fully idle but connected.
-    return 'Ready'
+    return 'Idle'
 })
 
 /* -------------------------------------------------------------------------- */
