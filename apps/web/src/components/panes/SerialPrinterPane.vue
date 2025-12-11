@@ -27,6 +27,7 @@
                     class="status-badge"
                     :data-phase="printer.phase"
                     :data-reconnecting="isReconnecting ? 'true' : 'false'"
+                    :data-streaming="isStreaming ? 'true' : 'false'"
                 >
                     <span class="dot"></span>
                     <span class="label">{{ statusLabel }}</span>
@@ -930,19 +931,65 @@ function resetSpeed() {
     background: #9ca3af;
 }
 
-/* Phase-specific colors (aligned with Power Meter semantics) */
-.status-badge[data-phase='receiving'] {
-    border-color: #22c55e;
-    background: #022c22;
+/* ------------------------------------------------------------------ */
+/* Device disconnected / reconnecting / error                         */
+/* ------------------------------------------------------------------ */
+
+/* Disconnected baseline */
+.status-badge[data-phase='disconnected'] {
+    border-color: #4b5563;
+    background: #020617;
 }
-.status-badge[data-phase='receiving'] .dot {
-    background: #22c55e;
+.status-badge[data-phase='disconnected'] .dot {
+    background: #6b7280;
 }
+
+/* Disconnected + reconnecting (yellow, like CF "busy") */
+.status-badge[data-phase='disconnected'][data-reconnecting='true'] {
+    border-color: #facc15;
+    background: #3b2900;
+}
+.status-badge[data-phase='disconnected'][data-reconnecting='true'] .dot {
+    background: #facc15;
+}
+
+/* Error state (red) */
+.status-badge[data-phase='error'] {
+    border-color: #ef4444;
+    background: #450a0a;
+}
+.status-badge[data-phase='error'] .dot {
+    background: #ef4444;
+}
+
+/* ------------------------------------------------------------------ */
+/* Ready / Spooling / Printing / Queued                               */
+/* ------------------------------------------------------------------ */
+
+/* READY → phase='connected' (blue, mirrors CF "No Media") */
 .status-badge[data-phase='connected'] {
-    border-color: #22c55e;
-    background: #022c22;
+    border-color: #38bdf8;
+    background: #022c3a;
 }
 .status-badge[data-phase='connected'] .dot {
+    background: #38bdf8;
+}
+
+/* SPOOLING → phase='receiving' but not yet streaming (yellow, CF "Busy") */
+.status-badge[data-phase='receiving'][data-streaming='false'] {
+    border-color: #facc15;
+    background: #3b2900;
+}
+.status-badge[data-phase='receiving'][data-streaming='false'] .dot {
+    background: #facc15;
+}
+
+/* PRINTING → phase='receiving' while streaming (green, CF "Media Ready") */
+.status-badge[data-phase='receiving'][data-streaming='true'] {
+    border-color: #22c55e;
+    background: #022c22;
+}
+.status-badge[data-phase='receiving'][data-streaming='true'] .dot {
     background: #22c55e;
 }
 
@@ -953,33 +1000,6 @@ function resetSpeed() {
 }
 .status-badge[data-phase='queued'] .dot {
     background: #a855f7;
-}
-
-/* Disconnected baseline (no reconnect attempt yet) */
-.status-badge[data-phase='disconnected'] {
-    border-color: #4b5563;
-    background: #020617;
-}
-.status-badge[data-phase='disconnected'] .dot {
-    background: #6b7280;
-}
-
-/* Disconnected + reconnecting (yellow, like Power Meter "connecting") */
-.status-badge[data-phase='disconnected'][data-reconnecting='true'] {
-    border-color: #facc15;
-    background: #3b2900;
-}
-.status-badge[data-phase='disconnected'][data-reconnecting='true'] .dot {
-    background: #facc15;
-}
-
-/* Error state */
-.status-badge[data-phase='error'] {
-    border-color: #ef4444;
-    background: #450a0a;
-}
-.status-badge[data-phase='error'] .dot {
-    background: #ef4444;
 }
 
 /* Tape viewport: scrollable area, fills remaining panel space.
