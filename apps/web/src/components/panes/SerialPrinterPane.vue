@@ -376,10 +376,14 @@ function onScroll() {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * New behavior:
+ *
  * - We maintain a single logical tape composed of ordered segments, one per job.
+ * - Each segment is visually separated by a "cut" line (job-divider).
  * - Completed jobs from the backend are queued in jobQueue as full text.
  * - A typing timer drains characters from pendingText into the current segment.
- * - We trim older characters while auto-scroll is at the bottom.
+ * - As the total character count across all segments grows, we trim old text
+ *   from the front, dropping whole segments when they become empty.
  */
 
 /* Tape segments currently visible in the component */
@@ -473,9 +477,10 @@ function totalTapeChars(): number {
  * Keeps only the most recent tapeMaxChars characters across segments.
  * Oldest characters are removed first; empty segments are dropped.
  *
- * IMPORTANT UX:
+ * IMPORTANT UX CHANGE:
  * - We only trim while auto-scroll is enabled (user pinned to bottom).
- * - If the user scrolls up to inspect earlier output, we stop trimming.
+ * - If the user scrolls up to inspect earlier output, we stop trimming
+ *   so they do NOT see text "stream away" at the top.
  */
 function trimTapeIfNeeded() {
     if (!autoScrollEnabled.value) {
@@ -490,7 +495,11 @@ function trimTapeIfNeeded() {
 
     while (excess > 0 && tapeSegments.value.length > 0) {
         const first = tapeSegments.value[0]
-        if (!first) break
+
+        // Extra safety so TS and runtime are both happy:
+        if (!first) {
+            break
+        }
 
         if (first.text.length <= excess) {
             excess -= first.text.length
@@ -600,15 +609,25 @@ function startTypingTimer() {
                 tapeSegments.value.push({ id: -1, text: '' })
             }
             const last = tapeSegments.value[tapeSegments.value.length - 1]
-            if (!last) return
+            if (!last) {
+                // Extremely defensive; should not happen if we just pushed
+                return
+            }
             last.text += chunk
         }
 
         trimTapeIfNeeded()
 
+        // If this job's text is fully streamed, and there are more queued jobs,
+        // the next tick will hydratePendingFromQueueIfNeeded and we’ll begin
+        // a new segment, giving a clear visual break (job-divider).
         if (!pendingText.value.length) {
             if (!jobQueue.value.length) {
+                // No more jobs queued; active job finishes naturally.
                 activeJobId.value = null
+            } else {
+                // There are more jobs queued; next hydration will set activeJobId
+                // to the next job and create a new segment.
             }
         }
     }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
@@ -617,75 +636,19 @@ function startTypingTimer() {
 /* Track the last job id we’ve already enqueued for streaming */
 const lastEnqueuedJobId = ref<number | null>(null)
 
-/* Track initial snapshot job count + whether we've hydrated existing output */
-const baselineJobs = ref<number | null>(null)
-const hydratedExistingJobs = ref(false)
-
-/**
- * Fast-forward hydration:
- * On first connection, if there are already completed jobs in the snapshot,
- * we build the tape from history + lastJobFullText and skip re-streaming.
- */
-function fastForwardExistingOutputFromSnapshot() {
-    const snap = printer.value
-    const segments: TapeSegment[] = []
-
-    if (Array.isArray(snap.history) && snap.history.length > 0) {
-        for (const h of snap.history) {
-            if (h.text) {
-                segments.push({ id: h.id, text: h.text })
-            }
-        }
-    }
-
-    const last = snap.lastJob
-    const full = snap.lastJobFullText
-    if (last && full && !segments.some(s => s.id === last.id)) {
-        segments.push({ id: last.id, text: full })
-    }
-
-    tapeSegments.value = segments
-    pendingText.value = ''
-    jobQueue.value = []
-    activeJobId.value = null
-
-    // Mark last job as already handled so the watcher doesn't stream it again.
-    lastEnqueuedJobId.value = last ? last.id : null
-
-    trimTapeIfNeeded()
-    hydratedExistingJobs.value = true
-}
-
-/**
- * Observe totalJobs once to establish a baseline and, if there were already
- * jobs at the time we attached, fast-forward to the end of the existing output.
- *
- * This satisfies: "if the client is refreshed, fast-forward to the end of
- * the print, regardless of the fastForwardToLatest toggle".
- */
-watch(
-    () => printer.value.stats.totalJobs,
-    (total) => {
-        if (baselineJobs.value === null) {
-            baselineJobs.value = total ?? 0
-            if (baselineJobs.value > 0 && !hydratedExistingJobs.value) {
-                fastForwardExistingOutputFromSnapshot()
-            }
-        }
-    },
-    { immediate: true }
-)
-
 /**
  * Whenever the backend reports a new completed job (via lastJob),
- * enqueue its full text for streaming (post-hydration).
+ * enqueue its full text for streaming.
+ *
+ * If another job arrives while we’re still streaming, we either:
+ *  - (fastForwardToLatest=false) enqueue and let backlog speed handle it, or
+ *  - (fastForwardToLatest=true) flush backlog instantly and focus on the latest job.
  */
 watch(
     () => printer.value.lastJob,
     (job) => {
         if (!job) return
 
-        // If this job was already handled during initial hydration, skip.
         if (lastEnqueuedJobId.value === job.id) {
             return
         }
@@ -716,7 +679,7 @@ watch(
             hydratePendingFromQueueIfNeeded()
             startTypingTimer()
         } else {
-            // Normal behavior: enqueue and let the backlog
+            // Existing behavior: enqueue and let the backlog
             // speed factor handle older jobs.
             jobQueue.value.push(newJob)
             hydratePendingFromQueueIfNeeded()
@@ -1003,7 +966,7 @@ function resetSpeed() {
 /* Idle / Spooling / Printing / Queued                                */
 /* ------------------------------------------------------------------ */
 
-/* IDLE → phase='connected' (green, ready) */
+/* IDLE → phase='connected' (green, mirrors CF "Media Ready") */
 .status-badge[data-phase='connected'] {
     border-color: #22c55e;
     background: #022c22;
@@ -1012,7 +975,7 @@ function resetSpeed() {
     background: #22c55e;
 }
 
-/* SPOOLING → phase='receiving' but not yet streaming (yellow) */
+/* SPOOLING → phase='receiving' but not yet streaming (yellow, CF "Busy") */
 .status-badge[data-phase='receiving'][data-streaming='false'] {
     border-color: #facc15;
     background: #3b2900;
@@ -1021,7 +984,7 @@ function resetSpeed() {
     background: #facc15;
 }
 
-/* PRINTING → phase='receiving' while streaming (blue) */
+/* PRINTING → phase='receiving' while streaming (blue, CF "No Media") */
 .status-badge[data-phase='receiving'][data-streaming='true'] {
     border-color: #38bdf8;
     background: #022c3a;
@@ -1030,7 +993,7 @@ function resetSpeed() {
     background: #38bdf8;
 }
 
-/* Optional: queued distinct (purple) */
+/* Optional: keep queued distinct (purple) */
 .status-badge[data-phase='queued'] {
     border-color: #a855f7;
     background: #2b103f;
@@ -1039,7 +1002,8 @@ function resetSpeed() {
     background: #a855f7;
 }
 
-/* Tape viewport: scrollable area, fills remaining panel space. */
+/* Tape viewport: scrollable area, fills remaining panel space.
+   Made a flex container with NO padding so child 100%/flex height matches it exactly. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
@@ -1051,10 +1015,11 @@ function resetSpeed() {
     align-items: stretch;
 }
 
-/* Tape surface: flex child that stretches to fill viewport. */
+/* Tape surface: flex child that stretches to fill viewport height in empty state.
+   No min-height:100%; that plus viewport padding was causing the early scrollbar. */
 .tape {
     position: relative;
-    margin: 4px auto;
+    margin: 4px auto; /* replaces viewport padding */
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
