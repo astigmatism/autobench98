@@ -863,9 +863,9 @@ function resetSpeed() {
     /* Paper frame styling moved here so it stays pinned while scrolling */
     margin: 4px auto;
     max-width: 100%;
-    background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
+    /* background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%); */
     border-radius: 6px;
-    padding: 8px 10px 16px 10px;
+    padding: 8px 3px 16px 3px;
     box-shadow:
         0 0 0 1px rgba(15, 23, 42, 0.4),
         0 10px 24px rgba(15, 23, 42, 0.7);
@@ -926,7 +926,7 @@ function resetSpeed() {
     margin: 0;
     padding: 4px 6px;
     border-radius: 4px;
-    background: rgba(249, 250, 251, 0.9);
+    background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     color: #111827;
     font-family: 'SF Mono', ui-monospace, Menlo, Monaco, Consolas, 'Liberation Mono',
         'Courier New', monospace;
