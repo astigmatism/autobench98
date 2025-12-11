@@ -218,8 +218,9 @@ function relLuminance(hex: string): number {
     return 0.2126 * R + 0.7152 * G + 0.0722 * B
 }
 function contrastRatio(l1: number, l2: number): number {
-    const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, l1]
-    return (L1 + 0.05) / (L2 + 0.05)
+    const max = Math.max(l1, l2)
+    const min = Math.min(l1, l2)
+    return (max + 0.05) / (min + 0.05)
 }
 
 const paneFg = computed(() => {
@@ -361,7 +362,7 @@ function onScroll() {
  * pending: chars waiting to be revealed with typewriter effect.
  * displayedLength: how many characters from the server we've already accounted for.
  * currentJobId: which job we’re currently animating.
- * finishingJobId: job that the backend says is complete, but whose pending
+ * finishingJobId: job that has finished on the backend but whose pending
  *                 characters are still draining into the tape.
  */
 const liveText = ref('')
@@ -372,7 +373,8 @@ const finishingJobId = ref<number | null>(null)
 
 /**
  * completedJobs: local view of full job texts, in order.
- * Hydrated from server-side history and updated while streaming.
+ * This is now entirely front-end–owned: we build it from the streamed buffer,
+ * and only hydrate once from server history on initial load.
  */
 type CompletedJobView = {
     id: number
@@ -420,15 +422,15 @@ function startTypingTimer() {
         const chunk = pending.value.slice(0, chars)
         pending.value = pending.value.slice(chars)
 
-        // Append new characters
+        // Append new characters to the live buffer.
         liveText.value += chunk
-        // NOTE: no client-side trimming; backend remains source of truth.
     }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
 }
 
 function pushCompletedJob(id: number, text: string) {
     if (!text) return
     completedJobs.value.push({ id, text })
+    // Cap purely on client-side buffer to avoid unbounded growth.
     const cap = printer.value.historyLimit || printer.value.maxRecentJobs || 20
     if (completedJobs.value.length > cap) {
         completedJobs.value.splice(0, completedJobs.value.length - cap)
@@ -436,102 +438,82 @@ function pushCompletedJob(id: number, text: string) {
 }
 
 /**
- * Use backend canonical text for a job if available, otherwise fall back
- * to whatever we streamed locally.
+ * Once a job is marked as finishing and there are no more pending characters,
+ * we treat whatever is in the live buffer as the final text and move it into
+ * completedJobs. This guarantees that the UI never "snaps" in canonical text
+ * from the backend; it only ever shows what was streamed.
  */
-function getCanonicalCompletedText(jobId: number, fallback: string): string {
-    const last = printer.value.lastJob
-    if (last && last.id === jobId && printer.value.lastJobFullText) {
-        return printer.value.lastJobFullText
-    }
-    return fallback
-}
-
 function finalizeFinishedJobIfReady() {
     if (finishingJobId.value == null) return
     if (pending.value.length > 0) return
 
     const id = finishingJobId.value
-    const historyEnabled = (printer.value.historyLimit || 0) > 0
+    const finalText = liveText.value
 
-    // Capture before clearing
-    const fallback = liveText.value
-
-    // Clear live state for this job, but keep displayedLength as-is so that
-    // any late snapshots with the same full text don't get re-streamed.
     finishingJobId.value = null
     currentJobId.value = null
     liveText.value = ''
     pending.value = ''
+    displayedLength.value = 0
     stopTypingTimer()
 
-    // If we *don't* have server history, we must keep a local copy.
-    if (!historyEnabled) {
-        const text = getCanonicalCompletedText(id, fallback)
-        pushCompletedJob(id, text)
-    }
+    pushCompletedJob(id, finalText)
 }
 
+/* -------------------------------------------------------------------------- */
+/*  One-time history hydration                                                */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Hydrate local completedJobs from server-side history whenever it changes.
+ * We only use server-provided full-text history to seed the tape when the
+ * pane first mounts. After that, completedJobs is entirely front-end owned to
+ * avoid double-rendering / replay effects.
  */
+const hasHydratedHistory = ref(false)
+
 watch(
     () => printer.value.history,
     (history) => {
-        if (!history) return
-        completedJobs.value = history.map(h => ({
+        if (hasHydratedHistory.value) return
+        if (!history || history.length === 0) return
+
+        completedJobs.value = history.map((h) => ({
             id: h.id,
             text: h.text,
         }))
+        hasHydratedHistory.value = true
     },
     { immediate: true, deep: true }
 )
 
+/* -------------------------------------------------------------------------- */
+/*  Job identity + lifecycle                                                 */
+/* -------------------------------------------------------------------------- */
+
 /**
  * Watch job identity:
  *  - When a new job starts: if a previous job was still streaming, flush ALL
- *    of its text (live + pending) into completedJobs so we never lose tape,
- *    preferring backend canonical text when available.
+ *    of its text (live + pending) into completedJobs so we never lose tape.
  *  - When a job finishes: mark it as "finishing" and let the
  *    streamer drain remaining pending characters before finalizing.
+ *
+ * Importantly, we never pull in backend canonical text (lastJobFullText) here;
+ * the front-end buffer is the source of truth for what the user sees.
  */
 watch(
     () => printer.value.currentJob,
     (job, prevJob) => {
-        const historyEnabled = (printer.value.historyLimit || 0) > 0
-
         // New job started (id changed)
         if (job && job.id !== currentJobId.value) {
             const previousId = currentJobId.value
 
             if (previousId != null) {
-                // If a previous job was in "finishing" state, finalize what we have.
-                if (finishingJobId.value === previousId) {
-                    if (pending.value.length) {
-                        liveText.value += pending.value
-                        pending.value = ''
-                    }
-
-                    if (!historyEnabled) {
-                        const text = getCanonicalCompletedText(previousId, liveText.value)
-                        pushCompletedJob(previousId, text)
-                    }
-
-                    finishingJobId.value = null
-                } else {
-                    // Previous job never reached "finished" state on the backend,
-                    // but we're starting a new job anyway. Treat the current tape
-                    // (live + pending) as a completed job so we don't lose it.
-                    if (pending.value.length) {
-                        liveText.value += pending.value
-                        pending.value = ''
-                    }
-
-                    if (!historyEnabled) {
-                        const text = getCanonicalCompletedText(previousId, liveText.value)
-                        pushCompletedJob(previousId, text)
-                    }
+                // We had an in-flight job; treat whatever we have as its final text.
+                if (pending.value.length) {
+                    liveText.value += pending.value
+                    pending.value = ''
                 }
+                pushCompletedJob(previousId, liveText.value)
             }
 
             // Reset state for the new job.
@@ -548,14 +530,17 @@ watch(
             // Don't clear text yet; just remember which job is finishing.
             finishingJobId.value = prevJob.id
             // finalizeFinishedJobIfReady (driven by pending watcher)
-            // will move this job into completedJobs once pending is empty
-            // (or just clear live state if historyEnabled).
+            // will move this job into completedJobs once pending is empty.
         }
     }
 )
 
 /**
  * Watch the server-driven currentJob text.
+ *
+ * We only ever append deltas to our local pending buffer and animate them
+ * into liveText. We do NOT re-sync to any shorter/longer canonical value;
+ * the user sees exactly what was streamed over time.
  */
 watch(
     () => printer.value.currentJob?.text,
@@ -568,12 +553,9 @@ watch(
         const full = serverText
         const fullLen = full.length
 
-        // If server text is shorter than what we think we've shown, resync.
-        if (fullLen < displayedLength.value) {
-            liveText.value = full
-            pending.value = ''
-            displayedLength.value = fullLen
-            stopTypingTimer()
+        // If server text is somehow shorter than what we think we've shown,
+        // just ignore the discrepancy to avoid jarring snaps. Our buffer wins.
+        if (fullLen <= displayedLength.value) {
             return
         }
 
@@ -592,7 +574,7 @@ watch(
 /**
  * When pending changes and a job is marked as "finishing", check whether
  * we've drained all remaining characters; if so, finalize the job into
- * completedJobs (or just clear live state if historyEnabled).
+ * completedJobs.
  */
 watch(
     () => pending.value,
