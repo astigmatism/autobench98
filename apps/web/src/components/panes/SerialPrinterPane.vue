@@ -1029,7 +1029,7 @@ function resetSpeed() {
     align-items: stretch;
 }
 
-/* Tape surface: flex child that stretches to fill viewport height in empty state. */
+/* Tape surface: flex child that stretches to fill viewport height. */
 .tape {
     position: relative;
     margin: 4px auto;
@@ -1045,6 +1045,8 @@ function resetSpeed() {
     flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
+    height: 100%;
+    overflow: hidden;
 }
 
 /* Perforation strip */
@@ -1079,6 +1081,14 @@ function resetSpeed() {
     margin-bottom: 8px;
 }
 
+/* Make the last job-block fill remaining height so its job-body can scroll */
+.job-block:last-of-type {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 .job-block.current-job {
     animation: pulse-border 1.4s ease-in-out infinite;
 }
@@ -1098,6 +1108,8 @@ function resetSpeed() {
     word-wrap: break-word;
     border: 1px solid rgba(209, 213, 219, 0.9);
 
+    flex: 1 1 auto;
+    min-height: 0;
     max-height: 100%;
     overflow-y: auto;
 
