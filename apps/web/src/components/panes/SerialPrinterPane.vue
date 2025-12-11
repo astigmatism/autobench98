@@ -369,7 +369,7 @@ const currentJobId = ref<number | null>(null)
 
 /**
  * completedJobs: local view of full job texts, in order.
- * Hydrated from server-side history and updated while streaming.
+ * Hydrated directly from server-side history.
  */
 type CompletedJobView = {
     id: number
@@ -423,76 +423,55 @@ function startTypingTimer() {
     }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
 }
 
-function pushCompletedJob(id: number, text: string) {
-    if (!text) return
-    completedJobs.value.push({ id, text })
-    const cap = printer.value.historyLimit || printer.value.maxRecentJobs || 20
-    if (completedJobs.value.length > cap) {
-        completedJobs.value.splice(0, completedJobs.value.length - cap)
-    }
-}
+/* -------------------------------------------------------------------------- */
+/*  History hydrator + completion detection                                   */
+/* -------------------------------------------------------------------------- */
 
-/**
- * Use backend canonical text for a job if available, otherwise fall back
- * to whatever we streamed locally.
- */
-function getCanonicalCompletedText(jobId: number, fallback: string): string {
-    const last = printer.value.lastJob
-    if (last && last.id === jobId && printer.value.lastJobFullText) {
-        return printer.value.lastJobFullText
-    }
-    return fallback
-}
-
-/**
- * Hydrate local completedJobs from server-side history whenever it changes.
- */
 watch(
     () => printer.value.history,
     (history) => {
-        if (!history) return
+        if (!history || history.length === 0) {
+            completedJobs.value = []
+            return
+        }
+
+        // Hydrate server-side canonical history
         completedJobs.value = history.map(h => ({
             id: h.id,
             text: h.text,
         }))
-    },
-    { immediate: true, deep: true }
-)
 
-/**
- * Watch job identity:
- *  - When a new job starts: reset local streaming state for that job.
- *  - When a job finishes: flush any remaining pending text and, if the
- *    server is *not* keeping history, record a local completed job.
- */
-watch(
-    () => printer.value.currentJob,
-    (job, prevJob) => {
-        const historyEnabled = (printer.value.historyLimit || 0) > 0
+        const last = history[history.length - 1]!
 
-        // Job finished (went from something to null)
-        if (!job && prevJob) {
-            // Flush any remaining pending characters into liveText.
+        // If the job we were animating just landed in history,
+        // finalize streaming and clear the "live" block to avoid duplication.
+        if (currentJobId.value != null && last.id === currentJobId.value) {
             if (pending.value.length) {
                 liveText.value += pending.value
                 pending.value = ''
             }
 
-            // Only maintain our own history when the server doesn't.
-            if (!historyEnabled) {
-                const text = getCanonicalCompletedText(prevJob.id, liveText.value)
-                pushCompletedJob(prevJob.id, text)
-            }
-
-            // Clear streaming state for the finished job.
             stopTypingTimer()
             liveText.value = ''
-            pending.value = ''
             displayedLength.value = 0
             currentJobId.value = null
-            return
         }
+    },
+    { immediate: true, deep: true }
+)
 
+/* -------------------------------------------------------------------------- */
+/*  Job identity watcher                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * When a new job starts (id change), reset streaming state.
+ * We do NOT try to be clever about finalizing previous jobs here; that is
+ * driven solely by server history above.
+ */
+watch(
+    () => printer.value.currentJob,
+    (job, prevJob) => {
         // New job started (id changed)
         if (job && job.id !== currentJobId.value) {
             stopTypingTimer()
@@ -502,12 +481,20 @@ watch(
             displayedLength.value = 0
             return
         }
+
+        // Job finished (went from something → null):
+        // We let the history watcher handle finalization when history updates.
+        if (!job && prevJob) {
+            // Nothing to do here.
+            return
+        }
     }
 )
 
-/**
- * Watch the server-driven currentJob text.
- */
+/* -------------------------------------------------------------------------- */
+/*  Watch server-driven text for the current job                              */
+/* -------------------------------------------------------------------------- */
+
 watch(
     () => printer.value.currentJob?.text,
     (serverText) => {
@@ -540,10 +527,10 @@ watch(
     }
 )
 
-/**
- * When the user changes typing speed controls, restart the timer if needed
- * so the new values take effect during an in-flight job.
- */
+/* -------------------------------------------------------------------------- */
+/*  React to typing speed control changes                                     */
+/* -------------------------------------------------------------------------- */
+
 watch(
     () => ({
         interval: currentIntervalMs.value,
