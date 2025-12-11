@@ -324,6 +324,13 @@ export class SerialPrinterService {
             this.state = 'receiving'
             this.currentJobId = jobId
             this.currentJobStartedAt = now
+
+            this.deps.events.publish({
+                kind: 'job-started',
+                at: now,
+                jobId,
+                startedAt: now,
+            })
         }
 
         // Failsafe: if we somehow ended up in receiving without a jobId, create one.
@@ -331,6 +338,13 @@ export class SerialPrinterService {
             const jobId = this.nextJobId++
             this.currentJobId = jobId
             this.currentJobStartedAt = now
+
+            this.deps.events.publish({
+                kind: 'job-started',
+                at: now,
+                jobId,
+                startedAt: now,
+            })
         }
 
         this.buffer += chunk
@@ -406,13 +420,6 @@ export class SerialPrinterService {
             raw: rawNormalized,
             preview,
         }
-
-        // Optional debug logging
-        // console.log('================= SERIAL PRINTER JOB RAW START =================')
-        // console.log(`Job ID: ${jobId}`)
-        // console.log(`Raw length (chars): ${job.raw.length}`)
-        // console.log(job.raw)
-        // console.log('================== SERIAL PRINTER JOB RAW END ==================')
 
         this.buffer = ''
         this.currentJobId = null

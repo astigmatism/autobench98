@@ -68,6 +68,12 @@ export type SerialPrinterSnapshot = {
         lastErrorAt: number | null
     }
 
+    // Current in-progress job (if any)
+    currentJob: {
+        id: number
+        startedAt: number
+    } | null
+
     // Last completed job, summary only
     lastJob: {
         id: number
@@ -222,6 +228,7 @@ const initialSerialPrinter: SerialPrinterSnapshot = {
         lastJobAt: null,
         lastErrorAt: null,
     },
+    currentJob: null,
     lastJob: null,
     lastJobFullText: null,
     history: [],
@@ -397,6 +404,7 @@ export function setSerialPrinterSnapshot(next: SerialPrinterSnapshot) {
 export function updateSerialPrinterSnapshot(partial: {
     phase?: SerialPrinterSnapshot['phase']
     message?: string
+    currentJob?: SerialPrinterSnapshot['currentJob']
     lastJob?: SerialPrinterSnapshot['lastJob']
     lastJobFullText?: string | null
     stats?: Partial<SerialPrinterSnapshot['stats']>
@@ -415,6 +423,10 @@ export function updateSerialPrinterSnapshot(partial: {
     const merged: SerialPrinterSnapshot = {
         phase: partial.phase ?? prev.phase,
         message: partial.message ?? prev.message,
+        currentJob:
+            partial.currentJob !== undefined
+                ? partial.currentJob
+                : prev.currentJob,
         lastJob: partial.lastJob ?? prev.lastJob,
         lastJobFullText:
             partial.lastJobFullText !== undefined

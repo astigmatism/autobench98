@@ -297,6 +297,11 @@ type SerialPrinterJobSummary = {
     preview: string
 }
 
+type SerialPrinterCurrentJobView = {
+    id: number
+    startedAt: number
+}
+
 type SerialPrinterHistoryEntry = {
     id: number
     createdAt: number
@@ -308,13 +313,11 @@ type SerialPrinterSnapshotView = {
     phase: SerialPrinterPhase
     message?: string
     stats: SerialPrinterStatsView
+    currentJob: SerialPrinterCurrentJobView | null
     lastJob: SerialPrinterJobSummary | null
-    // Canonical full text for last completed job
     lastJobFullText: string | null
-    // Full-text history, server-side bounded
     history: SerialPrinterHistoryEntry[]
     historyLimit: number
-    // Summary list (existing)
     recentJobs: SerialPrinterJobSummary[]
     maxRecentJobs: number
 }
@@ -330,6 +333,7 @@ const initialPrinter: SerialPrinterSnapshotView = {
         lastJobAt: null,
         lastErrorAt: null,
     },
+    currentJob: null,
     lastJob: null,
     lastJobFullText: null,
     history: [],
@@ -342,28 +346,6 @@ const printer = computed<SerialPrinterSnapshotView>(() => {
     const root = mirror.data as any
     const slice = root?.serialPrinter as SerialPrinterSnapshotView | undefined
     return slice ?? initialPrinter
-})
-
-/* -------------------------------------------------------------------------- */
-/*  Status / connection indicators                                            */
-/* -------------------------------------------------------------------------- */
-
-const isReconnecting = computed(() => {
-    return printer.value.phase === 'disconnected' && printer.value.stats.lastErrorAt != null
-})
-
-/**
- * Status badge is now purely about connection/health, not "printing".
- */
-const statusLabel = computed(() => {
-    if (printer.value.phase === 'error') {
-        return 'Error'
-    }
-    if (printer.value.phase === 'disconnected') {
-        return isReconnecting.value ? 'Reconnecting…' : 'Disconnected'
-    }
-    // connected, queued, receiving are all simply "Connected" at the transport level
-    return 'Connected'
 })
 
 /* -------------------------------------------------------------------------- */
@@ -725,6 +707,48 @@ watch(
         }
     }
 )
+
+/* -------------------------------------------------------------------------- */
+/*  Status / connection indicators (badge text)                               */
+/* -------------------------------------------------------------------------- */
+
+const isReconnecting = computed(() => {
+    return printer.value.phase === 'disconnected' && printer.value.stats.lastErrorAt != null
+})
+
+/**
+ * Status badge semantics:
+ *
+ * - error               → "Error"
+ * - disconnected        → "Disconnected" or "Reconnecting…"
+ * - streaming text      → "Printing"
+ * - backend has job     → "Spooling…" (device is receiving / job has started)
+ * - connected & idle    → "Ready"
+ */
+const statusLabel = computed(() => {
+    if (printer.value.phase === 'error') {
+        return 'Error'
+    }
+
+    if (printer.value.phase === 'disconnected') {
+        return isReconnecting.value ? 'Reconnecting…' : 'Disconnected'
+    }
+
+    // Device is logically present at this point (connected / receiving / queued).
+
+    // While the UI is streaming a job onto the tape.
+    if (isStreaming.value) {
+        return 'Printing'
+    }
+
+    // Device-level job has started but we're not streaming UI text yet.
+    if (printer.value.currentJob) {
+        return 'Spooling…'
+    }
+
+    // Fully idle but connected.
+    return 'Ready'
+})
 
 /* -------------------------------------------------------------------------- */
 /*  Auto-scroll watcher                                                       */

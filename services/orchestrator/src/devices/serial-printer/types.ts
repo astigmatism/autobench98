@@ -59,6 +59,7 @@ export interface SerialPrinterStats {
  * The main application loop can decide how to react (retry, abort run, etc.).
  */
 export type SerialPrinterEventKind =
+    | 'job-started'
     | 'job-completed'
     | 'device-connected'
     | 'device-disconnected'
@@ -68,6 +69,12 @@ export type SerialPrinterEventKind =
 export interface SerialPrinterEventBase {
     kind: SerialPrinterEventKind
     at: number
+}
+
+export interface SerialPrinterJobStartedEvent extends SerialPrinterEventBase {
+    kind: 'job-started'
+    jobId: number
+    startedAt: number
 }
 
 export interface SerialPrinterJobCompletedEvent extends SerialPrinterEventBase {
@@ -97,6 +104,7 @@ export interface SerialPrinterRecoverableErrorEvent extends SerialPrinterEventBa
 }
 
 export type SerialPrinterEvent =
+    | SerialPrinterJobStartedEvent
     | SerialPrinterJobCompletedEvent
     | SerialPrinterDeviceConnectedEvent
     | SerialPrinterDeviceDisconnectedEvent

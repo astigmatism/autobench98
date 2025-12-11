@@ -41,6 +41,14 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
         const ts = new Date(evt.at).toISOString()
 
         switch (evt.kind) {
+            case 'job-started': {
+                const { jobId } = evt
+                this.logSp.info(
+                    `kind=job-started ts=${ts} jobId=${jobId}`,
+                )
+                break
+            }
+
             case 'job-completed': {
                 const { job } = evt
                 const sizeChars = job.raw.length
