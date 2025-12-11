@@ -1003,7 +1003,7 @@ function resetSpeed() {
 }
 
 /* Tape viewport: scrollable area, fills remaining panel space.
-   Made a flex container with NO padding so child 100%/flex height matches it exactly. */
+   Scrollbar hidden but scrolling still works. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
@@ -1013,10 +1013,19 @@ function resetSpeed() {
 
     display: flex;
     align-items: stretch;
+
+    /* hide scrollbar – Firefox */
+    scrollbar-width: none;
+    /* hide scrollbar – IE/old Edge */
+    -ms-overflow-style: none;
 }
 
-/* Tape surface: flex child that stretches to fill viewport height in empty state.
-   No min-height:100%; that plus viewport padding was causing the early scrollbar. */
+/* hide scrollbar – WebKit (Chrome, Safari, Edge Chromium) */
+.tape-viewport::-webkit-scrollbar {
+    display: none;
+}
+
+/* Tape surface: flex child that stretches to fill viewport height in empty state. */
 .tape {
     position: relative;
     margin: 4px auto; /* replaces viewport padding */
