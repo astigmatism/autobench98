@@ -723,7 +723,7 @@ const isReconnecting = computed(() => {
  * - error               → "Error"
  * - disconnected        → "Disconnected" or "Reconnecting…"
  * - streaming text      → "Printing"
- * - backend has job     → "Spooling…" (device is receiving / job has started)
+ * - backend has job     → "Spooling" (device is receiving / job has started)
  * - connected & idle    → "Idle"
  */
 const statusLabel = computed(() => {
@@ -944,7 +944,7 @@ function resetSpeed() {
     background: #6b7280;
 }
 
-/* Disconnected + reconnecting (yellow, like CF "busy") */
+/* Disconnected + reconnecting (yellow, like CF "Busy") */
 .status-badge[data-phase='disconnected'][data-reconnecting='true'] {
     border-color: #facc15;
     background: #3b2900;
@@ -963,16 +963,16 @@ function resetSpeed() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Ready / Spooling / Printing / Queued                               */
+/* Idle / Spooling / Printing / Queued                                */
 /* ------------------------------------------------------------------ */
 
-/* READY → phase='connected' (blue, mirrors CF "No Media") */
+/* IDLE → phase='connected' (green, mirrors CF "Media Ready") */
 .status-badge[data-phase='connected'] {
-    border-color: #38bdf8;
-    background: #022c3a;
+    border-color: #22c55e;
+    background: #022c22;
 }
 .status-badge[data-phase='connected'] .dot {
-    background: #38bdf8;
+    background: #22c55e;
 }
 
 /* SPOOLING → phase='receiving' but not yet streaming (yellow, CF "Busy") */
@@ -984,13 +984,13 @@ function resetSpeed() {
     background: #facc15;
 }
 
-/* PRINTING → phase='receiving' while streaming (green, CF "Media Ready") */
+/* PRINTING → phase='receiving' while streaming (blue, CF "No Media") */
 .status-badge[data-phase='receiving'][data-streaming='true'] {
-    border-color: #22c55e;
-    background: #022c22;
+    border-color: #38bdf8;
+    background: #022c3a;
 }
 .status-badge[data-phase='receiving'][data-streaming='true'] .dot {
-    background: #22c55e;
+    background: #38bdf8;
 }
 
 /* Optional: keep queued distinct (purple) */
