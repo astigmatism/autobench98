@@ -732,7 +732,7 @@ function resetSpeed() {
     transition: opacity 180ms ease, transform 180ms ease;
 }
 .slide-fade-enter-from,
-.slide-fade-leave-to {
+slide-fade-leave-to {
     opacity: 0;
     transform: translateY(-6px);
 }
@@ -850,7 +850,7 @@ function resetSpeed() {
 }
 
 /* Tape viewport: scrollable area, fills remaining panel space.
-   Made a flex container with NO padding so child 100%/flex height matches it exactly. */
+   Scrollbar stays "outside", tape and footer scroll inside. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
@@ -862,11 +862,12 @@ function resetSpeed() {
     align-items: stretch;
 }
 
-/* Tape surface: flex child that stretches to fill viewport height in empty state.
-   No min-height:100%; that plus viewport padding was causing the early scrollbar. */
+/* Tape surface: flex child that stretches to at least viewport height.
+   This keeps the beveled container and footer visually pinned to the
+   bottom of the visible area when content is short. */
 .tape {
     position: relative;
-    margin: 4px auto; /* replaces viewport padding */
+    margin: 4px auto;
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -878,7 +879,7 @@ function resetSpeed() {
     display: flex;
     flex-direction: column;
     flex: 1 1 auto;
-    min-height: 0;
+    min-height: 100%;
 }
 
 /* Perforation strip */
@@ -896,15 +897,16 @@ function resetSpeed() {
     mask-image: linear-gradient(to bottom, black, transparent);
 }
 
-/* Tape footer deep shadow: now sticky so it visually hugs the
-   bottom of the viewport while scrolling, instead of drifting. */
+/* Tape footer deep shadow.
+   Use sticky so it visually hugs the bottom of the viewport while
+   allowing the tape content above to scroll. */
 .tape-footer {
     position: sticky;
     bottom: 0;
     left: 8px;
     right: 8px;
     height: 10px;
-    margin-top: 8px;
+    margin-top: auto;
     background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.45), transparent 60%);
     opacity: 0.8;
     pointer-events: none;
