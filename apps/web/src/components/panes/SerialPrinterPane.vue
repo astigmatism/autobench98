@@ -41,43 +41,46 @@
             >
                 <!-- Simulated continuous tape -->
                 <div class="tape">
-                    <!-- Subtle perforation at the top -->
+                    <!-- Subtle perforation at the top (fixed) -->
                     <div class="tape-perf"></div>
 
-                    <!-- COMPLETED JOBS: full text, oldest first, with cut line after each -->
-                    <div
-                        v-for="job in completedJobs"
-                        :key="job.id"
-                        class="job-block"
-                    >
-                        <pre class="job-body">
+                    <!-- Scrollable "paper" inside the tape -->
+                    <div class="tape-scroll">
+                        <!-- COMPLETED JOBS: full text, oldest first, with cut line after each -->
+                        <div
+                            v-for="job in completedJobs"
+                            :key="job.id"
+                            class="job-block"
+                        >
+                            <pre class="job-body">
 {{ job.text }}
-                        </pre>
-                        <div class="job-divider"></div>
-                    </div>
+                            </pre>
+                            <div class="job-divider"></div>
+                        </div>
 
-                    <!-- CURRENT JOB: streaming text at the bottom of the tape -->
-                    <div
-                        v-if="liveText"
-                        class="job-block current-job"
-                    >
-                        <pre class="job-body job-body--live">
+                        <!-- CURRENT JOB: streaming text at the bottom of the tape -->
+                        <div
+                            v-if="liveText"
+                            class="job-block current-job"
+                        >
+                            <pre class="job-body job-body--live">
 {{ liveText || ' ' }}
-                        </pre>
+                            </pre>
+                        </div>
+
+                        <!-- Empty state if nothing has ever printed -->
+                        <div
+                            v-if="!liveText && completedJobs.length === 0"
+                            class="empty-state"
+                        >
+                            <p>No printer output yet.</p>
+                            <p class="hint">
+                                Send a test page from Windows 98 to see the tape come to life.
+                            </p>
+                        </div>
                     </div>
 
-                    <!-- Empty state if nothing has ever printed -->
-                    <div
-                        v-if="!liveText && completedJobs.length === 0"
-                        class="empty-state"
-                    >
-                        <p>No printer output yet.</p>
-                        <p class="hint">
-                            Send a test page from Windows 98 to see the tape come to life.
-                        </p>
-                    </div>
-
-                    <!-- Tape footer shadow -->
+                    <!-- Tape footer shadow (fixed at bottom of card) -->
                     <div class="tape-footer"></div>
                 </div>
             </div>
@@ -805,24 +808,22 @@ function resetSpeed() {
     background: #ef4444;
 }
 
-/* Tape viewport: scrollable area, fills remaining panel space.
-   Made a flex container with NO padding so child 100%/flex height matches it exactly. */
+/* Tape viewport: container that fills remaining panel space.
+   It no longer scrolls; scrolling is handled inside .tape-scroll so that
+   the beveled tape card stays fixed. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
     position: relative;
 
     display: flex;
     align-items: stretch;
 }
 
-/* Tape surface: flex child that stretches to fill viewport height in empty state.
-   No min-height:100%; that plus viewport padding was causing the early scrollbar. */
+/* Tape surface: fixed card with bevel + shadow */
 .tape {
     position: relative;
-    margin: 4px auto; /* replaces viewport padding */
+    margin: 4px auto;
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -835,6 +836,15 @@ function resetSpeed() {
     flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
+    overflow: hidden; /* keep scrollbars inside the card */
+}
+
+/* Scrollable inner "paper" area */
+.tape-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 /* Perforation strip */
