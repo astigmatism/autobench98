@@ -135,7 +135,7 @@
                         </div>
                     </div>
 
-                    <!-- New: backlog speed multiplier -->
+                    <!-- Backlog speed multiplier -->
                     <div class="options-row">
                         <div class="options-row-main">
                             <span class="options-label">Backlog speed multiplier</span>
@@ -155,6 +155,24 @@
                             When new completed jobs arrive while older ones are still streaming,
                             this factor speeds up the backlog so the latest job becomes visible sooner.
                         </div>
+                    </div>
+
+                    <!-- Fast-forward toggle -->
+                    <div class="options-row">
+                        <div class="options-row-main">
+                            <span class="options-label">Fast forward to latest</span>
+                            <span class="options-value">
+                                {{ fastForwardToLatest ? 'On' : 'Off' }}
+                            </span>
+                        </div>
+                        <label class="options-hint">
+                            <input
+                                type="checkbox"
+                                v-model="fastForwardToLatest"
+                            />
+                            When enabled, if older jobs are still streaming when a new job completes,
+                            all backlog text is printed immediately and streaming focuses on the latest job.
+                        </label>
                     </div>
 
                     <!-- Server history info (still accurate for backend behavior) -->
@@ -419,7 +437,7 @@ const TAPE_MAX_CHARS = (() => {
     return Math.floor(n)
 })()
 
-/* Backlog speed multiplier (env-driven, default 2) */
+/* Backlog speed multiplier (env-driven, default 10 here) */
 const DEFAULT_BACKLOG_SPEED_FACTOR = 10
 const envBacklogFactor = (() => {
     const raw = import.meta.env.VITE_SERIAL_PRINTER_BACKLOG_SPEED_FACTOR
@@ -428,9 +446,22 @@ const envBacklogFactor = (() => {
     return n
 })()
 
+/* Fast-forward-to-latest toggle (env-driven, default TRUE as requested) */
+const DEFAULT_FAST_FORWARD_TO_LATEST = true
+const envFastForwardToLatest = (() => {
+    const raw = import.meta.env.VITE_SERIAL_PRINTER_FAST_FORWARD_TO_LATEST
+    if (typeof raw === 'string') {
+        const s = raw.trim().toLowerCase()
+        if (s === 'true') return true
+        if (s === 'false') return false
+    }
+    return DEFAULT_FAST_FORWARD_TO_LATEST
+})()
+
 const currentIntervalMs = ref(envTypingInterval)
 const currentCharsPerTick = ref(envCharsPerTick)
 const backlogSpeedFactor = ref(envBacklogFactor)
+const fastForwardToLatest = ref(envFastForwardToLatest)
 
 let typingTimer: number | null = null
 
@@ -485,6 +516,43 @@ function trimTapeIfNeeded() {
             excess = 0
         }
     }
+}
+
+/**
+ * Immediately flush all currently pending/queued jobs into the tape with
+ * no animation. Used when fastForwardToLatest is enabled and a new job
+ * arrives while older ones are still streaming.
+ */
+function flushBacklogToTapeSync() {
+    // 1) Flush any currently pending text for the active job.
+    if (pendingText.value.length && activeJobId.value != null) {
+        let last = tapeSegments.value[tapeSegments.value.length - 1]
+        if (!last || last.id !== activeJobId.value) {
+            last = { id: activeJobId.value, text: '' }
+            tapeSegments.value.push(last)
+        }
+        last.text += pendingText.value
+        pendingText.value = ''
+    }
+
+    // 2) Flush any queued jobs in order.
+    if (jobQueue.value.length > 0) {
+        for (const job of jobQueue.value) {
+            let last = tapeSegments.value[tapeSegments.value.length - 1]
+            if (!last || last.id !== job.id) {
+                last = { id: job.id, text: '' }
+                tapeSegments.value.push(last)
+            }
+            last.text += job.text
+        }
+        jobQueue.value = []
+    }
+
+    // After flushing everything, no job is actively streaming.
+    activeJobId.value = null
+
+    // Enforce cap if user is at the bottom.
+    trimTapeIfNeeded()
 }
 
 /**
@@ -579,9 +647,9 @@ const lastEnqueuedJobId = ref<number | null>(null)
  * Whenever the backend reports a new completed job (via lastJob),
  * enqueue its full text for streaming.
  *
- * If another job arrives while we’re still streaming, we simply add it to
- * jobQueue. The typewriter effect will naturally move from one job segment
- * to the next, with a divider in between, once the first job has fully streamed.
+ * If another job arrives while we’re still streaming, we either:
+ *  - (fastForwardToLatest=false) enqueue and let backlog speed handle it, or
+ *  - (fastForwardToLatest=true) flush backlog instantly and focus on the latest job.
  */
 watch(
     () => printer.value.lastJob,
@@ -601,9 +669,29 @@ watch(
 
         if (!text) return
 
-        jobQueue.value.push({ id: job.id, text })
-        hydratePendingFromQueueIfNeeded()
-        startTypingTimer()
+        const newJob: QueuedJob = { id: job.id, text }
+
+        const hasInFlightBacklog =
+            pendingText.value.length > 0 || jobQueue.value.length > 0
+
+        if (fastForwardToLatest.value && hasInFlightBacklog) {
+            // Fast-forward: flush all older work synchronously, then
+            // start streaming ONLY the latest job.
+            flushBacklogToTapeSync()
+
+            jobQueue.value = [newJob]
+            pendingText.value = ''
+            activeJobId.value = null
+
+            hydratePendingFromQueueIfNeeded()
+            startTypingTimer()
+        } else {
+            // Existing behavior: enqueue and let the backlog
+            // speed factor handle older jobs.
+            jobQueue.value.push(newJob)
+            hydratePendingFromQueueIfNeeded()
+            startTypingTimer()
+        }
     }
 )
 
@@ -616,6 +704,7 @@ watch(
         interval: currentIntervalMs.value,
         chars: currentCharsPerTick.value,
         backlogFactor: backlogSpeedFactor.value,
+        fastForward: fastForwardToLatest.value,
     }),
     () => {
         if (!pendingText.value.length && !jobQueue.value.length) return
@@ -667,6 +756,7 @@ function resetSpeed() {
     currentIntervalMs.value = envTypingInterval
     currentCharsPerTick.value = envCharsPerTick
     backlogSpeedFactor.value = envBacklogFactor
+    fastForwardToLatest.value = envFastForwardToLatest
 }
 </script>
 
