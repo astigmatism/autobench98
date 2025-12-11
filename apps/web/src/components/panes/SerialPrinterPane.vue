@@ -361,14 +361,11 @@ function onScroll() {
  * pending: chars waiting to be revealed with typewriter effect.
  * displayedLength: how many characters from the server we've already accounted for.
  * currentJobId: which job we’re currently animating.
- * finishingJobId: job that the backend says is complete, but whose pending
- *                 characters are still draining into the tape.
  */
 const liveText = ref('')
 const pending = ref('')
 const displayedLength = ref(0)
 const currentJobId = ref<number | null>(null)
-const finishingJobId = ref<number | null>(null)
 
 /**
  * completedJobs: local view of full job texts, in order.
@@ -447,31 +444,6 @@ function getCanonicalCompletedText(jobId: number, fallback: string): string {
     return fallback
 }
 
-function finalizeFinishedJobIfReady() {
-    if (finishingJobId.value == null) return
-    if (pending.value.length > 0) return
-
-    const id = finishingJobId.value
-    const historyEnabled = (printer.value.historyLimit || 0) > 0
-
-    // Capture before clearing
-    const fallback = liveText.value
-
-    // Clear live state for this job, but keep displayedLength as-is so that
-    // any late snapshots with the same full text don't get re-streamed.
-    finishingJobId.value = null
-    currentJobId.value = null
-    liveText.value = ''
-    pending.value = ''
-    stopTypingTimer()
-
-    // If we *don't* have server history, we must keep a local copy.
-    if (!historyEnabled) {
-        const text = getCanonicalCompletedText(id, fallback)
-        pushCompletedJob(id, text)
-    }
-}
-
 /**
  * Hydrate local completedJobs from server-side history whenever it changes.
  */
@@ -489,67 +461,46 @@ watch(
 
 /**
  * Watch job identity:
- *  - When a new job starts: if a previous job was still streaming, flush ALL
- *    of its text (live + pending) into completedJobs so we never lose tape,
- *    preferring backend canonical text when available.
- *  - When a job finishes: mark it as "finishing" and let the
- *    streamer drain remaining pending characters before finalizing.
+ *  - When a new job starts: reset local streaming state for that job.
+ *  - When a job finishes: flush any remaining pending text and, if the
+ *    server is *not* keeping history, record a local completed job.
  */
 watch(
     () => printer.value.currentJob,
     (job, prevJob) => {
         const historyEnabled = (printer.value.historyLimit || 0) > 0
 
-        // New job started (id changed)
-        if (job && job.id !== currentJobId.value) {
-            const previousId = currentJobId.value
-
-            if (previousId != null) {
-                // If a previous job was in "finishing" state, finalize what we have.
-                if (finishingJobId.value === previousId) {
-                    if (pending.value.length) {
-                        liveText.value += pending.value
-                        pending.value = ''
-                    }
-
-                    if (!historyEnabled) {
-                        const text = getCanonicalCompletedText(previousId, liveText.value)
-                        pushCompletedJob(previousId, text)
-                    }
-
-                    finishingJobId.value = null
-                } else {
-                    // Previous job never reached "finished" state on the backend,
-                    // but we're starting a new job anyway. Treat the current tape
-                    // (live + pending) as a completed job so we don't lose it.
-                    if (pending.value.length) {
-                        liveText.value += pending.value
-                        pending.value = ''
-                    }
-
-                    if (!historyEnabled) {
-                        const text = getCanonicalCompletedText(previousId, liveText.value)
-                        pushCompletedJob(previousId, text)
-                    }
-                }
+        // Job finished (went from something to null)
+        if (!job && prevJob) {
+            // Flush any remaining pending characters into liveText.
+            if (pending.value.length) {
+                liveText.value += pending.value
+                pending.value = ''
             }
 
-            // Reset state for the new job.
+            // Only maintain our own history when the server doesn't.
+            if (!historyEnabled) {
+                const text = getCanonicalCompletedText(prevJob.id, liveText.value)
+                pushCompletedJob(prevJob.id, text)
+            }
+
+            // Clear streaming state for the finished job.
+            stopTypingTimer()
+            liveText.value = ''
+            pending.value = ''
+            displayedLength.value = 0
+            currentJobId.value = null
+            return
+        }
+
+        // New job started (id changed)
+        if (job && job.id !== currentJobId.value) {
+            stopTypingTimer()
             currentJobId.value = job.id
             liveText.value = ''
             pending.value = ''
             displayedLength.value = 0
-            stopTypingTimer()
             return
-        }
-
-        // Job finished (went from something to null)
-        if (!job && prevJob) {
-            // Don't clear text yet; just remember which job is finishing.
-            finishingJobId.value = prevJob.id
-            // finalizeFinishedJobIfReady (driven by pending watcher)
-            // will move this job into completedJobs once pending is empty
-            // (or just clear live state if historyEnabled).
         }
     }
 )
@@ -586,18 +537,6 @@ watch(
         pending.value += delta
         displayedLength.value = fullLen
         startTypingTimer()
-    }
-)
-
-/**
- * When pending changes and a job is marked as "finishing", check whether
- * we've drained all remaining characters; if so, finalize the job into
- * completedJobs (or just clear live state if historyEnabled).
- */
-watch(
-    () => pending.value,
-    () => {
-        finalizeFinishedJobIfReady()
     }
 )
 
@@ -647,7 +586,6 @@ onBeforeUnmount(() => {
     pending.value = ''
     displayedLength.value = 0
     currentJobId.value = null
-    finishingJobId.value = null
     completedJobs.value = []
 })
 
