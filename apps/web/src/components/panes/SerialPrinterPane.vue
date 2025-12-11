@@ -1025,28 +1025,33 @@ function resetSpeed() {
     overflow: hidden;
     position: relative;
 
+    /* move the vertical gap up to the viewport instead of the tape box */
+    padding: 4px 0;
+
     display: flex;
     align-items: stretch;
 }
 
-/* Tape surface: flex child that stretches to fill viewport height. */
+/* Tape surface: now truly fills the viewport, including its own padding */
 .tape {
     position: relative;
-    margin: 4px auto;
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
-    padding: 8px 10px 16px 10px;
+    padding: 8px 10px 24px 10px; /* extra bottom padding for footer shadow */
     box-shadow:
         0 0 0 1px rgba(15, 23, 42, 0.4),
         0 10px 24px rgba(15, 23, 42, 0.7);
 
     display: flex;
     flex-direction: column;
-    flex: 1 1 auto;
-    min-height: 0;
+
+    /* key bits: 100% height + border-box so padding is included
+       and the absolute footer's bottom:0 is actually at the visual bottom */
     height: 100%;
-    overflow: hidden;
+    box-sizing: border-box;
+
+    margin: 0 auto; /* vertical gap now handled by tape-viewport padding */
 }
 
 /* Perforation strip */
@@ -1064,14 +1069,18 @@ function resetSpeed() {
     mask-image: linear-gradient(to bottom, black, transparent);
 }
 
-/* Tape footer deep shadow (inside tape so it doesn't add scroll height) */
+/* Tape footer deep shadow (now correctly pinned to the visual bottom) */
 .tape-footer {
     position: absolute;
-    left: 8px;
-    right: 8px;
-    bottom: 0;
+    left: 10px;
+    right: 10px;
+    bottom: 8px;
     height: 10px;
-    background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.45), transparent 60%);
+    background: radial-gradient(
+        ellipse at center,
+        rgba(0, 0, 0, 0.45),
+        transparent 60%
+    );
     opacity: 0.8;
     pointer-events: none;
 }
