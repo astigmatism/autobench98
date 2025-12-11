@@ -41,46 +41,43 @@
             >
                 <!-- Simulated continuous tape -->
                 <div class="tape">
-                    <!-- Subtle perforation at the top (fixed) -->
+                    <!-- Subtle perforation at the top -->
                     <div class="tape-perf"></div>
 
-                    <!-- Scrollable "paper" inside the tape -->
-                    <div class="tape-scroll">
-                        <!-- COMPLETED JOBS: full text, oldest first, with cut line after each -->
-                        <div
-                            v-for="job in completedJobs"
-                            :key="job.id"
-                            class="job-block"
-                        >
-                            <pre class="job-body">
+                    <!-- COMPLETED JOBS: full text, oldest first, with cut line after each -->
+                    <div
+                        v-for="job in completedJobs"
+                        :key="job.id"
+                        class="job-block"
+                    >
+                        <pre class="job-body">
 {{ job.text }}
-                            </pre>
-                            <div class="job-divider"></div>
-                        </div>
-
-                        <!-- CURRENT JOB: streaming text at the bottom of the tape -->
-                        <div
-                            v-if="liveText"
-                            class="job-block current-job"
-                        >
-                            <pre class="job-body job-body--live">
-{{ liveText || ' ' }}
-                            </pre>
-                        </div>
-
-                        <!-- Empty state if nothing has ever printed -->
-                        <div
-                            v-if="!liveText && completedJobs.length === 0"
-                            class="empty-state"
-                        >
-                            <p>No printer output yet.</p>
-                            <p class="hint">
-                                Send a test page from Windows 98 to see the tape come to life.
-                            </p>
-                        </div>
+                        </pre>
+                        <div class="job-divider"></div>
                     </div>
 
-                    <!-- Tape footer shadow (fixed at bottom of card) -->
+                    <!-- CURRENT JOB: streaming text at the bottom of the tape -->
+                    <div
+                        v-if="liveText"
+                        class="job-block current-job"
+                    >
+                        <pre class="job-body job-body--live">
+{{ liveText || ' ' }}
+                        </pre>
+                    </div>
+
+                    <!-- Empty state if nothing has ever printed -->
+                    <div
+                        v-if="!liveText && completedJobs.length === 0"
+                        class="empty-state"
+                    >
+                        <p>No printer output yet.</p>
+                        <p class="hint">
+                            Send a test page from Windows 98 to see the tape come to life.
+                        </p>
+                    </div>
+
+                    <!-- Tape footer shadow -->
                     <div class="tape-footer"></div>
                 </div>
             </div>
@@ -143,7 +140,7 @@
                         </div>
                     </div>
 
-                    <!-- Server history info (for reference only) -->
+                    <!-- Server history info -->
                     <div class="options-row">
                         <div class="options-row-main">
                             <span class="options-label">Server history</span>
@@ -221,9 +218,8 @@ function relLuminance(hex: string): number {
     return 0.2126 * R + 0.7152 * G + 0.0722 * B
 }
 function contrastRatio(l1: number, l2: number): number {
-    const max = Math.max(l1, l2)
-    const min = Math.min(l1, l2)
-    return (max + 0.05) / (min + 0.05)
+    const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, l1]
+    return (L1 + 0.05) / (L2 + 0.05)
 }
 
 const paneFg = computed(() => {
@@ -365,7 +361,7 @@ function onScroll() {
  * pending: chars waiting to be revealed with typewriter effect.
  * displayedLength: how many characters from the server we've already accounted for.
  * currentJobId: which job we’re currently animating.
- * finishingJobId: job that has finished on the backend but whose pending
+ * finishingJobId: job that the backend says is complete, but whose pending
  *                 characters are still draining into the tape.
  */
 const liveText = ref('')
@@ -376,8 +372,7 @@ const finishingJobId = ref<number | null>(null)
 
 /**
  * completedJobs: local view of full job texts, in order.
- * This is entirely front-end–owned: we build it from the streamed buffer,
- * and do not hydrate from backend history during a live session.
+ * Hydrated from server-side history and updated while streaming.
  */
 type CompletedJobView = {
     id: number
@@ -425,15 +420,15 @@ function startTypingTimer() {
         const chunk = pending.value.slice(0, chars)
         pending.value = pending.value.slice(chars)
 
-        // Append new characters to the live buffer.
+        // Append new characters
         liveText.value += chunk
+        // NOTE: no client-side trimming; backend remains source of truth.
     }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
 }
 
 function pushCompletedJob(id: number, text: string) {
     if (!text) return
     completedJobs.value.push({ id, text })
-    // Cap purely on client-side buffer to avoid unbounded growth.
     const cap = printer.value.historyLimit || printer.value.maxRecentJobs || 20
     if (completedJobs.value.length > cap) {
         completedJobs.value.splice(0, completedJobs.value.length - cap)
@@ -441,56 +436,102 @@ function pushCompletedJob(id: number, text: string) {
 }
 
 /**
- * Once a job is marked as finishing and there are no more pending characters,
- * we treat whatever is in the live buffer as the final text and move it into
- * completedJobs. This guarantees that the UI never "snaps" in canonical text
- * from the backend; it only ever shows what was streamed.
+ * Use backend canonical text for a job if available, otherwise fall back
+ * to whatever we streamed locally.
  */
+function getCanonicalCompletedText(jobId: number, fallback: string): string {
+    const last = printer.value.lastJob
+    if (last && last.id === jobId && printer.value.lastJobFullText) {
+        return printer.value.lastJobFullText
+    }
+    return fallback
+}
+
 function finalizeFinishedJobIfReady() {
     if (finishingJobId.value == null) return
     if (pending.value.length > 0) return
 
     const id = finishingJobId.value
-    const finalText = liveText.value
+    const historyEnabled = (printer.value.historyLimit || 0) > 0
 
+    // Capture before clearing
+    const fallback = liveText.value
+
+    // Clear live state
     finishingJobId.value = null
     currentJobId.value = null
     liveText.value = ''
-    pending.value = ''
     displayedLength.value = 0
+    pending.value = ''
     stopTypingTimer()
 
-    pushCompletedJob(id, finalText)
+    // If we *don't* have server history, we must keep a local copy.
+    if (!historyEnabled) {
+        const text = getCanonicalCompletedText(id, fallback)
+        pushCompletedJob(id, text)
+    }
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Job identity + lifecycle                                                 */
-/* -------------------------------------------------------------------------- */
+/**
+ * Hydrate local completedJobs from server-side history whenever it changes.
+ */
+watch(
+    () => printer.value.history,
+    (history) => {
+        if (!history) return
+        completedJobs.value = history.map(h => ({
+            id: h.id,
+            text: h.text,
+        }))
+    },
+    { immediate: true, deep: true }
+)
 
 /**
  * Watch job identity:
  *  - When a new job starts: if a previous job was still streaming, flush ALL
- *    of its text (live + pending) into completedJobs so we never lose tape.
+ *    of its text (live + pending) into completedJobs so we never lose tape,
+ *    preferring backend canonical text when available.
  *  - When a job finishes: mark it as "finishing" and let the
  *    streamer drain remaining pending characters before finalizing.
- *
- * Importantly, we never pull in backend canonical text here; the
- * front-end buffer is the source of truth for what the user sees.
  */
 watch(
     () => printer.value.currentJob,
     (job, prevJob) => {
+        const historyEnabled = (printer.value.historyLimit || 0) > 0
+
         // New job started (id changed)
         if (job && job.id !== currentJobId.value) {
             const previousId = currentJobId.value
 
             if (previousId != null) {
-                // We had an in-flight job; treat whatever we have as its final text.
-                if (pending.value.length) {
-                    liveText.value += pending.value
-                    pending.value = ''
+                // If a previous job was in "finishing" state, finalize what we have.
+                if (finishingJobId.value === previousId) {
+                    if (pending.value.length) {
+                        liveText.value += pending.value
+                        pending.value = ''
+                    }
+
+                    if (!historyEnabled) {
+                        const text = getCanonicalCompletedText(previousId, liveText.value)
+                        pushCompletedJob(previousId, text)
+                    }
+
+                    finishingJobId.value = null
+                } else {
+                    // Previous job never reached "finished" state on the backend,
+                    // but we're starting a new job anyway. Treat the current tape
+                    // (live + pending) as a completed job so we don't lose it.
+                    if (pending.value.length) {
+                        liveText.value += pending.value
+                        pending.value = ''
+                    }
+
+                    if (!historyEnabled) {
+                        const text = getCanonicalCompletedText(previousId, liveText.value)
+                        pushCompletedJob(previousId, text)
+                    }
                 }
-                pushCompletedJob(previousId, liveText.value)
             }
 
             // Reset state for the new job.
@@ -507,17 +548,14 @@ watch(
             // Don't clear text yet; just remember which job is finishing.
             finishingJobId.value = prevJob.id
             // finalizeFinishedJobIfReady (driven by pending watcher)
-            // will move this job into completedJobs once pending is empty.
+            // will move this job into completedJobs once pending is empty
+            // (or just clear live state if historyEnabled).
         }
     }
 )
 
 /**
  * Watch the server-driven currentJob text.
- *
- * We only ever append deltas to our local pending buffer and animate them
- * into liveText. We do NOT re-sync to any shorter/longer canonical value;
- * the user sees exactly what was streamed over time.
  */
 watch(
     () => printer.value.currentJob?.text,
@@ -530,9 +568,12 @@ watch(
         const full = serverText
         const fullLen = full.length
 
-        // If server text is somehow shorter than what we think we've shown,
-        // just ignore the discrepancy to avoid jarring snaps. Our buffer wins.
-        if (fullLen <= displayedLength.value) {
+        // If server text is shorter than what we think we've shown, resync.
+        if (fullLen < displayedLength.value) {
+            liveText.value = full
+            pending.value = ''
+            displayedLength.value = fullLen
+            stopTypingTimer()
             return
         }
 
@@ -551,7 +592,7 @@ watch(
 /**
  * When pending changes and a job is marked as "finishing", check whether
  * we've drained all remaining characters; if so, finalize the job into
- * completedJobs.
+ * completedJobs (or just clear live state if historyEnabled).
  */
 watch(
     () => pending.value,
@@ -808,22 +849,24 @@ function resetSpeed() {
     background: #ef4444;
 }
 
-/* Tape viewport: container that fills remaining panel space.
-   It no longer scrolls; scrolling is handled inside .tape-scroll so that
-   the beveled tape card stays fixed. */
+/* Tape viewport: scrollable area, fills remaining panel space.
+   Made a flex container with NO padding so child 100%/flex height matches it exactly. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
     position: relative;
 
     display: flex;
     align-items: stretch;
 }
 
-/* Tape surface: fixed card with bevel + shadow */
+/* Tape surface: flex child that stretches to fill viewport height in empty state.
+   No min-height:100%; that plus viewport padding was causing the early scrollbar. */
 .tape {
     position: relative;
-    margin: 4px auto;
+    margin: 4px auto; /* replaces viewport padding */
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -836,15 +879,6 @@ function resetSpeed() {
     flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
-    overflow: hidden; /* keep scrollbars inside the card */
-}
-
-/* Scrollable inner "paper" area */
-.tape-scroll {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
 }
 
 /* Perforation strip */
