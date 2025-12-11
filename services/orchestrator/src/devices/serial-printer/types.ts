@@ -59,10 +59,7 @@ export interface SerialPrinterStats {
  * The main application loop can decide how to react (retry, abort run, etc.).
  */
 export type SerialPrinterEventKind =
-    | 'job-started'
-    | 'job-chunk'
     | 'job-completed'
-    | 'job-dismissed'
     | 'device-connected'
     | 'device-disconnected'
     | 'fatal-error'
@@ -73,37 +70,9 @@ export interface SerialPrinterEventBase {
     at: number
 }
 
-export interface SerialPrinterJobStartedEvent extends SerialPrinterEventBase {
-    kind: 'job-started'
-    /** Logical job id for this print (matches SerialPrinterJob.id later) */
-    jobId: number
-    /** When the first byte for this job was seen (ms since epoch) */
-    createdAt: number
-}
-
-export interface SerialPrinterJobChunkEvent extends SerialPrinterEventBase {
-    kind: 'job-chunk'
-    /** Logical job id for this print */
-    jobId: number
-    /** Text for this chunk (UTF-8 decoded) */
-    text: string
-    /** Number of bytes in this chunk */
-    bytes: number
-}
-
 export interface SerialPrinterJobCompletedEvent extends SerialPrinterEventBase {
     kind: 'job-completed'
     job: SerialPrinterJob
-}
-
-export interface SerialPrinterJobDismissedEvent extends SerialPrinterEventBase {
-    kind: 'job-dismissed'
-    jobId: number
-    reason: string
-    /** Raw text that was dismissed (normalized line endings) */
-    raw: string
-    /** Count of non-whitespace, non-NUL characters used for the heuristic */
-    visibleChars: number
 }
 
 export interface SerialPrinterDeviceConnectedEvent extends SerialPrinterEventBase {
@@ -128,10 +97,7 @@ export interface SerialPrinterRecoverableErrorEvent extends SerialPrinterEventBa
 }
 
 export type SerialPrinterEvent =
-    | SerialPrinterJobStartedEvent
-    | SerialPrinterJobChunkEvent
     | SerialPrinterJobCompletedEvent
-    | SerialPrinterJobDismissedEvent
     | SerialPrinterDeviceConnectedEvent
     | SerialPrinterDeviceDisconnectedEvent
     | SerialPrinterFatalErrorEvent

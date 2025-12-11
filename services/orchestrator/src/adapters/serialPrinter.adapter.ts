@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/adapters/serial-printer/SerialPrinterStateAdapter.ts
 import { getSnapshot, updateSerialPrinterSnapshot } from '../core/state.js'
 import { SerialPrinterEvent } from '../devices/serial-printer/types.js'
 
@@ -7,12 +8,14 @@ import { SerialPrinterEvent } from '../devices/serial-printer/types.js'
  * Mirrors SerialPrinterService events into AppState.serialPrinter.
  *
  * Supports:
- *  - Live streaming text via currentJob
- *  - Clearing currentJob on completion/error/disconnect
- *  - Correct phase transitions
+ *  - Phase transitions (connected / disconnected / error)
  *  - Rolling recentJobs and lastJob
  *  - Canonical full-text for last completed job (lastJobFullText)
  *  - Server-side bounded full-text history for refresh/new clients
+ *
+ * Note: live streaming of in-progress job text has been removed. The only
+ * job-related event we react to is "job-completed", which carries the full
+ * text of the completed job.
  */
 export class SerialPrinterStateAdapter {
     handle(evt: SerialPrinterEvent): void {
@@ -22,10 +25,9 @@ export class SerialPrinterStateAdapter {
             /* ------------------------------------------------------------------ */
             case 'device-connected': {
                 updateSerialPrinterSnapshot({
-                    // If we already had a job in progress (rare), remain receiving.
                     phase: 'connected',
                     message: undefined,
-                    // Leave stats, history, and recentJobs intact
+                    // Stats, history, and last-job info are left intact.
                 })
                 return
             }
@@ -40,69 +42,12 @@ export class SerialPrinterStateAdapter {
                 updateSerialPrinterSnapshot({
                     phase: 'disconnected',
                     message: `Disconnected (${evt.reason})`,
-                    currentJob: null,
                     lastJobFullText: null,
                     stats: {
                         ...stats,
                     },
                     // History is preserved across disconnects so clients can still
                     // see the tape when reconnecting.
-                })
-                return
-            }
-
-            /* ------------------------------------------------------------------ */
-            /* JOB STARTED                                                        */
-            /* ------------------------------------------------------------------ */
-            case 'job-started': {
-                const snap = getSnapshot()
-                const stats = snap.serialPrinter.stats
-
-                updateSerialPrinterSnapshot({
-                    phase: 'receiving',
-                    message: undefined,
-                    currentJob: {
-                        id: evt.jobId,
-                        startedAt: evt.createdAt,
-                        text: '',
-                    },
-                    // We're now in a new job; clear any leftover canonical text.
-                    lastJobFullText: null,
-                    stats: {
-                        ...stats,
-                    },
-                    // History stays as-is; we only append on completion.
-                })
-                return
-            }
-
-            /* ------------------------------------------------------------------ */
-            /* JOB CHUNK (streaming text)                                         */
-            /* ------------------------------------------------------------------ */
-            case 'job-chunk': {
-                const snap = getSnapshot()
-                const prev = snap.serialPrinter
-                const stats = prev.stats
-                const current = prev.currentJob
-
-                if (!current || current.id !== evt.jobId) {
-                    // Out-of-order or missing start—ignore silently
-                    return
-                }
-
-                // 🔁 Just append — no length cap on the in-flight buffer.
-                const combined = current.text + evt.text
-
-                updateSerialPrinterSnapshot({
-                    phase: 'receiving',
-                    currentJob: {
-                        ...current,
-                        text: combined,
-                    },
-                    stats: {
-                        ...stats,
-                        bytesReceived: stats.bytesReceived + evt.bytes,
-                    },
                 })
                 return
             }
@@ -148,46 +93,21 @@ export class SerialPrinterStateAdapter {
                     }
                 }
 
+                const jobBytes = job.raw.length
+
                 updateSerialPrinterSnapshot({
                     phase: 'connected', // idle/ready state after completion
                     message: undefined,
-                    currentJob: null,
                     lastJob: summary,
-                    // 🔐 canonical, full backend copy of the most recent job
+                    // Canonical, full backend copy of the most recent job
                     lastJobFullText: job.raw,
                     recentJobs,
                     history,
                     stats: {
                         ...stats,
                         totalJobs: stats.totalJobs + 1,
+                        bytesReceived: stats.bytesReceived + jobBytes,
                         lastJobAt: now,
-                    },
-                })
-                return
-            }
-
-            /* ------------------------------------------------------------------ */
-            /* JOB DISMISSED (noise / ignored)                                   */
-            /* ------------------------------------------------------------------ */
-            case 'job-dismissed': {
-                const snap = getSnapshot()
-                const stats = snap.serialPrinter.stats
-                const current = snap.serialPrinter.currentJob
-
-                const isCurrent =
-                    current != null && current.id === evt.jobId
-
-                updateSerialPrinterSnapshot({
-                    // Transport is still healthy; this is just a logical "no-op" job.
-                    phase: 'connected',
-                    message: undefined,
-                    currentJob: isCurrent ? null : current,
-                    // No history / lastJob updates, no stats.totalJobs bump.
-                    lastJobFullText: null,
-                    stats: {
-                        ...stats,
-                        // bytesReceived already accounted for via job-chunk;
-                        // we intentionally do NOT touch lastErrorAt here.
                     },
                 })
                 return
@@ -202,7 +122,6 @@ export class SerialPrinterStateAdapter {
                 updateSerialPrinterSnapshot({
                     phase: 'disconnected',
                     message: evt.error,
-                    currentJob: null,
                     lastJobFullText: null,
                     stats: {
                         ...stats,
@@ -213,7 +132,7 @@ export class SerialPrinterStateAdapter {
             }
 
             /* ------------------------------------------------------------------ */
-            /* FATAL ERROR                                                       */
+            /* FATAL ERROR                                                        */
             /* ------------------------------------------------------------------ */
             case 'fatal-error': {
                 const snap = getSnapshot()
@@ -221,13 +140,12 @@ export class SerialPrinterStateAdapter {
                 updateSerialPrinterSnapshot({
                     phase: 'error',
                     message: evt.error,
-                    currentJob: null,
                     lastJobFullText: null,
                     stats: {
                         ...stats,
                         lastErrorAt: evt.at,
                     },
-                    // Preserve history here as well; restart can decide to reset.
+                    // History is preserved; restart can decide to reset.
                 })
                 return
             }

@@ -314,7 +314,7 @@ export class SerialPrinterService {
 
         const now = Date.now()
 
-        // First byte for a new job: allocate id + mark start, emit job-started.
+        // First byte for a new job: allocate id + mark start.
         // IMPORTANT: treat both 'idle' and 'queued' as "ready for a new job"
         // because the physical printer can start printing again even if we
         // still have completed jobs sitting in our queue.
@@ -324,13 +324,6 @@ export class SerialPrinterService {
             this.state = 'receiving'
             this.currentJobId = jobId
             this.currentJobStartedAt = now
-
-            this.deps.events.publish({
-                kind: 'job-started',
-                at: now,
-                jobId,
-                createdAt: now,
-            })
         }
 
         // Failsafe: if we somehow ended up in receiving without a jobId, create one.
@@ -338,29 +331,14 @@ export class SerialPrinterService {
             const jobId = this.nextJobId++
             this.currentJobId = jobId
             this.currentJobStartedAt = now
-
-            this.deps.events.publish({
-                kind: 'job-started',
-                at: now,
-                jobId,
-                createdAt: now,
-            })
         }
 
         this.buffer += chunk
         const size = chunk.length
         this.stats.bytesReceived += size
 
-        // Emit streaming chunk for live UI.
-        if (this.currentJobId != null && size > 0) {
-            this.deps.events.publish({
-                kind: 'job-chunk',
-                at: now,
-                jobId: this.currentJobId,
-                text: chunk,
-                bytes: size,
-            })
-        }
+        // NOTE: We intentionally do NOT emit any streaming / chunk events here.
+        // Communication about a print job is only sent when the job is completed.
 
         // Reset idle timer: any new data extends the job
         this.scheduleIdleFlush()
@@ -411,21 +389,10 @@ export class SerialPrinterService {
         const visibleChars = rawNormalized.replace(/[\s\0]/g, '').length
 
         if (visibleChars <= 1) {
-            // 🧹 Noise job: log and drop, do NOT enqueue or bump stats.totalJobs,
-            // and DO NOT treat as a device error (no reconnect implications).
-            this.deps.events.publish({
-                kind: 'job-dismissed',
-                at: now,
-                jobId,
-                reason: 'noise-job-visible-chars<=1',
-                raw: rawNormalized,
-                visibleChars,
-            })
-
+            // 🧹 Noise job: drop silently without treating as a device error.
             this.buffer = ''
             this.currentJobId = null
             this.currentJobStartedAt = null
-            // We stay logically "connected" at the transport level.
             this.state = 'idle'
             return
         }
@@ -461,6 +428,7 @@ export class SerialPrinterService {
         this.stats.lastJobAt = now
         this.state = this.queue.length > 0 ? 'queued' : 'idle'
 
+        // Sole job-related communication outward: job-completed.
         this.deps.events.publish({
             kind: 'job-completed',
             at: now,

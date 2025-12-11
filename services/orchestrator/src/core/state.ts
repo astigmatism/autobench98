@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/state.ts
 import { EventEmitter } from 'node:events'
 import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
 import type {
@@ -67,13 +68,6 @@ export type SerialPrinterSnapshot = {
         lastErrorAt: number | null
     }
 
-    // Live in-progress job (streamed text as it arrives)
-    currentJob: {
-        id: number
-        startedAt: number
-        text: string
-    } | null
-
     // Last completed job, summary only
     lastJob: {
         id: number
@@ -130,7 +124,7 @@ export type AtlonaControllerSnapshot = {
 export type CfImagerMediaSnapshot = CfImagerMediaStatus
 
 // CfImagerSnapshot is imported as CfImagerState above and aliased.
- // (already named CfImagerSnapshot in the import)
+// (already named CfImagerSnapshot in the import)
 
 /* -------------------------------------------------------------------------- */
 /*  Full AppState                                                             */
@@ -228,7 +222,6 @@ const initialSerialPrinter: SerialPrinterSnapshot = {
         lastJobAt: null,
         lastErrorAt: null,
     },
-    currentJob: null,
     lastJob: null,
     lastJobFullText: null,
     history: [],
@@ -404,7 +397,6 @@ export function setSerialPrinterSnapshot(next: SerialPrinterSnapshot) {
 export function updateSerialPrinterSnapshot(partial: {
     phase?: SerialPrinterSnapshot['phase']
     message?: string
-    currentJob?: SerialPrinterSnapshot['currentJob'] | null
     lastJob?: SerialPrinterSnapshot['lastJob']
     lastJobFullText?: string | null
     stats?: Partial<SerialPrinterSnapshot['stats']>
@@ -423,8 +415,6 @@ export function updateSerialPrinterSnapshot(partial: {
     const merged: SerialPrinterSnapshot = {
         phase: partial.phase ?? prev.phase,
         message: partial.message ?? prev.message,
-        currentJob:
-            partial.currentJob !== undefined ? partial.currentJob : prev.currentJob,
         lastJob: partial.lastJob ?? prev.lastJob,
         lastJobFullText:
             partial.lastJobFullText !== undefined

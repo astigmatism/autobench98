@@ -10,7 +10,10 @@ import {
 } from '@autobench98/logging'
 import { SerialPrinterStateAdapter } from '../adapters/serialPrinter.adapter.js'
 import { SerialPrinterService } from '../devices/serial-printer/SerialPrinterService.js'
-import { SerialPrinterEvent, SerialPrinterEventSink } from '../devices/serial-printer/types.js'
+import {
+    SerialPrinterEvent,
+    SerialPrinterEventSink,
+} from '../devices/serial-printer/types.js'
 import { buildSerialPrinterConfigFromEnv } from '../devices/serial-printer/utils.js'
 
 // ---- Fastify decoration ----------------------------------------------------
@@ -25,7 +28,9 @@ declare module 'fastify' {
 // ---- Event sink using orchestrator logging ---------------------------------
 
 class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
-    private readonly logSp: ReturnType<ReturnType<typeof createLogger>['channel']>
+    private readonly logSp: ReturnType<
+        ReturnType<typeof createLogger>['channel']
+    >
 
     constructor(app: FastifyInstance) {
         const { channel } = createLogger('serial-printer', app.clientBuf)
@@ -36,34 +41,12 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
         const ts = new Date(evt.at).toISOString()
 
         switch (evt.kind) {
-            case 'job-started': {
-                const { jobId } = evt
-                this.logSp.info(
-                    `kind=job-started ts=${ts} jobId=${jobId}`
-                )
-                break
-            }
-
-            case 'job-chunk': {
-                // Intentionally NO logging of chunk text; high-frequency, noisy
-                // You *could* add a very low-volume debug line here if desired.
-                break
-            }
-
             case 'job-completed': {
                 const { job } = evt
                 const sizeChars = job.raw.length
                 const durationMs = job.completedAt - job.createdAt
                 this.logSp.info(
-                    `kind=job-completed ts=${ts} jobId=${job.id} sizeChars=${sizeChars} durationMs=${durationMs}`
-                )
-                break
-            }
-
-            case 'job-dismissed': {
-                const { jobId, visibleChars, reason } = evt
-                this.logSp.info(
-                    `kind=job-dismissed ts=${ts} jobId=${jobId} visibleChars=${visibleChars} reason=${reason}`
+                    `kind=job-completed ts=${ts} jobId=${job.id} sizeChars=${sizeChars} durationMs=${durationMs}`,
                 )
                 break
             }
@@ -71,7 +54,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'device-connected': {
                 const { portPath } = evt
                 this.logSp.info(
-                    `kind=device-connected ts=${ts} port=${portPath}`
+                    `kind=device-connected ts=${ts} port=${portPath}`,
                 )
                 break
             }
@@ -79,7 +62,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'device-disconnected': {
                 const { portPath, reason } = evt
                 this.logSp.warn(
-                    `kind=device-disconnected ts=${ts} port=${portPath} reason=${reason}`
+                    `kind=device-disconnected ts=${ts} port=${portPath} reason=${reason}`,
                 )
                 break
             }
@@ -87,7 +70,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'recoverable-error': {
                 const { error } = evt
                 this.logSp.warn(
-                    `kind=recoverable-error ts=${ts} error=${error}`
+                    `kind=recoverable-error ts=${ts} error=${error}`,
                 )
                 break
             }
@@ -95,13 +78,15 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'fatal-error': {
                 const { error } = evt
                 this.logSp.error(
-                    `kind=fatal-error ts=${ts} error=${error}`
+                    `kind=fatal-error ts=${ts} error=${error}`,
                 )
                 break
             }
 
             default: {
-                this.logSp.info(`kind=${(evt as any).kind ?? 'unknown'} ts=${ts}`)
+                this.logSp.info(
+                    `kind=${(evt as any).kind ?? 'unknown'} ts=${ts}`,
+                )
                 break
             }
         }
@@ -131,7 +116,9 @@ class FanoutSerialPrinterEventSink implements SerialPrinterEventSink {
 
 // ---- Plugin implementation -------------------------------------------------
 
-const serialPrinterPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
+const serialPrinterPlugin: FastifyPluginAsync = async (
+    app: FastifyInstance,
+) => {
     const env = process.env
     const { channel } = createLogger('serial-printer-plugin', app.clientBuf)
     const logPlugin = channel(LogChannel.app)
@@ -152,10 +139,12 @@ const serialPrinterPlugin: FastifyPluginAsync = async (app: FastifyInstance) => 
             publish(evt: SerialPrinterEvent): void {
                 stateAdapter.handle(evt)
             },
-        }
+        },
     )
 
-    const serialPrinterService = new SerialPrinterService(spConfig, { events: spEvents })
+    const serialPrinterService = new SerialPrinterService(spConfig, {
+        events: spEvents,
+    })
 
     // Expose on Fastify instance so other plugins / routes can use it.
     app.decorate('serialPrinter', serialPrinterService)

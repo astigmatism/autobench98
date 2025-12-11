@@ -44,31 +44,26 @@
                     <!-- Subtle perforation at the top -->
                     <div class="tape-perf"></div>
 
-                    <!-- COMPLETED JOBS: full text, oldest first, with cut line after each -->
+                    <!-- CONTINUOUS TAPE, SEGMENTED BY JOB -->
                     <div
-                        v-for="job in completedJobs"
-                        :key="job.id"
+                        v-for="(segment, index) in tapeSegments"
+                        :key="segment.id"
                         class="job-block"
+                        :class="{ 'current-job': isStreaming && segment.id === activeJobId }"
                     >
                         <pre class="job-body">
-{{ job.text }}
+{{ segment.text || ' ' }}
                         </pre>
-                        <div class="job-divider"></div>
-                    </div>
-
-                    <!-- CURRENT JOB: streaming text at the bottom of the tape -->
-                    <div
-                        v-if="liveText"
-                        class="job-block current-job"
-                    >
-                        <pre class="job-body job-body--live">
-{{ liveText || ' ' }}
-                        </pre>
+                        <!-- Visual “cut” between jobs -->
+                        <div
+                            v-if="index < tapeSegments.length - 1"
+                            class="job-divider"
+                        ></div>
                     </div>
 
                     <!-- Empty state if nothing has ever printed -->
                     <div
-                        v-if="!liveText && completedJobs.length === 0"
+                        v-if="tapeSegments.length === 0"
                         class="empty-state"
                     >
                         <p>No printer output yet.</p>
@@ -140,7 +135,7 @@
                         </div>
                     </div>
 
-                    <!-- Server history info -->
+                    <!-- Server history info (still accurate for backend behavior) -->
                     <div class="options-row">
                         <div class="options-row-main">
                             <span class="options-label">Server history</span>
@@ -253,12 +248,6 @@ type SerialPrinterJobSummary = {
     preview: string
 }
 
-type SerialPrinterCurrentJob = {
-    id: number
-    startedAt: number
-    text: string
-}
-
 type SerialPrinterHistoryEntry = {
     id: number
     createdAt: number
@@ -270,7 +259,6 @@ type SerialPrinterSnapshotView = {
     phase: SerialPrinterPhase
     message?: string
     stats: SerialPrinterStatsView
-    currentJob: SerialPrinterCurrentJob | null
     lastJob: SerialPrinterJobSummary | null
     // Canonical full text for last completed job
     lastJobFullText: string | null
@@ -293,7 +281,6 @@ const initialPrinter: SerialPrinterSnapshotView = {
         lastJobAt: null,
         lastErrorAt: null,
     },
-    currentJob: null,
     lastJob: null,
     lastJobFullText: null,
     history: [],
@@ -353,32 +340,37 @@ function onScroll() {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Continuous tape + typewriter streaming                                    */
+/*  Continuous tape + typewriter streaming (segmented by job)                */
 /* -------------------------------------------------------------------------- */
 
 /**
- * liveText: text currently being streamed for the active job (bottom of tape).
- * pending: chars waiting to be revealed with typewriter effect.
- * displayedLength: how many characters from the server we've already accounted for.
- * currentJobId: which job we’re currently animating.
- * finishingJobId: job that the backend says is complete, but whose pending
- *                 characters are still draining into the tape.
+ * New behavior:
+ *
+ * - We maintain a single logical tape composed of ordered segments, one per job.
+ * - Each segment is visually separated by a "cut" line (job-divider).
+ * - Completed jobs from the backend are queued in jobQueue as full text.
+ * - A typing timer drains characters from pendingText into the current segment.
+ * - As the total character count across all segments grows, we trim old text
+ *   from the front, dropping whole segments when they become empty.
  */
-const liveText = ref('')
-const pending = ref('')
-const displayedLength = ref(0)
-const currentJobId = ref<number | null>(null)
-const finishingJobId = ref<number | null>(null)
 
-/**
- * completedJobs: local view of full job texts, in order.
- * Hydrated from server-side history and updated while streaming.
- */
-type CompletedJobView = {
-    id: number
-    text: string
-}
-const completedJobs = ref<CompletedJobView[]>([])
+/* Tape segments currently visible in the component */
+type TapeSegment = { id: number; text: string }
+const tapeSegments = ref<TapeSegment[]>([])
+
+/* Characters waiting to be streamed for the active job */
+const pendingText = ref('')
+
+/* FIFO queue of completed jobs awaiting streaming */
+type QueuedJob = { id: number; text: string }
+const jobQueue = ref<QueuedJob[]>([])
+
+/* The job currently being streamed (for visual state) */
+const activeJobId = ref<number | null>(null)
+
+const isStreaming = computed(() => {
+    return pendingText.value.length > 0 || jobQueue.value.length > 0
+})
 
 /* Typing speed configuration (env-driven defaults, user-overridable) */
 const DEFAULT_TYPING_INTERVAL_MS = 30
@@ -396,6 +388,15 @@ const envCharsPerTick = (() => {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CHARS_PER_TICK
 })()
 
+/* Rolling tape character cap (env-driven) */
+const DEFAULT_TAPE_MAX_CHARS = 1000
+const TAPE_MAX_CHARS = (() => {
+    const raw = import.meta.env.VITE_SERIAL_PRINTER_MAX_CHARS
+    const n = raw != null ? Number(raw) : NaN
+    if (!Number.isFinite(n) || n <= 0) return DEFAULT_TAPE_MAX_CHARS
+    return Math.floor(n)
+})()
+
 const currentIntervalMs = ref(envTypingInterval)
 const currentCharsPerTick = ref(envCharsPerTick)
 
@@ -408,202 +409,157 @@ function stopTypingTimer() {
     }
 }
 
+/**
+ * Compute total character count across all visible segments.
+ */
+function totalTapeChars(): number {
+    return tapeSegments.value.reduce((sum, seg) => sum + seg.text.length, 0)
+}
+
+/**
+ * Enforce the rolling character cap on the visible tape.
+ * Keeps only the most recent TAPE_MAX_CHARS characters across segments.
+ * Oldest characters are removed first; empty segments are dropped.
+ */
+function trimTapeIfNeeded() {
+    let total = totalTapeChars()
+    if (total <= TAPE_MAX_CHARS) return
+
+    let excess = total - TAPE_MAX_CHARS
+
+    while (excess > 0 && tapeSegments.value.length > 0) {
+        const first = tapeSegments.value[0]
+
+        // Extra safety so TS and runtime are both happy:
+        if (!first) {
+            break
+        }
+
+        if (first.text.length <= excess) {
+            excess -= first.text.length
+            tapeSegments.value.shift()
+        } else {
+            first.text = first.text.slice(excess)
+            excess = 0
+        }
+    }
+}
+
+/**
+ * Ensure pendingText has content to stream:
+ *  - If pendingText is empty and jobQueue has entries, pull the next job and
+ *    assign its full text to pendingText.
+ */
+function hydratePendingFromQueueIfNeeded() {
+    if (pendingText.value.length > 0) return
+    if (!jobQueue.value.length) return
+
+    const next = jobQueue.value.shift()!
+    activeJobId.value = next.id
+    pendingText.value = next.text
+
+    // Create a new segment for this job if needed
+    const last = tapeSegments.value[tapeSegments.value.length - 1]
+    if (!last || last.id !== next.id) {
+        tapeSegments.value.push({ id: next.id, text: '' })
+    }
+}
+
 function startTypingTimer() {
     if (typingTimer !== null) return
+
     typingTimer = window.setInterval(() => {
-        if (!pending.value.length) {
-            stopTypingTimer()
-            return
+        // If we have nothing pending, try to pull from queued jobs.
+        if (!pendingText.value.length) {
+            hydratePendingFromQueueIfNeeded()
+            if (!pendingText.value.length) {
+                // No work to do; stop timer.
+                stopTypingTimer()
+                activeJobId.value = null
+                return
+            }
         }
 
         const chars = Math.max(1, currentCharsPerTick.value || 1)
-        const chunk = pending.value.slice(0, chars)
-        pending.value = pending.value.slice(chars)
+        const chunk = pendingText.value.slice(0, chars)
+        pendingText.value = pendingText.value.slice(chars)
 
-        // Append new characters
-        liveText.value += chunk
-        // NOTE: no client-side trimming; backend remains source of truth.
+        // Append new characters to the active segment
+        if (activeJobId.value != null) {
+            let last = tapeSegments.value[tapeSegments.value.length - 1]
+            if (!last || last.id !== activeJobId.value) {
+                last = { id: activeJobId.value, text: '' }
+                tapeSegments.value.push(last)
+            }
+            last.text += chunk
+        } else {
+            // Safety fallback: no active job id; treat as anonymous segment
+            if (!tapeSegments.value.length) {
+                tapeSegments.value.push({ id: -1, text: '' })
+            }
+            const last = tapeSegments.value[tapeSegments.value.length - 1]
+            if (!last) {
+                // Extremely defensive; should not happen if we just pushed
+                return
+            }
+            last.text += chunk
+        }
+
+        trimTapeIfNeeded()
+
+        // If this job's text is fully streamed, and there are more queued jobs,
+        // the next tick will hydratePendingFromQueueIfNeeded and we’ll begin
+        // a new segment, giving a clear visual break (job-divider).
+        if (!pendingText.value.length) {
+            if (!jobQueue.value.length) {
+                // No more jobs queued; active job finishes naturally.
+                activeJobId.value = null
+            } else {
+                // There are more jobs queued; next hydration will set activeJobId
+                // to the next job and create a new segment.
+            }
+        }
     }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
 }
 
-function pushCompletedJob(id: number, text: string) {
-    if (!text) return
-    completedJobs.value.push({ id, text })
-    const cap = printer.value.historyLimit || printer.value.maxRecentJobs || 20
-    if (completedJobs.value.length > cap) {
-        completedJobs.value.splice(0, completedJobs.value.length - cap)
-    }
-}
+/* Track the last job id we’ve already enqueued for streaming */
+const lastEnqueuedJobId = ref<number | null>(null)
 
 /**
- * Use backend canonical text for a job if available, otherwise fall back
- * to whatever we streamed locally.
- */
-function getCanonicalCompletedText(jobId: number, fallback: string): string {
-    const last = printer.value.lastJob
-    if (last && last.id === jobId && printer.value.lastJobFullText) {
-        return printer.value.lastJobFullText
-    }
-    return fallback
-}
-
-function finalizeFinishedJobIfReady() {
-    if (finishingJobId.value == null) return
-    if (pending.value.length > 0) return
-
-    const id = finishingJobId.value
-    const historyEnabled = (printer.value.historyLimit || 0) > 0
-
-    // Capture before clearing
-    const fallback = liveText.value
-
-    // Clear live state
-    finishingJobId.value = null
-    currentJobId.value = null
-    liveText.value = ''
-    displayedLength.value = 0
-    pending.value = ''
-    stopTypingTimer()
-
-    // If we *don't* have server history, we must keep a local copy.
-    if (!historyEnabled) {
-        const text = getCanonicalCompletedText(id, fallback)
-        pushCompletedJob(id, text)
-    }
-}
-
-/**
- * Hydrate local completedJobs from server-side history whenever it changes.
+ * Whenever the backend reports a new completed job (via lastJob),
+ * enqueue its full text for streaming.
+ *
+ * If another job arrives while we’re still streaming, we simply add it to
+ * jobQueue. The typewriter effect will naturally move from one job segment
+ * to the next, with a divider in between, once the first job has fully streamed.
  */
 watch(
-    () => printer.value.history,
-    (history) => {
-        if (!history) return
-        completedJobs.value = history.map(h => ({
-            id: h.id,
-            text: h.text,
-        }))
-    },
-    { immediate: true, deep: true }
-)
+    () => printer.value.lastJob,
+    (job) => {
+        if (!job) return
 
-/**
- * Watch job identity:
- *  - When a new job starts: if a previous job was still streaming, flush ALL
- *    of its text (live + pending) into completedJobs so we never lose tape,
- *    preferring backend canonical text when available.
- *  - When a job finishes: mark it as "finishing" and let the
- *    streamer drain remaining pending characters before finalizing.
- */
-watch(
-    () => printer.value.currentJob,
-    (job, prevJob) => {
-        const historyEnabled = (printer.value.historyLimit || 0) > 0
-
-        // New job started (id changed)
-        if (job && job.id !== currentJobId.value) {
-            const previousId = currentJobId.value
-
-            if (previousId != null) {
-                // If a previous job was in "finishing" state, finalize what we have.
-                if (finishingJobId.value === previousId) {
-                    if (pending.value.length) {
-                        liveText.value += pending.value
-                        pending.value = ''
-                    }
-
-                    if (!historyEnabled) {
-                        const text = getCanonicalCompletedText(previousId, liveText.value)
-                        pushCompletedJob(previousId, text)
-                    }
-
-                    finishingJobId.value = null
-                } else {
-                    // Previous job never reached "finished" state on the backend,
-                    // but we're starting a new job anyway. Treat the current tape
-                    // (live + pending) as a completed job so we don't lose it.
-                    if (pending.value.length) {
-                        liveText.value += pending.value
-                        pending.value = ''
-                    }
-
-                    if (!historyEnabled) {
-                        const text = getCanonicalCompletedText(previousId, liveText.value)
-                        pushCompletedJob(previousId, text)
-                    }
-                }
-            }
-
-            // Reset state for the new job.
-            currentJobId.value = job.id
-            liveText.value = ''
-            pending.value = ''
-            displayedLength.value = 0
-            stopTypingTimer()
+        if (lastEnqueuedJobId.value === job.id) {
             return
         }
 
-        // Job finished (went from something to null)
-        if (!job && prevJob) {
-            // Don't clear text yet; just remember which job is finishing.
-            finishingJobId.value = prevJob.id
-            // finalizeFinishedJobIfReady (driven by pending watcher)
-            // will move this job into completedJobs once pending is empty
-            // (or just clear live state if historyEnabled).
-        }
-    }
-)
+        lastEnqueuedJobId.value = job.id
 
-/**
- * Watch the server-driven currentJob text.
- */
-watch(
-    () => printer.value.currentJob?.text,
-    (serverText) => {
-        const job = printer.value.currentJob
-        if (!job || serverText == null) {
-            return
-        }
+        const text =
+            printer.value.lastJobFullText != null
+                ? printer.value.lastJobFullText
+                : job.preview ?? ''
 
-        const full = serverText
-        const fullLen = full.length
+        if (!text) return
 
-        // If server text is shorter than what we think we've shown, resync.
-        if (fullLen < displayedLength.value) {
-            liveText.value = full
-            pending.value = ''
-            displayedLength.value = fullLen
-            stopTypingTimer()
-            return
-        }
-
-        // Normal case: new tail appended.
-        const delta = full.slice(displayedLength.value)
-        if (!delta) {
-            return
-        }
-
-        pending.value += delta
-        displayedLength.value = fullLen
+        jobQueue.value.push({ id: job.id, text })
+        hydratePendingFromQueueIfNeeded()
         startTypingTimer()
     }
 )
 
 /**
- * When pending changes and a job is marked as "finishing", check whether
- * we've drained all remaining characters; if so, finalize the job into
- * completedJobs (or just clear live state if historyEnabled).
- */
-watch(
-    () => pending.value,
-    () => {
-        finalizeFinishedJobIfReady()
-    }
-)
-
-/**
  * When the user changes typing speed controls, restart the timer if needed
- * so the new values take effect during an in-flight job.
+ * so the new values take effect during an in-flight stream.
  */
 watch(
     () => ({
@@ -611,7 +567,7 @@ watch(
         chars: currentCharsPerTick.value,
     }),
     () => {
-        if (!pending.value.length) return
+        if (!pendingText.value.length && !jobQueue.value.length) return
         if (typingTimer !== null) {
             stopTypingTimer()
             startTypingTimer()
@@ -623,11 +579,12 @@ watch(
 /*  Auto-scroll watcher                                                       */
 /* -------------------------------------------------------------------------- */
 
+const tapeJoined = computed(() => tapeSegments.value.map(s => s.text).join('\n'))
+
 watch(
     () => ({
-        live: liveText.value,
-        completedCount: completedJobs.value.length,
-        bytes: printer.value.stats.bytesReceived,
+        tape: tapeJoined.value,
+        jobs: printer.value.stats.totalJobs,
     }),
     () => {
         if (autoScrollEnabled.value) {
@@ -643,12 +600,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
     autoScrollEnabled.value = false
     stopTypingTimer()
-    liveText.value = ''
-    pending.value = ''
-    displayedLength.value = 0
-    currentJobId.value = null
-    finishingJobId.value = null
-    completedJobs.value = []
+    tapeSegments.value = []
+    pendingText.value = ''
+    jobQueue.value = []
+    activeJobId.value = null
 })
 
 /* -------------------------------------------------------------------------- */
@@ -908,7 +863,7 @@ function resetSpeed() {
     pointer-events: none;
 }
 
-/* Job blocks */
+/* Job blocks (one per job) */
 .job-block {
     margin-bottom: 8px;
 }
@@ -931,11 +886,6 @@ function resetSpeed() {
     white-space: pre-wrap;
     word-wrap: break-word;
     border: 1px solid rgba(209, 213, 219, 0.9);
-}
-
-.job-body--live {
-    border-style: dashed;
-    border-color: #16a34a;
 }
 
 /* Divider between jobs (cut line) */
