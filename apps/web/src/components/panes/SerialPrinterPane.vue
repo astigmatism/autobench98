@@ -732,7 +732,7 @@ function resetSpeed() {
     transition: opacity 180ms ease, transform 180ms ease;
 }
 .slide-fade-enter-from,
-slide-fade-leave-to {
+.slide-fade-leave-to {
     opacity: 0;
     transform: translateY(-6px);
 }
@@ -849,8 +849,7 @@ slide-fade-leave-to {
     background: #ef4444;
 }
 
-/* Tape viewport: scrollable area, fills remaining panel space.
-   Scrollbar stays "outside", tape and footer scroll inside. */
+/* Tape viewport: scrollable area, fills remaining panel space. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
@@ -862,12 +861,14 @@ slide-fade-leave-to {
     align-items: stretch;
 }
 
-/* Tape surface: flex child that stretches to at least viewport height.
-   This keeps the beveled container and footer visually pinned to the
-   bottom of the visible area when content is short. */
+/* Tape surface.
+   NOTE: min-height is reduced by the vertical padding (8px + 16px = 24px)
+   so that when content is empty, the total box (content + padding) is
+   exactly the viewport height and no scrollbar appears. Vertical margin
+   is removed to avoid adding extra scroll height. */
 .tape {
     position: relative;
-    margin: 4px auto;
+    margin: 0 auto;
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -879,7 +880,7 @@ slide-fade-leave-to {
     display: flex;
     flex-direction: column;
     flex: 1 1 auto;
-    min-height: 100%;
+    min-height: calc(100% - 24px);
 }
 
 /* Perforation strip */
@@ -897,9 +898,7 @@ slide-fade-leave-to {
     mask-image: linear-gradient(to bottom, black, transparent);
 }
 
-/* Tape footer deep shadow.
-   Use sticky so it visually hugs the bottom of the viewport while
-   allowing the tape content above to scroll. */
+/* Tape footer deep shadow */
 .tape-footer {
     position: sticky;
     bottom: 0;
