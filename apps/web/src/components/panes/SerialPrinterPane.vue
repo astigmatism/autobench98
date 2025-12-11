@@ -744,7 +744,7 @@ const statusLabel = computed(() => {
 
     // Device-level job has started but we're not streaming UI text yet.
     if (printer.value.currentJob) {
-        return 'Spooling…'
+        return 'Spooling'
     }
 
     // Fully idle but connected.
