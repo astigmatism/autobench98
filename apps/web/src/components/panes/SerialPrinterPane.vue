@@ -157,6 +157,29 @@
                         </div>
                     </div>
 
+                    <!-- Buffer size (rolling char cap) -->
+                    <div class="options-row">
+                        <div class="options-row-main">
+                            <span class="options-label">Buffer size</span>
+                            <span class="options-value">
+                                {{ tapeMaxChars.toLocaleString() }} chars
+                            </span>
+                        </div>
+                        <input
+                            class="options-slider"
+                            type="range"
+                            min="1000"
+                            max="100000"
+                            step="500"
+                            v-model.number="tapeMaxChars"
+                        />
+                        <div class="options-hint">
+                            Maximum number of characters retained in the tape buffer.
+                            Oldest text is trimmed automatically when this limit is exceeded
+                            (while you are scrolled to the bottom).
+                        </div>
+                    </div>
+
                     <!-- Fast-forward toggle -->
                     <div class="options-row">
                         <div class="options-row-main">
@@ -174,8 +197,6 @@
                             all backlog text is printed immediately and streaming focuses on the latest job.
                         </label>
                     </div>
-
-                    
                 </div>
             </transition>
         </div>
@@ -418,12 +439,13 @@ const envCharsPerTick = (() => {
 
 /* Rolling tape character cap (env-driven) */
 const DEFAULT_TAPE_MAX_CHARS = 20000
-const TAPE_MAX_CHARS = (() => {
+const envTapeMaxChars = (() => {
     const raw = import.meta.env.VITE_SERIAL_PRINTER_MAX_CHARS
     const n = raw != null ? Number(raw) : NaN
     if (!Number.isFinite(n) || n <= 0) return DEFAULT_TAPE_MAX_CHARS
     return Math.floor(n)
 })()
+const tapeMaxChars = ref(envTapeMaxChars)
 
 /* Backlog speed multiplier (env-driven, default 10 here) */
 const DEFAULT_BACKLOG_SPEED_FACTOR = 10
@@ -469,7 +491,7 @@ function totalTapeChars(): number {
 
 /**
  * Enforce the rolling character cap on the visible tape.
- * Keeps only the most recent TAPE_MAX_CHARS characters across segments.
+ * Keeps only the most recent tapeMaxChars characters across segments.
  * Oldest characters are removed first; empty segments are dropped.
  *
  * IMPORTANT UX CHANGE:
@@ -484,9 +506,9 @@ function trimTapeIfNeeded() {
     }
 
     let total = totalTapeChars()
-    if (total <= TAPE_MAX_CHARS) return
+    if (total <= tapeMaxChars.value) return
 
-    let excess = total - TAPE_MAX_CHARS
+    let excess = total - tapeMaxChars.value
 
     while (excess > 0 && tapeSegments.value.length > 0) {
         const first = tapeSegments.value[0]
@@ -693,6 +715,7 @@ watch(
         chars: currentCharsPerTick.value,
         backlogFactor: backlogSpeedFactor.value,
         fastForward: fastForwardToLatest.value,
+        bufferSize: tapeMaxChars.value,
     }),
     () => {
         if (!pendingText.value.length && !jobQueue.value.length) return
@@ -745,6 +768,7 @@ function resetSpeed() {
     currentCharsPerTick.value = envCharsPerTick
     backlogSpeedFactor.value = envBacklogFactor
     fastForwardToLatest.value = envFastForwardToLatest
+    tapeMaxChars.value = envTapeMaxChars
 }
 </script>
 
