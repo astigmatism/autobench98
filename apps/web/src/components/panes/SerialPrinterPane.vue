@@ -1049,6 +1049,7 @@ function resetSpeed() {
     /* key bits: 100% height + border-box so padding is included
        and the absolute footer's bottom:0 is actually at the visual bottom */
     height: 100%;
+    width: 100%;
     box-sizing: border-box;
 
     margin: 0 auto; /* vertical gap now handled by tape-viewport padding */
