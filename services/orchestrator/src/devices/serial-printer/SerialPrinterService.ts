@@ -1,5 +1,3 @@
-// services/orchestrator/src/core/adapters/serial-printer/SerialPrinterService.ts
-
 import { SerialPort } from 'serialport'
 import {
     type SerialPrinterConfig,
@@ -402,8 +400,17 @@ export class SerialPrinterService {
         // Heuristic: ignore jobs whose non-whitespace, non-NUL characters ≤ 1.
         const visibleChars = rawNormalized.replace(/[\s\0]/g, '').length
 
-        if (visibleChars <= 1) {
-            // 🧹 Noise job: drop silently without treating as a device error.
+        if (visibleChars <= 2) {
+            // 🧹 Noise job: notify observers and reset to idle,
+            // but do NOT increment job stats or queue anything.
+            this.deps.events.publish({
+                kind: 'job-dismissed',
+                at: now,
+                jobId,
+                dismissedAt: now,
+                reason: 'noise',
+            })
+
             this.buffer = ''
             this.currentJobId = null
             this.currentJobStartedAt = null

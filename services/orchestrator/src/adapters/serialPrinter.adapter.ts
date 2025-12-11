@@ -1,4 +1,3 @@
-// services/orchestrator/src/core/adapters/serial-printer/SerialPrinterStateAdapter.ts
 import { getSnapshot, updateSerialPrinterSnapshot } from '../core/state.js'
 import { SerialPrinterEvent } from '../devices/serial-printer/types.js'
 
@@ -31,6 +30,22 @@ export class SerialPrinterStateAdapter {
                         id: evt.jobId,
                         startedAt: evt.startedAt,
                     },
+                })
+                return
+            }
+
+            /* ------------------------------------------------------------------ */
+            /* JOB DISMISSED (noise / junk)                                      */
+            /* ------------------------------------------------------------------ */
+            case 'job-dismissed': {
+                // We intentionally do not touch lastJob / history / stats here.
+                // This is purely a state transition back to "idle" (connected).
+                updateSerialPrinterSnapshot({
+                    phase: 'connected',
+                    message: undefined,
+                    currentJob: null,
+                    // lastJobFullText is left as-is; snapshot continues to
+                    // represent the last *real* job.
                 })
                 return
             }

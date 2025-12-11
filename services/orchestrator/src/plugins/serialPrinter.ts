@@ -1,5 +1,3 @@
-// services/orchestrator/src/plugins/serialPrinter.ts
-
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
 
@@ -55,6 +53,14 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
                 const durationMs = job.completedAt - job.createdAt
                 this.logSp.info(
                     `kind=job-completed ts=${ts} jobId=${job.id} sizeChars=${sizeChars} durationMs=${durationMs}`,
+                )
+                break
+            }
+
+            case 'job-dismissed': {
+                const { jobId, reason } = evt
+                this.logSp.info(
+                    `kind=job-dismissed ts=${ts} jobId=${jobId} reason=${reason}`,
                 )
                 break
             }

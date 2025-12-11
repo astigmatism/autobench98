@@ -1,5 +1,3 @@
-// services/orchestrator/src/core/devices/serial-printer/types.ts
-
 export type SerialPrinterState =
     | 'idle'          // Port open, no active job
     | 'receiving'     // Currently accumulating bytes for a job
@@ -61,6 +59,7 @@ export interface SerialPrinterStats {
 export type SerialPrinterEventKind =
     | 'job-started'
     | 'job-completed'
+    | 'job-dismissed'
     | 'device-connected'
     | 'device-disconnected'
     | 'fatal-error'
@@ -80,6 +79,14 @@ export interface SerialPrinterJobStartedEvent extends SerialPrinterEventBase {
 export interface SerialPrinterJobCompletedEvent extends SerialPrinterEventBase {
     kind: 'job-completed'
     job: SerialPrinterJob
+}
+
+export interface SerialPrinterJobDismissedEvent extends SerialPrinterEventBase {
+    kind: 'job-dismissed'
+    jobId: number
+    dismissedAt: number
+    /** Currently we only distinguish noise, but this is extendable */
+    reason: 'noise' | 'empty' | 'unknown'
 }
 
 export interface SerialPrinterDeviceConnectedEvent extends SerialPrinterEventBase {
@@ -106,6 +113,7 @@ export interface SerialPrinterRecoverableErrorEvent extends SerialPrinterEventBa
 export type SerialPrinterEvent =
     | SerialPrinterJobStartedEvent
     | SerialPrinterJobCompletedEvent
+    | SerialPrinterJobDismissedEvent
     | SerialPrinterDeviceConnectedEvent
     | SerialPrinterDeviceDisconnectedEvent
     | SerialPrinterFatalErrorEvent
