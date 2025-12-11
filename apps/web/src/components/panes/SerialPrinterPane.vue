@@ -34,7 +34,7 @@
                 </span>
             </div>
 
-            <!-- Tape viewport (scroll container + fixed tape chrome) -->
+            <!-- Tape viewport -->
             <div
                 ref="paperRef"
                 class="tape-viewport"
@@ -1002,10 +1002,8 @@ function resetSpeed() {
     background: #a855f7;
 }
 
-/* Tape viewport:
-   - remains the scroll container (scrollbar stays here)
-   - now owns the tape's chrome (background, corners, shadow)
-   - the tape "card" itself visually stays fixed while job text scrolls */
+/* Tape viewport: scrollable area, fills remaining panel space.
+   Made a flex container with NO padding so child 100%/flex height matches it exactly. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
@@ -1015,9 +1013,13 @@ function resetSpeed() {
 
     display: flex;
     align-items: stretch;
+}
 
-    /* Moved from .tape so the chrome doesn't scroll away */
-    margin: 4px auto;
+/* Tape surface: flex child that stretches to fill viewport height in empty state.
+   No min-height:100%; that plus viewport padding was causing the early scrollbar. */
+.tape {
+    position: relative;
+    margin: 4px auto; /* replaces viewport padding */
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -1025,24 +1027,16 @@ function resetSpeed() {
     box-shadow:
         0 0 0 1px rgba(15, 23, 42, 0.4),
         0 10px 24px rgba(15, 23, 42, 0.7);
-}
 
-/* Tape surface: purely a structural container now.
-   The decorative chrome lives on .tape-viewport. */
-.tape {
-    position: relative;
-    flex: 1 1 auto;
-    min-height: 0;
-    width: 100%;
     display: flex;
     flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
-/* Perforation strip: stick to the top edge of the viewport
-   so it doesn't scroll away with the job text. */
+/* Perforation strip */
 .tape-perf {
-    position: sticky;
-    top: 0;
+    position: relative;
     height: 8px;
     margin: -8px -10px 6px;
     background: repeating-linear-gradient(
@@ -1053,16 +1047,14 @@ function resetSpeed() {
         transparent 4px
     );
     mask-image: linear-gradient(to bottom, black, transparent);
-    z-index: 1;
 }
 
-/* Tape footer deep shadow: pinned to the bottom of the viewport,
-   still visually part of the tape but no longer scrolling away. */
+/* Tape footer deep shadow (inside tape so it doesn't add scroll height) */
 .tape-footer {
-    position: sticky;
+    position: absolute;
+    left: 8px;
+    right: 8px;
     bottom: 0;
-    left: 0;
-    right: 0;
     height: 10px;
     background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.45), transparent 60%);
     opacity: 0.8;
