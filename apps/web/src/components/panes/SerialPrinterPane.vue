@@ -896,13 +896,15 @@ function resetSpeed() {
     mask-image: linear-gradient(to bottom, black, transparent);
 }
 
-/* Tape footer deep shadow (inside tape so it doesn't add scroll height) */
+/* Tape footer deep shadow: now sticky so it visually hugs the
+   bottom of the viewport while scrolling, instead of drifting. */
 .tape-footer {
-    position: absolute;
+    position: sticky;
+    bottom: 0;
     left: 8px;
     right: 8px;
-    bottom: 0;
     height: 10px;
+    margin-top: 8px;
     background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.45), transparent 60%);
     opacity: 0.8;
     pointer-events: none;
