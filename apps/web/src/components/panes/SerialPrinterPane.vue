@@ -175,19 +175,7 @@
                         </label>
                     </div>
 
-                    <!-- Server history info (still accurate for backend behavior) -->
-                    <div class="options-row">
-                        <div class="options-row-main">
-                            <span class="options-label">Server history</span>
-                            <span class="options-value">
-                                {{ printer.historyLimit }} jobs
-                            </span>
-                        </div>
-                        <div class="options-hint">
-                            Number of completed jobs the server keeps for refresh / new clients
-                            (SERIAL_PRINTER_HISTORY_LIMIT).
-                        </div>
-                    </div>
+                    
                 </div>
             </transition>
         </div>
