@@ -457,11 +457,11 @@ function finalizeFinishedJobIfReady() {
     // Capture before clearing
     const fallback = liveText.value
 
-    // Clear live state
+    // Clear live state for this job, but keep displayedLength as-is so that
+    // any late snapshots with the same full text don't get re-streamed.
     finishingJobId.value = null
     currentJobId.value = null
     liveText.value = ''
-    displayedLength.value = 0
     pending.value = ''
     stopTypingTimer()
 
