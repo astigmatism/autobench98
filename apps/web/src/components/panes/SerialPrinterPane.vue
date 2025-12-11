@@ -140,7 +140,7 @@
                         </div>
                     </div>
 
-                    <!-- Server history info -->
+                    <!-- Server history info (for reference only) -->
                     <div class="options-row">
                         <div class="options-row-main">
                             <span class="options-label">Server history</span>
@@ -373,8 +373,8 @@ const finishingJobId = ref<number | null>(null)
 
 /**
  * completedJobs: local view of full job texts, in order.
- * This is now entirely front-end–owned: we build it from the streamed buffer,
- * and only hydrate once from server history on initial load.
+ * This is entirely front-end–owned: we build it from the streamed buffer,
+ * and do not hydrate from backend history during a live session.
  */
 type CompletedJobView = {
     id: number
@@ -461,32 +461,6 @@ function finalizeFinishedJobIfReady() {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  One-time history hydration                                                */
-/* -------------------------------------------------------------------------- */
-
-/**
- * We only use server-provided full-text history to seed the tape when the
- * pane first mounts. After that, completedJobs is entirely front-end owned to
- * avoid double-rendering / replay effects.
- */
-const hasHydratedHistory = ref(false)
-
-watch(
-    () => printer.value.history,
-    (history) => {
-        if (hasHydratedHistory.value) return
-        if (!history || history.length === 0) return
-
-        completedJobs.value = history.map((h) => ({
-            id: h.id,
-            text: h.text,
-        }))
-        hasHydratedHistory.value = true
-    },
-    { immediate: true, deep: true }
-)
-
-/* -------------------------------------------------------------------------- */
 /*  Job identity + lifecycle                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -497,8 +471,8 @@ watch(
  *  - When a job finishes: mark it as "finishing" and let the
  *    streamer drain remaining pending characters before finalizing.
  *
- * Importantly, we never pull in backend canonical text (lastJobFullText) here;
- * the front-end buffer is the source of truth for what the user sees.
+ * Importantly, we never pull in backend canonical text here; the
+ * front-end buffer is the source of truth for what the user sees.
  */
 watch(
     () => printer.value.currentJob,
