@@ -135,6 +135,28 @@
                         </div>
                     </div>
 
+                    <!-- New: backlog speed multiplier -->
+                    <div class="options-row">
+                        <div class="options-row-main">
+                            <span class="options-label">Backlog speed multiplier</span>
+                            <span class="options-value">
+                                ×{{ backlogSpeedFactor.toFixed(1) }}
+                            </span>
+                        </div>
+                        <input
+                            class="options-slider"
+                            type="range"
+                            min="1"
+                            max="4"
+                            step="0.5"
+                            v-model.number="backlogSpeedFactor"
+                        />
+                        <div class="options-hint">
+                            When new completed jobs arrive while older ones are still streaming,
+                            this factor speeds up the backlog so the latest job becomes visible sooner.
+                        </div>
+                    </div>
+
                     <!-- Server history info (still accurate for backend behavior) -->
                     <div class="options-row">
                         <div class="options-row-main">
@@ -397,8 +419,18 @@ const TAPE_MAX_CHARS = (() => {
     return Math.floor(n)
 })()
 
+/* Backlog speed multiplier (env-driven, default 2) */
+const DEFAULT_BACKLOG_SPEED_FACTOR = 2
+const envBacklogFactor = (() => {
+    const raw = import.meta.env.VITE_SERIAL_PRINTER_BACKLOG_SPEED_FACTOR
+    const n = raw != null ? Number(raw) : NaN
+    if (!Number.isFinite(n) || n <= 0) return DEFAULT_BACKLOG_SPEED_FACTOR
+    return n
+})()
+
 const currentIntervalMs = ref(envTypingInterval)
 const currentCharsPerTick = ref(envCharsPerTick)
+const backlogSpeedFactor = ref(envBacklogFactor)
 
 let typingTimer: number | null = null
 
@@ -420,8 +452,18 @@ function totalTapeChars(): number {
  * Enforce the rolling character cap on the visible tape.
  * Keeps only the most recent TAPE_MAX_CHARS characters across segments.
  * Oldest characters are removed first; empty segments are dropped.
+ *
+ * IMPORTANT UX CHANGE:
+ * - We only trim while auto-scroll is enabled (user pinned to bottom).
+ * - If the user scrolls up to inspect earlier output, we stop trimming
+ *   so they do NOT see text "stream away" at the top.
  */
 function trimTapeIfNeeded() {
+    if (!autoScrollEnabled.value) {
+        // User is scrolled up; avoid visual "vanishing tape" at the top.
+        return
+    }
+
     let total = totalTapeChars()
     if (total <= TAPE_MAX_CHARS) return
 
@@ -480,7 +522,15 @@ function startTypingTimer() {
             }
         }
 
-        const chars = Math.max(1, currentCharsPerTick.value || 1)
+        // Base chars per tick from user setting
+        const baseChars = Math.max(1, currentCharsPerTick.value || 1)
+
+        // If there is a backlog (jobs waiting behind the current one),
+        // speed up streaming with the backlogSpeedFactor.
+        const hasBacklog = jobQueue.value.length > 0
+        const factor = hasBacklog ? Math.max(1, backlogSpeedFactor.value || 1) : 1
+
+        const chars = Math.max(1, Math.floor(baseChars * factor))
         const chunk = pendingText.value.slice(0, chars)
         pendingText.value = pendingText.value.slice(chars)
 
@@ -565,6 +615,7 @@ watch(
     () => ({
         interval: currentIntervalMs.value,
         chars: currentCharsPerTick.value,
+        backlogFactor: backlogSpeedFactor.value,
     }),
     () => {
         if (!pendingText.value.length && !jobQueue.value.length) return
@@ -615,6 +666,7 @@ const showOptions = ref(false)
 function resetSpeed() {
     currentIntervalMs.value = envTypingInterval
     currentCharsPerTick.value = envCharsPerTick
+    backlogSpeedFactor.value = envBacklogFactor
 }
 </script>
 
