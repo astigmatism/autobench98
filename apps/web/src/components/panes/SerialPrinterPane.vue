@@ -147,7 +147,7 @@
                             class="options-slider"
                             type="range"
                             min="1"
-                            max="4"
+                            max="20"
                             step="0.5"
                             v-model.number="backlogSpeedFactor"
                         />
@@ -411,7 +411,7 @@ const envCharsPerTick = (() => {
 })()
 
 /* Rolling tape character cap (env-driven) */
-const DEFAULT_TAPE_MAX_CHARS = 1000
+const DEFAULT_TAPE_MAX_CHARS = 20000
 const TAPE_MAX_CHARS = (() => {
     const raw = import.meta.env.VITE_SERIAL_PRINTER_MAX_CHARS
     const n = raw != null ? Number(raw) : NaN
@@ -420,7 +420,7 @@ const TAPE_MAX_CHARS = (() => {
 })()
 
 /* Backlog speed multiplier (env-driven, default 2) */
-const DEFAULT_BACKLOG_SPEED_FACTOR = 2
+const DEFAULT_BACKLOG_SPEED_FACTOR = 10
 const envBacklogFactor = (() => {
     const raw = import.meta.env.VITE_SERIAL_PRINTER_BACKLOG_SPEED_FACTOR
     const n = raw != null ? Number(raw) : NaN
