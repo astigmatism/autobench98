@@ -849,7 +849,7 @@ function resetSpeed() {
     background: #ef4444;
 }
 
-/* Tape viewport: scrollable area, fills remaining panel space. */
+/* Tape viewport: scrollable area, now owns the "paper" frame. */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
@@ -859,16 +859,9 @@ function resetSpeed() {
 
     display: flex;
     align-items: stretch;
-}
 
-/* Tape surface.
-   NOTE: min-height is reduced by the vertical padding (8px + 16px = 24px)
-   so that when content is empty, the total box (content + padding) is
-   exactly the viewport height and no scrollbar appears. Vertical margin
-   is removed to avoid adding extra scroll height. */
-.tape {
-    position: relative;
-    margin: 0 auto;
+    /* Paper frame styling moved here so it stays pinned while scrolling */
+    margin: 4px auto;
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -876,11 +869,19 @@ function resetSpeed() {
     box-shadow:
         0 0 0 1px rgba(15, 23, 42, 0.4),
         0 10px 24px rgba(15, 23, 42, 0.7);
+    box-sizing: border-box;
+}
+
+/* Tape surface: just the scrollable content inside the fixed frame. */
+.tape {
+    position: relative;
+    margin: 0 auto;
+    max-width: 100%;
 
     display: flex;
     flex-direction: column;
     flex: 1 1 auto;
-    min-height: calc(100% - 24px);
+    min-height: 100%;
 }
 
 /* Perforation strip */
@@ -898,12 +899,12 @@ function resetSpeed() {
     mask-image: linear-gradient(to bottom, black, transparent);
 }
 
-/* Tape footer deep shadow */
+/* Tape footer deep shadow (inside tape so it visually hugs the bottom) */
 .tape-footer {
     position: sticky;
     bottom: 0;
-    left: 8px;
-    right: 8px;
+    left: 0;
+    right: 0;
     height: 10px;
     margin-top: auto;
     background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.45), transparent 60%);
