@@ -34,12 +34,8 @@
                 </span>
             </div>
 
-            <!-- Tape viewport -->
-            <div
-                ref="paperRef"
-                class="tape-viewport"
-                @scroll="onScroll"
-            >
+            <!-- Tape viewport (no longer scrollable itself) -->
+            <div class="tape-viewport">
                 <!-- Simulated continuous tape -->
                 <div class="tape">
                     <!-- Subtle perforation at the top -->
@@ -52,7 +48,11 @@
                         class="job-block"
                         :class="{ 'current-job': isStreaming && segment.id === activeJobId }"
                     >
-                        <pre class="job-body">
+                        <pre
+                            class="job-body"
+                            ref="jobBodyRef"
+                            @scroll="onScroll"
+                        >
 {{ segment.text || ' ' }}
                         </pre>
                         <!-- Visual “cut” between jobs -->
@@ -350,20 +350,36 @@ const printer = computed<SerialPrinterSnapshotView>(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Tape auto-scroll behavior                                                 */
+/*  Tape auto-scroll behavior (now on job-body)                               */
 /* -------------------------------------------------------------------------- */
 
-const paperRef = ref<HTMLElement | null>(null)
+/**
+ * jobBodyRef is bound via `ref="jobBodyRef"` on the job-body <pre>.
+ * Because it's used inside a v-for, Vue will give us:
+ *   - a single HTMLElement, or
+ *   - an array of HTMLElements (one per job),
+ * depending on render timing.
+ */
+const jobBodyRef = ref<HTMLElement | HTMLElement[] | null>(null)
 const autoScrollEnabled = ref(true)
 
+function getActiveJobBodyEl(): HTMLElement | null {
+    const val = jobBodyRef.value
+    if (!val) return null
+    if (Array.isArray(val)) {
+        return val[val.length - 1] ?? null
+    }
+    return val
+}
+
 function scrollToBottom() {
-    const el = paperRef.value
+    const el = getActiveJobBodyEl()
     if (!el) return
     el.scrollTop = el.scrollHeight
 }
 
-function onScroll() {
-    const el = paperRef.value
+function onScroll(evt: Event) {
+    const el = evt.target as HTMLElement | null
     if (!el) return
 
     const threshold = 32 // px from bottom considered "at bottom"
@@ -1002,33 +1018,21 @@ function resetSpeed() {
     background: #a855f7;
 }
 
-/* Tape viewport: scrollable area, fills remaining panel space.
-   Scrollbar hidden but scrolling still works. */
+/* Tape viewport: fills remaining panel space, no scrolling here */
 .tape-viewport {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
     position: relative;
 
     display: flex;
     align-items: stretch;
-
-    /* hide scrollbar – Firefox */
-    scrollbar-width: none;
-    /* hide scrollbar – IE/old Edge */
-    -ms-overflow-style: none;
-}
-
-/* hide scrollbar – WebKit (Chrome, Safari, Edge Chromium) */
-.tape-viewport::-webkit-scrollbar {
-    display: none;
 }
 
 /* Tape surface: flex child that stretches to fill viewport height in empty state. */
 .tape {
     position: relative;
-    margin: 4px auto; /* replaces viewport padding */
+    margin: 4px auto;
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
@@ -1079,7 +1083,7 @@ function resetSpeed() {
     animation: pulse-border 1.4s ease-in-out infinite;
 }
 
-/* Job body text */
+/* Job body text: scrollable, scrollbar hidden */
 .job-body {
     margin: 0;
     padding: 4px 6px;
@@ -1093,6 +1097,19 @@ function resetSpeed() {
     white-space: pre-wrap;
     word-wrap: break-word;
     border: 1px solid rgba(209, 213, 219, 0.9);
+
+    max-height: 100%;
+    overflow-y: auto;
+
+    /* Hide scrollbar – Firefox */
+    scrollbar-width: none;
+    /* Hide scrollbar – IE/old Edge */
+    -ms-overflow-style: none;
+}
+
+/* Hide scrollbar – WebKit (Chrome, Safari, Edge Chromium) */
+.job-body::-webkit-scrollbar {
+    display: none;
 }
 
 /* Divider between jobs (cut line) */
