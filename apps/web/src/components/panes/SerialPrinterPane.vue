@@ -1051,7 +1051,7 @@ function resetSpeed() {
     height: 100%;
     width: 100%;
     box-sizing: border-box;
-
+    overflow: hidden;
     margin: 0 auto; /* vertical gap now handled by tape-viewport padding */
 }
 
