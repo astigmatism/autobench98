@@ -25,11 +25,13 @@ if "${TMUX_CMD[@]}" has-session -t "$SESSION_NAME" 2>/dev/null; then
 fi
 
 # Create a new detached tmux session and run the app in a shell wrapper
+# After the app exits (success, error, or Ctrl-C), drop into a shell so
+# the window stays usable instead of closing immediately.
 "${TMUX_CMD[@]}" new-session -d -s "$SESSION_NAME" \
   "cd '$PROJECT_DIR' && \
    '$START_SCRIPT' --no-env-ask; \
    EXIT_CODE=\$?; \
    echo; \
    echo \"start-linux.sh exited with code \$EXIT_CODE\"; \
-   echo \"Press Enter to close this window...\"; \
-   read"
+   echo \"Dropping to an interactive shell. Type 'exit' to close this window.\"; \
+   exec \$SHELL -l"
