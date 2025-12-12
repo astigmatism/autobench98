@@ -28,6 +28,7 @@
                     :data-phase="printer.phase"
                     :data-reconnecting="isReconnecting ? 'true' : 'false'"
                     :data-streaming="isStreaming ? 'true' : 'false'"
+                    :data-status="statusKind"
                 >
                     <span class="dot"></span>
                     <span class="label">{{ statusLabel }}</span>
@@ -77,7 +78,7 @@
                     </div>
 
                     <!-- Tape footer shadow (fixed to visual bottom of tape) -->
-                    <div class="tape-footer"></div>
+                    <!-- <div class="tape-footer"></div> -->
                 </div>
             </div>
 
@@ -352,6 +353,10 @@ const printer = computed<SerialPrinterSnapshotView>(() => {
     return slice ?? initialPrinter
 })
 
+// Capture the total job count at mount-time to distinguish a cold start
+// (0 jobs when this pane mounted) from a "refresh-with-history" scenario.
+const initialTotalJobsAtMount = printer.value.stats?.totalJobs ?? 0
+
 /* -------------------------------------------------------------------------- */
 /*  Tape auto-scroll behavior (now on inner scroll region)                    */
 /* -------------------------------------------------------------------------- */
@@ -526,11 +531,16 @@ function trimTapeIfNeeded() {
 /**
  * Hydrate the tape from the backend snapshot:
  * - Use printer.history (full text for older jobs)
- * - Use lastJobFullText for the most recent job, if available
+ * - Optionally use lastJobFullText for the most recent job
  * This runs once per component lifecycle, and builds the initial
  * non-animated tape state so refreshes don't re-stream old jobs.
  */
-function hydrateTapeFromSnapshot(snapshot: SerialPrinterSnapshotView) {
+function hydrateTapeFromSnapshot(
+    snapshot: SerialPrinterSnapshotView,
+    opts?: { includeLastJob?: boolean }
+) {
+    const includeLastJob = opts?.includeLastJob ?? true
+
     tapeSegments.value = []
     realizedJobIds.clear()
 
@@ -541,20 +551,28 @@ function hydrateTapeFromSnapshot(snapshot: SerialPrinterSnapshotView) {
         realizedJobIds.add(entry.id)
     }
 
-    const lastJob = snapshot.lastJob
-    const lastText = snapshot.lastJobFullText
+    if (includeLastJob) {
+        const lastJob = snapshot.lastJob
+        const lastText = snapshot.lastJobFullText
 
-    if (lastJob && lastText && lastText.length > 0 && !realizedJobIds.has(lastJob.id)) {
-        tapeSegments.value.push({ id: lastJob.id, text: lastText })
-        realizedJobIds.add(lastJob.id)
+        if (lastJob && lastText && lastText.length > 0 && !realizedJobIds.has(lastJob.id)) {
+            tapeSegments.value.push({ id: lastJob.id, text: lastText })
+            realizedJobIds.add(lastJob.id)
+        }
     }
 
     trimTapeIfNeeded()
 }
 
 /**
- * Ensure hydration happens exactly once, and only when we actually
- * have historical data (or a last job) to show.
+ * Ensure hydration happens exactly once.
+ *
+ * Behavior:
+ * - If there were already jobs when this pane mounted (initialTotalJobsAtMount > 0),
+ *   we hydrate from history + last job (no replay on refresh).
+ * - If there were NO jobs at mount (cold start), we *do not* hydrate any text.
+ *   We just mark the snapshot as "hydrated" so that the first job can stream
+ *   in via the lastJob watcher.
  */
 function ensureHydratedFromSnapshot() {
     if (hasHydratedFromSnapshot.value) return
@@ -569,7 +587,15 @@ function ensureHydratedFromSnapshot() {
         return
     }
 
-    hydrateTapeFromSnapshot(snap)
+    if (initialTotalJobsAtMount > 0) {
+        // We loaded the pane with existing history → hydrate fully.
+        hydrateTapeFromSnapshot(snap, { includeLastJob: true })
+    } else {
+        // Cold start: there were no jobs when this pane mounted.
+        // Do *not* hydrate any job text; let the first job stream in.
+        // (We intentionally leave tapeSegments empty and realizedJobIds clear.)
+    }
+
     hasHydratedFromSnapshot.value = true
 }
 
@@ -587,6 +613,7 @@ function flushBacklogToTapeSync() {
             tapeSegments.value.push(last)
         }
         last.text += pendingText.value
+        realizedJobIds.add(activeJobId.value)
         pendingText.value = ''
     }
 
@@ -803,7 +830,7 @@ watch(
 )
 
 /* -------------------------------------------------------------------------- */
-/*  Status / connection indicators (badge text)                               */
+/*  Status / connection indicators (badge text + status token)               */
 /* -------------------------------------------------------------------------- */
 
 const isReconnecting = computed(() => {
@@ -811,12 +838,43 @@ const isReconnecting = computed(() => {
 })
 
 /**
- * Status badge semantics:
+ * Status "kind" used for styling (data-status).
+ * Kept in sync with statusLabel semantics but with stable tokens.
+ */
+const statusKind = computed(() => {
+    if (printer.value.phase === 'error') {
+        return 'error'
+    }
+
+    if (printer.value.phase === 'disconnected') {
+        return isReconnecting.value ? 'reconnecting' : 'disconnected'
+    }
+
+    // While the UI is streaming a job onto the tape.
+    if (isStreaming.value) {
+        return 'printing'
+    }
+
+    // Device-level job has started but we're not streaming UI text yet.
+    if (printer.value.currentJob) {
+        return 'spooling'
+    }
+
+    if (printer.value.phase === 'queued') {
+        return 'queued'
+    }
+
+    // Fully idle but connected (or any other non-terminal steady state).
+    return 'ready'
+})
+
+/**
+ * Status badge label text.
  *
  * - error               → "Error"
  * - disconnected        → "Disconnected" or "Reconnecting…"
  * - streaming text      → "Printing"
- * - backend has job     → "Spooling" (device is receiving / job has started)
+ * - backend has job     → "Spooling"
  * - connected & idle    → "Ready"
  */
 const statusLabel = computed(() => {
@@ -1031,29 +1089,29 @@ function resetSpeed() {
 /* ------------------------------------------------------------------ */
 
 /* Disconnected baseline */
-.status-badge[data-phase='disconnected'] {
+.status-badge[data-status='disconnected'] {
     border-color: #4b5563;
     background: #020617;
 }
-.status-badge[data-phase='disconnected'] .dot {
+.status-badge[data-status='disconnected'] .dot {
     background: #6b7280;
 }
 
-/* Disconnected + reconnecting (yellow, like CF "Busy") */
-.status-badge[data-phase='disconnected'][data-reconnecting='true'] {
+/* Disconnected + reconnecting (yellow, busy-style) */
+.status-badge[data-status='reconnecting'] {
     border-color: #facc15;
     background: #3b2900;
 }
-.status-badge[data-phase='disconnected'][data-reconnecting='true'] .dot {
+.status-badge[data-status='reconnecting'] .dot {
     background: #facc15;
 }
 
 /* Error state (red) */
-.status-badge[data-phase='error'] {
+.status-badge[data-status='error'] {
     border-color: #ef4444;
     background: #450a0a;
 }
-.status-badge[data-phase='error'] .dot {
+.status-badge[data-status='error'] .dot {
     background: #ef4444;
 }
 
@@ -1061,34 +1119,45 @@ function resetSpeed() {
 /* Ready / Spooling / Printing / Queued                               */
 /* ------------------------------------------------------------------ */
 
-/* READY → phase='connected' (green, mirrors CF "Media Ready") */
-.status-badge[data-phase='connected'] {
+/* READY → logical idle, device present (green) */
+.status-badge[data-status='ready'] {
     border-color: #22c55e;
     background: #022c22;
 }
-.status-badge[data-phase='connected'] .dot {
+.status-badge[data-status='ready'] .dot {
     background: #22c55e;
 }
 
-/* SPOOLING → phase='receiving' but not yet streaming (blue, like CF "No Media") */
-.status-badge[data-phase='receiving'][data-streaming='false'] {
-    border-color: #38bdf8;
-    background: #022c3a;
-}
-.status-badge[data-phase='receiving'][data-streaming='false'] .dot {
-    background: #38bdf8;
-}
-
-/* PRINTING → phase='receiving' while streaming (yellow, like CF "Busy") */
-.status-badge[data-phase='receiving'][data-streaming='true'] {
+/* SPOOLING → job started, not streaming yet (yellow + pulse) */
+.status-badge[data-status='spooling'] {
     border-color: #facc15;
     background: #3b2900;
 }
-.status-badge[data-phase='receiving'][data-streaming='true'] .dot {
+.status-badge[data-status='spooling'] .dot {
     background: #facc15;
+    animation: pulse-dot 900ms ease-in-out infinite;
 }
 
-/* Pulsing dot for spooling/printing (CF-style: scale + opacity) */
+/* PRINTING → streaming to tape (yellow + pulse, separate rule) */
+.status-badge[data-status='printing'] {
+    border-color: #facc15;
+    background: #3b2900;
+}
+.status-badge[data-status='printing'] .dot {
+    background: #facc15;
+    animation: pulse-dot 900ms ease-in-out infinite;
+}
+
+/* Optional: keep queued distinct (purple) */
+.status-badge[data-status='queued'] {
+    border-color: #a855f7;
+    background: #2b103f;
+}
+.status-badge[data-status='queued'] .dot {
+    background: #a855f7;
+}
+
+/* Pulsing dot for busy states (CF-style: scale + opacity) */
 @keyframes pulse-dot {
     0% {
         transform: scale(1);
@@ -1102,20 +1171,6 @@ function resetSpeed() {
         transform: scale(1);
         opacity: 1;
     }
-}
-
-.status-badge[data-phase='receiving'][data-streaming='false'] .dot,
-.status-badge[data-phase='receiving'][data-streaming='true'] .dot {
-    animation: pulse-dot 900ms ease-in-out infinite;
-}
-
-/* Optional: keep queued distinct (purple) */
-.status-badge[data-phase='queued'] {
-    border-color: #a855f7;
-    background: #2b103f;
-}
-.status-badge[data-phase='queued'] .dot {
-    background: #a855f7;
 }
 
 /* Tape viewport: fills remaining panel space, no scrolling here */
@@ -1190,7 +1245,7 @@ function resetSpeed() {
     position: absolute;
     left: 10px;
     right: 10px;
-    bottom: 8px;
+    bottom: 6px;
     height: 10px;
     background: radial-gradient(
         ellipse at center,
@@ -1203,7 +1258,7 @@ function resetSpeed() {
 
 /* Job blocks (one per job) */
 .job-block {
-    margin-bottom: 8px;
+    margin-bottom: 10px;
 }
 
 .job-block.current-job {
@@ -1228,7 +1283,7 @@ function resetSpeed() {
 
 /* Divider between jobs (cut line) */
 .job-divider {
-    margin-top: 4px;
+    margin-top: 10px;
     height: 1px;
     background: repeating-linear-gradient(
         to right,
