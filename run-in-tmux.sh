@@ -24,9 +24,10 @@ if "${TMUX_CMD[@]}" has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 0
 fi
 
-# 1) Create a new detached tmux session running an interactive shell in the project dir
+# 1) Create a new detached tmux session running a *plain* bash in the project dir.
+#    We use --noprofile --norc to avoid auto-starting Byobu again inside tmux.
 "${TMUX_CMD[@]}" new-session -d -s "$SESSION_NAME" \
-  "cd '$PROJECT_DIR' && exec \$SHELL -l"
+  "cd '$PROJECT_DIR' && exec /bin/bash --noprofile --norc -i"
 
-# 2) In that shell, type the start command and press Enter
+# 2) In that shell, type the start command and press Enter.
 "${TMUX_CMD[@]}" send-keys -t "$SESSION_NAME" "./start-linux.sh --no-env-ask" C-m
