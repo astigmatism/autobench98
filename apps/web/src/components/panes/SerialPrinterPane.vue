@@ -78,7 +78,7 @@
                     </div>
 
                     <!-- Tape footer shadow (fixed to visual bottom of tape) -->
-                    <div class="tape-footer"></div>
+                    <!-- <div class="tape-footer"></div> -->
                 </div>
             </div>
 
