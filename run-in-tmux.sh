@@ -2,12 +2,11 @@
 set -euo pipefail
 
 SESSION_NAME="autobench98"
-TMUX_SOCKET="byobu"
 
 cd "$HOME/autobench98"
 
-# Always talk to the same tmux server Byobu uses
-TMUX_CMD=("/usr/bin/tmux" -L "$TMUX_SOCKET")
+# Always talk to the default tmux server (same one Byobu is using)
+TMUX_CMD=("/usr/bin/tmux")
 
 # If the tmux session already exists, exit quietly
 if "${TMUX_CMD[@]}" has-session -t "$SESSION_NAME" 2>/dev/null; then
