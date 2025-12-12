@@ -15,8 +15,8 @@ else
   exit 1
 fi
 
-# Always talk to the default tmux server (same one Byobu is using)
-TMUX_CMD=("/usr/bin/tmux")
+# Use Byobu's tmux backend so the session has the Byobu UI/config
+TMUX_CMD=("/usr/bin/byobu-tmux")
 
 # If the tmux session already exists, exit quietly
 if "${TMUX_CMD[@]}" has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -24,9 +24,9 @@ if "${TMUX_CMD[@]}" has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 0
 fi
 
-# 1) Create a new detached tmux session running your *normal* login shell
+# 1) Create a new detached session running your normal login shell
 #    in the project directory. This makes PATH, Node, etc. behave just like
-#    when you SSH in.
+#    when you SSH in normally.
 "${TMUX_CMD[@]}" new-session -d -s "$SESSION_NAME" \
   "cd '$PROJECT_DIR' && exec \"\${SHELL:-/bin/bash}\" -l"
 
