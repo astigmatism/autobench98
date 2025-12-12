@@ -53,19 +53,37 @@ else
 fi
 
 # --- optional .env.production override prompt --------------------------------
+NO_ENV_ASK=0
+
+# Parse arguments for --no-env-ask
+for arg in "$@"; do
+  case "$arg" in
+    --no-env-ask)
+      NO_ENV_ASK=1
+      ;;
+  esac
+done
+
 if [[ -f ".env.production" ]]; then
   if [[ -f ".env" ]]; then
-    warn "A local .env file already exists."
-    read -rp "Do you want to overwrite .env with .env.production? [y/N] " yn
-    case "$yn" in
-      [Yy]* )
-        cp .env.production .env
-        log "Overwrote .env with .env.production"
-        ;;
-      * )
-        log "Keeping existing .env"
-        ;;
-    esac
+    if (( NO_ENV_ASK )); then
+      # Forced overwrite mode (no prompt)
+      cp .env.production .env
+      log "Overwrote .env with .env.production (--no-env-ask)"
+    else
+      # Interactive mode (default)
+      warn "A local .env file already exists."
+      read -rp "Do you want to overwrite .env with .env.production? [y/N] " yn
+      case "$yn" in
+        [Yy]* )
+          cp .env.production .env
+          log "Overwrote .env with .env.production"
+          ;;
+        * )
+          log "Keeping existing .env"
+          ;;
+      esac
+    fi
   else
     # No .env exists — safe to copy without prompting
     cp .env.production .env
