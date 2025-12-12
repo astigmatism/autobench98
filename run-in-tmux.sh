@@ -14,5 +14,12 @@ if "${TMUX_CMD[@]}" has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 0
 fi
 
-# Create a new detached tmux session and run the app
-"${TMUX_CMD[@]}" new-session -d -s "$SESSION_NAME" "./linux-start.sh --no-env-ask"
+# Create a new detached tmux session and run the app in a shell wrapper
+# so that if it exits, we can still see the output and exit code.
+"${TMUX_CMD[@]}" new-session -d -s "$SESSION_NAME" \
+  "cd '$HOME/autobench98' && \
+   ./linux-start.sh --no-env-ask; \
+   echo; \
+   echo \"linux-start.sh exited with code \$?\"; \
+   echo \"Press Enter to close this window...\"; \
+   read"
