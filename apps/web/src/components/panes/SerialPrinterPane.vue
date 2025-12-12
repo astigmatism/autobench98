@@ -727,7 +727,7 @@ const isReconnecting = computed(() => {
  * - disconnected        → "Disconnected" or "Reconnecting…"
  * - streaming text      → "Printing"
  * - backend has job     → "Spooling" (device is receiving / job has started)
- * - connected & idle    → "Idle"
+ * - connected & idle    → "Ready"
  */
 const statusLabel = computed(() => {
     if (printer.value.phase === 'error') {
@@ -751,7 +751,7 @@ const statusLabel = computed(() => {
     }
 
     // Fully idle but connected.
-    return 'Idle'
+    return 'Ready'
 })
 
 /* -------------------------------------------------------------------------- */
@@ -966,10 +966,10 @@ function resetSpeed() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Idle / Spooling / Printing / Queued                                */
+/* Ready / Spooling / Printing / Queued                                */
 /* ------------------------------------------------------------------ */
 
-/* IDLE → phase='connected' (green, mirrors CF "Media Ready") */
+/* READY → phase='connected' (green, mirrors CF "Media Ready") */
 .status-badge[data-phase='connected'] {
     border-color: #22c55e;
     background: #022c22;
@@ -978,22 +978,28 @@ function resetSpeed() {
     background: #22c55e;
 }
 
-/* SPOOLING → phase='receiving' but not yet streaming (yellow, CF "Busy") */
+/* SPOOLING → phase='receiving' but not yet streaming (blue, like CF "No Media") */
 .status-badge[data-phase='receiving'][data-streaming='false'] {
-    border-color: #facc15;
-    background: #3b2900;
-}
-.status-badge[data-phase='receiving'][data-streaming='false'] .dot {
-    background: #facc15;
-}
-
-/* PRINTING → phase='receiving' while streaming (blue, CF "No Media") */
-.status-badge[data-phase='receiving'][data-streaming='true'] {
     border-color: #38bdf8;
     background: #022c3a;
 }
-.status-badge[data-phase='receiving'][data-streaming='true'] .dot {
+.status-badge[data-phase='receiving'][data-streaming='false'] .dot {
     background: #38bdf8;
+}
+
+/* PRINTING → phase='receiving' while streaming (also yellow, CF "Busy") */
+.status-badge[data-phase='receiving'][data-streaming='true'] {
+    border-color: #facc15;
+    background: #3b2900;
+}
+.status-badge[data-phase='receiving'][data-streaming='true'] .dot {
+    background: #facc15;
+}
+
+/* Make the dot pulse while SPOOLING or PRINTING */
+.status-badge[data-phase='receiving'][data-streaming='false'] .dot,
+.status-badge[data-phase='receiving'][data-streaming='true'] .dot {
+    animation: pulse-dot 1.1s ease-in-out infinite;
 }
 
 /* Optional: keep queued distinct (purple) */
@@ -1024,7 +1030,7 @@ function resetSpeed() {
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
-    padding: 8px 10px 24px 10px; /* extra bottom padding for footer shadow */
+    padding: 8px 10px 4px 10px;
     box-shadow:
         0 0 0 1px rgba(15, 23, 42, 0.4),
         0 10px 24px rgba(15, 23, 42, 0.7);
@@ -1224,6 +1230,25 @@ function resetSpeed() {
     }
     100% {
         transform: translateY(0);
+    }
+}
+
+/* Pulsing dot for busy/printing states */
+@keyframes pulse-dot {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.6);
+    }
+    50% {
+        transform: scale(1.25);
+        opacity: 0.75;
+        box-shadow: 0 0 0 4px rgba(250, 204, 21, 0);
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(250, 204, 21, 0);
     }
 }
 
