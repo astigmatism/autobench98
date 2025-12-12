@@ -25,7 +25,10 @@
           :data-phase="view.phase"
           :data-media="view.media"
         >
-          <span class="dot"></span>
+          <span
+            class="dot"
+            :class="{ 'dot--pulse': view.phase === 'busy' }"
+          ></span>
           <span class="label">{{ statusLabel }}</span>
         </span>
       </div>
@@ -1254,6 +1257,26 @@ function formatEta(totalSeconds: number): string {
   height: 8px;
   border-radius: 999px;
   background: #9ca3af;
+}
+
+/* Subtle pulse on the status dot while busy */
+@keyframes cf-status-dot-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.status-badge .dot--pulse {
+  animation: cf-status-dot-pulse 900ms ease-in-out infinite;
 }
 
 .status-badge[data-phase='disconnected'] {
