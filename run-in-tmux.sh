@@ -7,7 +7,7 @@ TMUX_SOCKET="byobu"
 cd "$HOME/autobench98"
 
 # Always talk to the same tmux server Byobu uses
-TMUX_CMD=(tmux -L "$TMUX_SOCKET")
+TMUX_CMD=("/usr/bin/tmux" -L "$TMUX_SOCKET")
 
 # If the tmux session already exists, exit quietly
 if "${TMUX_CMD[@]}" has-session -t "$SESSION_NAME" 2>/dev/null; then
