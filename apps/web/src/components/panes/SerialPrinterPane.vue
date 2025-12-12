@@ -34,46 +34,49 @@
                 </span>
             </div>
 
-            <!-- Tape viewport (no longer scrollable itself) -->
+            <!-- Tape viewport (no scrolling here) -->
             <div class="tape-viewport">
                 <!-- Simulated continuous tape -->
                 <div class="tape">
                     <!-- Subtle perforation at the top -->
                     <div class="tape-perf"></div>
 
-                    <!-- CONTINUOUS TAPE, SEGMENTED BY JOB -->
+                    <!-- Scrollable job region inside the tape -->
                     <div
-                        v-for="(segment, index) in tapeSegments"
-                        :key="segment.id"
-                        class="job-block"
-                        :class="{ 'current-job': isStreaming && segment.id === activeJobId }"
+                        ref="tapeScrollRef"
+                        class="tape-scroll"
+                        @scroll="onScroll"
                     >
-                        <pre
-                            class="job-body"
-                            ref="jobBodyRef"
-                            @scroll="onScroll"
-                        >
-{{ segment.text || ' ' }}
-                        </pre>
-                        <!-- Visual “cut” between jobs -->
+                        <!-- CONTINUOUS TAPE, SEGMENTED BY JOB -->
                         <div
-                            v-if="index < tapeSegments.length - 1"
-                            class="job-divider"
-                        ></div>
+                            v-for="(segment, index) in tapeSegments"
+                            :key="segment.id"
+                            class="job-block"
+                            :class="{ 'current-job': isStreaming && segment.id === activeJobId }"
+                        >
+                            <pre class="job-body">
+{{ segment.text || ' ' }}
+                            </pre>
+                            <!-- Visual “cut” between jobs -->
+                            <div
+                                v-if="index < tapeSegments.length - 1"
+                                class="job-divider"
+                            ></div>
+                        </div>
+
+                        <!-- Empty state if nothing has ever printed -->
+                        <div
+                            v-if="tapeSegments.length === 0"
+                            class="empty-state"
+                        >
+                            <p>No printer output yet.</p>
+                            <p class="hint">
+                                Send a test page from Windows 98 to see the tape come to life.
+                            </p>
+                        </div>
                     </div>
 
-                    <!-- Empty state if nothing has ever printed -->
-                    <div
-                        v-if="tapeSegments.length === 0"
-                        class="empty-state"
-                    >
-                        <p>No printer output yet.</p>
-                        <p class="hint">
-                            Send a test page from Windows 98 to see the tape come to life.
-                        </p>
-                    </div>
-
-                    <!-- Tape footer shadow -->
+                    <!-- Tape footer shadow (fixed to visual bottom of tape) -->
                     <div class="tape-footer"></div>
                 </div>
             </div>
@@ -350,30 +353,14 @@ const printer = computed<SerialPrinterSnapshotView>(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Tape auto-scroll behavior (now on job-body)                               */
+/*  Tape auto-scroll behavior (now on inner scroll region)                    */
 /* -------------------------------------------------------------------------- */
 
-/**
- * jobBodyRef is bound via `ref="jobBodyRef"` on the job-body <pre>.
- * Because it's used inside a v-for, Vue will give us:
- *   - a single HTMLElement, or
- *   - an array of HTMLElements (one per job),
- * depending on render timing.
- */
-const jobBodyRef = ref<HTMLElement | HTMLElement[] | null>(null)
+const tapeScrollRef = ref<HTMLElement | null>(null)
 const autoScrollEnabled = ref(true)
 
-function getActiveJobBodyEl(): HTMLElement | null {
-    const val = jobBodyRef.value
-    if (!val) return null
-    if (Array.isArray(val)) {
-        return val[val.length - 1] ?? null
-    }
-    return val
-}
-
 function scrollToBottom() {
-    const el = getActiveJobBodyEl()
+    const el = tapeScrollRef.value
     if (!el) return
     el.scrollTop = el.scrollHeight
 }
@@ -496,7 +483,7 @@ function totalTapeChars(): number {
  * IMPORTANT UX CHANGE:
  * - We only trim while auto-scroll is enabled (user pinned to bottom).
  * - If the user scrolls up to inspect earlier output, we stop trimming
- *   so they do NOT see text "stream away" at the top.
+ *   so they do NOT see text "vanish" at the top.
  */
 function trimTapeIfNeeded() {
     if (!autoScrollEnabled.value) {
@@ -1025,14 +1012,13 @@ function resetSpeed() {
     overflow: hidden;
     position: relative;
 
-    /* move the vertical gap up to the viewport instead of the tape box */
     padding: 4px 0;
 
     display: flex;
     align-items: stretch;
 }
 
-/* Tape surface: now truly fills the viewport, including its own padding */
+/* Tape surface: fills the viewport and owns the tape chrome */
 .tape {
     position: relative;
     max-width: 100%;
@@ -1046,13 +1032,29 @@ function resetSpeed() {
     display: flex;
     flex-direction: column;
 
-    /* key bits: 100% height + border-box so padding is included
-       and the absolute footer's bottom:0 is actually at the visual bottom */
     height: 100%;
     width: 100%;
     box-sizing: border-box;
     overflow: hidden;
-    margin: 0 auto; /* vertical gap now handled by tape-viewport padding */
+    margin: 0 auto;
+}
+
+/* Scrollable content area of the tape (jobs live here) */
+.tape-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+
+    /* Hide scrollbar – Firefox */
+    scrollbar-width: none;
+    /* Hide scrollbar – IE/old Edge */
+    -ms-overflow-style: none;
+}
+
+/* Hide scrollbar – WebKit (Chrome, Safari, Edge Chromium) */
+.tape-scroll::-webkit-scrollbar {
+    display: none;
 }
 
 /* Perforation strip */
@@ -1091,19 +1093,11 @@ function resetSpeed() {
     margin-bottom: 8px;
 }
 
-/* Make the last job-block fill remaining height so its job-body can scroll */
-.job-block:last-of-type {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-}
-
 .job-block.current-job {
     animation: pulse-border 1.4s ease-in-out infinite;
 }
 
-/* Job body text: scrollable, scrollbar hidden */
+/* Job body text (no inner scrolling now; scroll is on .tape-scroll) */
 .job-body {
     margin: 0;
     padding: 4px 6px;
@@ -1117,21 +1111,6 @@ function resetSpeed() {
     white-space: pre-wrap;
     word-wrap: break-word;
     border: 1px solid rgba(209, 213, 219, 0.9);
-
-    flex: 1 1 auto;
-    min-height: 0;
-    max-height: 100%;
-    overflow-y: auto;
-
-    /* Hide scrollbar – Firefox */
-    scrollbar-width: none;
-    /* Hide scrollbar – IE/old Edge */
-    -ms-overflow-style: none;
-}
-
-/* Hide scrollbar – WebKit (Chrome, Safari, Edge Chromium) */
-.job-body::-webkit-scrollbar {
-    display: none;
 }
 
 /* Divider between jobs (cut line) */
