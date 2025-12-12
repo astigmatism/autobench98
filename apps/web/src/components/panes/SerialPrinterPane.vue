@@ -1244,17 +1244,16 @@ function resetSpeed() {
 /* Tape footer deep shadow (now correctly pinned to the visual bottom) */
 .tape-footer {
     position: absolute;
-    left: 10px;
-    right: 10px;
-    bottom: 6px;
-    height: 10px;
-    background: radial-gradient(
-        ellipse at center,
-        rgba(0, 0, 0, 0.45),
-        transparent 60%
-    );
-    opacity: 0.8;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 24px;
     pointer-events: none;
+    background: linear-gradient(
+        to bottom,
+        rgba(0, 0, 0, 0.00),
+        rgba(0, 0, 0, 0.30)
+    );
 }
 
 /* Job blocks (one per job) */
