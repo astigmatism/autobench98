@@ -179,5 +179,6 @@ npm install
 sudo apt-get install pv
 
 read the linux-disk-access doc!
+read the linux-tmux-guide doc!
 
 System ready.
