@@ -124,6 +124,12 @@ export interface CfImagerState {
     fs: CfImagerFsState
     currentOp?: CfImagerCurrentOp
     lastError?: string
+
+    /**
+     * Available bytes on the filesystem that backs rootDir, as last probed
+     * by the service. Undefined when the value is unknown or probing failed.
+     */
+    diskFreeBytes?: number
 }
 
 /* -------------------------------------------------------------------------- */
@@ -150,6 +156,12 @@ export type CfImagerEvent =
           kind: 'cf-fs-updated'
           at: number
           fs: CfImagerFsState
+          /**
+           * Optional free-space hint (bytes available on the filesystem that
+           * backs rootDir) captured at the same time as this FS snapshot.
+           * Undefined when probing is not supported or failed.
+           */
+          diskFreeBytes?: number
       }
     | {
           kind: 'cf-op-started'

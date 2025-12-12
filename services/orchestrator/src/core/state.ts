@@ -269,6 +269,8 @@ const initialCfImager: CfImagerSnapshot = {
     },
     currentOp: undefined,
     lastError: undefined,
+    // NEW: initial free-space hint is unknown
+    diskFreeBytes: undefined,
 }
 
 /* -------------------------------------------------------------------------- */
@@ -503,6 +505,7 @@ export function updateCfImagerSnapshot(partial: {
     fs?: Partial<CfImagerSnapshot['fs']>
     currentOp?: CfImagerSnapshot['currentOp']
     lastError?: string
+    diskFreeBytes?: CfImagerSnapshot['diskFreeBytes']
 }) {
     const prev = state.cfImager
 
@@ -519,6 +522,10 @@ export function updateCfImagerSnapshot(partial: {
         fs,
         currentOp: partial.currentOp ?? prev.currentOp,
         lastError: partial.lastError ?? prev.lastError,
+        diskFreeBytes:
+            partial.diskFreeBytes !== undefined
+                ? partial.diskFreeBytes
+                : prev.diskFreeBytes,
     }
 
     set('cfImager', merged)

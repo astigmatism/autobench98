@@ -1,5 +1,3 @@
-// services/orchestrator/src/adapters/cfImager.adapter.ts
-
 import {
     getSnapshot,
     updateCfImagerSnapshot,
@@ -73,6 +71,7 @@ export class CfImagerStateAdapter {
                 const fs: CfImagerFsState = evt.fs
                 updateCfImagerSnapshot({
                     fs,
+                    diskFreeBytes: evt.diskFreeBytes,
                 })
                 return
             }

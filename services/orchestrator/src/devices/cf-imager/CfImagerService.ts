@@ -71,6 +71,7 @@ export class CfImagerService {
             phase: 'disconnected',
             media: 'none',
             fs,
+            // diskFreeBytes will be populated on the first emitFsUpdated()
         }
 
         /*
@@ -154,7 +155,7 @@ export class CfImagerService {
         })
 
         // Emit latest FS snapshot on device presence too (handy for first-open).
-        this.emitFsUpdated()
+        await this.emitFsUpdated()
 
         // Kick off an async media probe specific to this device.
         void this.refreshMediaStatus()
@@ -214,7 +215,7 @@ export class CfImagerService {
         try {
             const abs = resolveUnderRoot(this.config.rootDir, relPath ?? '.')
             this.cwdAbs = abs
-            this.emitFsUpdated()
+            await this.emitFsUpdated()
         } catch (err) {
             this.emitError(`listDirectory failed: ${(err as Error).message}`)
         }
@@ -248,8 +249,9 @@ export class CfImagerService {
                 throw err
             }
 
-            // On successful creation, refresh FS snapshot so the UI shows the new folder.
-            this.emitFsUpdated()
+            // On successful creation, refresh FS snapshot so the UI shows the new folder
+            // and the updated free space.
+            await this.emitFsUpdated()
         } catch (err) {
             this.emitError(`createFolder failed: ${(err as Error).message}`)
         }
@@ -293,7 +295,7 @@ export class CfImagerService {
                 }
             }
 
-            this.emitFsUpdated()
+            await this.emitFsUpdated()
         } catch (err) {
             this.emitError(`renamePath failed: ${(err as Error).message}`)
         }
@@ -346,7 +348,7 @@ export class CfImagerService {
                     }
                 }
 
-                this.emitFsUpdated()
+                await this.emitFsUpdated()
                 return
             }
 
@@ -382,7 +384,7 @@ export class CfImagerService {
                 }
             }
 
-            this.emitFsUpdated()
+            await this.emitFsUpdated()
         } catch (err) {
             this.emitError(`deletePath failed: ${(err as Error).message}`)
         }
@@ -643,7 +645,8 @@ export class CfImagerService {
                     })
 
                     // After a successful read, refresh once so the new image
-                    // shows up exactly when the operation has finished.
+                    // shows up exactly when the operation has finished and the
+                    // free-space value is updated too.
                     this.resumeFsWatchdogAfterOp({ refreshFs: true })
                 } else {
                     const reason =
@@ -655,7 +658,8 @@ export class CfImagerService {
                     this.emitError(`readDeviceToImage script failed (${reason})`)
 
                     // On failure, we still want to resume watchdog polling,
-                    // and a full refresh is helpful to show whatever landed on disk.
+                    // and a full refresh is helpful to show whatever landed on disk
+                    // and the corresponding free-space change.
                     this.resumeFsWatchdogAfterOp({ refreshFs: true })
                 }
 
@@ -1006,9 +1010,60 @@ export class CfImagerService {
     }
 
     /**
-     * Emit a fresh FS snapshot unconditionally (used by direct FS APIs).
+     * Compute the current available disk space (in bytes) on the filesystem
+     * that backs the configured CF image root directory.
+     *
+     * This is intentionally conservative and shell-based so it behaves
+     * consistently with the rest of the service's platform-specific probes.
      */
-    private emitFsUpdated(): void {
+    private async getDiskFreeBytes(): Promise<number | undefined> {
+        const root = this.config.rootDir
+
+        try {
+            if (process.platform === 'linux') {
+                // df -B1 <path> => size in bytes; 4th column is "Available".
+                const script = `
+set -e
+df -B1 "${root}" | awk 'NR==2 { print $4 }'
+`.trim()
+
+                const out = await this.runShell(script)
+                const val = out.trim().split('\n').pop() ?? ''
+                if (!val) return undefined
+
+                const bytes = Number(val)
+                return Number.isFinite(bytes) && bytes >= 0 ? bytes : undefined
+            }
+
+            if (process.platform === 'darwin') {
+                // df -k <path> => "Available" in KiB; multiply by 1024 to get bytes.
+                const script = `
+set -e
+df -k "${root}" | awk 'NR==2 { print $4 }'
+`.trim()
+
+                const out = await this.runShell(script)
+                const val = out.trim().split('\n').pop() ?? ''
+                if (!val) return undefined
+
+                const kbytes = Number(val)
+                if (!Number.isFinite(kbytes) || kbytes < 0) return undefined
+                return kbytes * 1024
+            }
+
+            // Unsupported platforms: we don't attempt to compute free space.
+            return undefined
+        } catch {
+            // Treat any failure as "unknown"; callers decide how to expose it.
+            return undefined
+        }
+    }
+
+    /**
+     * Emit a fresh FS snapshot unconditionally (used by direct FS APIs),
+     * and compute the current available disk space on the same volume.
+     */
+    private async emitFsUpdated(): Promise<void> {
         const fs = listDirectoryState(
             this.config.rootDir,
             this.cwdAbs,
@@ -1017,10 +1072,14 @@ export class CfImagerService {
         )
         this.state.fs = fs
 
+        const diskFreeBytes = await this.getDiskFreeBytes()
+        this.state.diskFreeBytes = diskFreeBytes
+
         this.deps.events.publish({
             kind: 'cf-fs-updated',
             at: Date.now(),
             fs,
+            diskFreeBytes,
         })
     }
 
@@ -1067,11 +1126,12 @@ export class CfImagerService {
 
     /**
      * Resume the watchdog after an imaging operation has completed or failed.
-     * Optionally emit a one-shot FS refresh so the UI sees the final state.
+     * Optionally emit a one-shot FS refresh so the UI sees the final state and
+     * updated disk-free value.
      */
     private resumeFsWatchdogAfterOp(opts: { refreshFs: boolean }): void {
         if (opts.refreshFs) {
-            this.emitFsUpdated()
+            void this.emitFsUpdated()
         }
 
         this.startFsPolling()
@@ -1139,7 +1199,7 @@ export class CfImagerService {
 
                     // Hard reset to rootDir and emit a fresh snapshot.
                     this.cwdAbs = this.config.rootDir
-                    this.emitFsUpdated()
+                    await this.emitFsUpdated()
                     return
                 }
 
@@ -1164,10 +1224,14 @@ export class CfImagerService {
 
             this.state.fs = nextFs
 
+            const diskFreeBytes = await this.getDiskFreeBytes()
+            this.state.diskFreeBytes = diskFreeBytes
+
             this.deps.events.publish({
                 kind: 'cf-fs-updated',
                 at: Date.now(),
                 fs: nextFs,
+                diskFreeBytes,
             })
         } catch (err) {
             const e = err as NodeJS.ErrnoException

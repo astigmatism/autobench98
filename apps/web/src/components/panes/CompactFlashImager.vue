@@ -199,6 +199,8 @@
         <div class="fs-footer">
           <div class="fs-meta-text">
             {{ sortedEntries.length }} item<span v-if="sortedEntries.length !== 1">s</span>
+            <span v-if="diskFreeDisplay"> • </span>
+            <span v-if="diskFreeDisplay">{{ diskFreeDisplay }}</span>
           </div>
 
           <div class="fs-actions">
@@ -467,6 +469,7 @@ type CfImagerSnapshot = {
   fs: CfImagerFsState
   currentOp?: CfImagerCurrentOpSnapshot
   lastError?: string
+  diskFreeBytes?: number
 }
 
 /* -------------------------------------------------------------------------- */
@@ -486,7 +489,8 @@ const initialCfImager: CfImagerSnapshot = {
     entries: []
   },
   currentOp: undefined,
-  lastError: undefined
+  lastError: undefined,
+  diskFreeBytes: undefined
 }
 
 const cfImager = computed<CfImagerSnapshot>(() => {
@@ -514,7 +518,8 @@ const cfImager = computed<CfImagerSnapshot>(() => {
     device: slice.device,
     fs,
     currentOp: slice.currentOp,
-    lastError: slice.lastError
+    lastError: slice.lastError,
+    diskFreeBytes: slice.diskFreeBytes
   }
 })
 
@@ -645,6 +650,16 @@ const sortedEntries = computed<CfImagerFsEntry[]>(() => {
 const canGoUp = computed(() => {
   const cwd = view.value.fs.cwd
   return cwd !== '.' && cwd !== '/'
+})
+
+/* -------------------------------------------------------------------------- */
+/*  Disk free display                                                         */
+/* -------------------------------------------------------------------------- */
+
+const diskFreeDisplay = computed(() => {
+  const bytes = view.value.diskFreeBytes
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return ''
+  return `${formatSize(bytes)} free`
 })
 
 /* -------------------------------------------------------------------------- */
