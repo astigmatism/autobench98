@@ -1192,7 +1192,7 @@ function resetSpeed() {
     max-width: 100%;
     background: radial-gradient(circle at top left, #fefce8 0, #fefce8 40%, #f9fafb 100%);
     border-radius: 6px;
-    padding: 8px 10px 4px 10px;
+    padding: 0px 10px;
     box-shadow:
         0 0 0 1px rgba(15, 23, 42, 0.4),
         0 10px 24px rgba(15, 23, 42, 0.7);
@@ -1227,9 +1227,10 @@ function resetSpeed() {
 
 /* Perforation strip */
 .tape-perf {
-    position: relative;
-    height: 8px;
-    margin: -8px -10px 6px;
+    position: absolute;
+    top: 0px;
+    height: 15px;
+    width: calc(100% - 20px);
     background: repeating-linear-gradient(
         to right,
         rgba(15, 23, 42, 0.25),
@@ -1258,7 +1259,7 @@ function resetSpeed() {
 
 /* Job blocks (one per job) */
 .job-block {
-    margin-bottom: 10px;
+    margin-top: 10px;
 }
 
 .job-block.current-job {
@@ -1283,7 +1284,7 @@ function resetSpeed() {
 
 /* Divider between jobs (cut line) */
 .job-divider {
-    margin-top: 10px;
+    margin-bottom: 10px;
     height: 1px;
     background: repeating-linear-gradient(
         to right,
