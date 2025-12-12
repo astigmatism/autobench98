@@ -78,7 +78,7 @@
                     </div>
 
                     <!-- Tape footer shadow (fixed to visual bottom of tape) -->
-                    <!-- <div class="tape-footer"></div> -->
+                    <div class="tape-footer"></div>
                 </div>
             </div>
 
@@ -1284,7 +1284,7 @@ function resetSpeed() {
 
 /* Divider between jobs (cut line) */
 .job-divider {
-    margin-bottom: 10px;
+    margin: 10px 0px;
     height: 1px;
     background: repeating-linear-gradient(
         to right,
