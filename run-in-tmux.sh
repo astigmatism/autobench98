@@ -17,9 +17,10 @@ fi
 # Create a new detached tmux session and run the app in a shell wrapper
 # so that if it exits, we can still see the output and exit code.
 "${TMUX_CMD[@]}" new-session -d -s "$SESSION_NAME" \
-  "cd '$HOME/autobench98' && \
-   ./linux-start.sh --no-env-ask; \
+  "cd /home/astigmatism/autobench98 && \
+   /home/astigmatism/autobench98/linux-start.sh --no-env-ask; \
+   EXIT_CODE=\$?; \
    echo; \
-   echo \"linux-start.sh exited with code \$?\"; \
+   echo \"linux-start.sh exited with code \$EXIT_CODE\"; \
    echo \"Press Enter to close this window...\"; \
    read"
