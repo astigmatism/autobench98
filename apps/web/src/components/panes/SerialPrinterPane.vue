@@ -407,6 +407,15 @@ const isStreaming = computed(() => {
     return pendingText.value.length > 0 || jobQueue.value.length > 0
 })
 
+/**
+ * Tracks whether we've already hydrated the tape from the initial snapshot.
+ * Also tracks which job IDs have already been fully realized on the tape
+ * (either via hydration or streaming), so we never re-enqueue them.
+ */
+const hasHydratedFromSnapshot = ref(false)
+// Non-reactive Set is fine; we only use it for guards.
+const realizedJobIds = new Set<number>()
+
 /* Typing speed configuration (env-driven defaults, user-overridable) */
 const DEFAULT_TYPING_INTERVAL_MS = 30
 const DEFAULT_CHARS_PER_TICK = 3
@@ -515,6 +524,56 @@ function trimTapeIfNeeded() {
 }
 
 /**
+ * Hydrate the tape from the backend snapshot:
+ * - Use printer.history (full text for older jobs)
+ * - Use lastJobFullText for the most recent job, if available
+ * This runs once per component lifecycle, and builds the initial
+ * non-animated tape state so refreshes don't re-stream old jobs.
+ */
+function hydrateTapeFromSnapshot(snapshot: SerialPrinterSnapshotView) {
+    tapeSegments.value = []
+    realizedJobIds.clear()
+
+    const history = snapshot.history ?? []
+    for (const entry of history) {
+        if (!entry || !entry.text) continue
+        tapeSegments.value.push({ id: entry.id, text: entry.text })
+        realizedJobIds.add(entry.id)
+    }
+
+    const lastJob = snapshot.lastJob
+    const lastText = snapshot.lastJobFullText
+
+    if (lastJob && lastText && lastText.length > 0 && !realizedJobIds.has(lastJob.id)) {
+        tapeSegments.value.push({ id: lastJob.id, text: lastText })
+        realizedJobIds.add(lastJob.id)
+    }
+
+    trimTapeIfNeeded()
+}
+
+/**
+ * Ensure hydration happens exactly once, and only when we actually
+ * have historical data (or a last job) to show.
+ */
+function ensureHydratedFromSnapshot() {
+    if (hasHydratedFromSnapshot.value) return
+
+    const snap = printer.value
+    const hasAnyJobs =
+        (snap.stats?.totalJobs ?? 0) > 0 ||
+        (snap.history?.length ?? 0) > 0 ||
+        !!snap.lastJob
+
+    if (!hasAnyJobs) {
+        return
+    }
+
+    hydrateTapeFromSnapshot(snap)
+    hasHydratedFromSnapshot.value = true
+}
+
+/**
  * Immediately flush all currently pending/queued jobs into the tape with
  * no animation. Used when fastForwardToLatest is enabled and a new job
  * arrives while older ones are still streaming.
@@ -540,6 +599,7 @@ function flushBacklogToTapeSync() {
                 tapeSegments.value.push(last)
             }
             last.text += job.text
+            realizedJobIds.add(job.id)
         }
         jobQueue.value = []
     }
@@ -606,6 +666,7 @@ function startTypingTimer() {
                 tapeSegments.value.push(last)
             }
             last.text += chunk
+            realizedJobIds.add(activeJobId.value)
         } else {
             // Safety fallback: no active job id; treat as anonymous segment
             if (!tapeSegments.value.length) {
@@ -636,27 +697,54 @@ function startTypingTimer() {
     }, Math.max(1, currentIntervalMs.value || 1)) as unknown as number
 }
 
-/* Track the last job id we’ve already enqueued for streaming */
-const lastEnqueuedJobId = ref<number | null>(null)
+/* -------------------------------------------------------------------------- */
+/*  Initial hydration watch                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Watch the snapshot for the first sign of historical data (or a last job),
+ * then hydrate exactly once.
+ */
+watch(
+    () => ({
+        totalJobs: printer.value.stats.totalJobs,
+        historyLen: printer.value.history.length,
+        lastJobId: printer.value.lastJob?.id ?? null,
+    }),
+    () => {
+        ensureHydratedFromSnapshot()
+    },
+    { immediate: true }
+)
+
+/* -------------------------------------------------------------------------- */
+/*  Job-completed → streaming bridge                                         */
+/* -------------------------------------------------------------------------- */
 
 /**
  * Whenever the backend reports a new completed job (via lastJob),
  * enqueue its full text for streaming.
  *
- * If another job arrives while we’re still streaming, we either:
- *  - (fastForwardToLatest=false) enqueue and let backlog speed handle it, or
- *  - (fastForwardToLatest=true) flush backlog instantly and focus on the latest job.
+ * IMPORTANT:
+ *  - We ignore lastJob updates until after initial hydration, so a refresh
+ *    never replays old jobs.
+ *  - We also guard with realizedJobIds so we never enqueue the same job twice.
  */
 watch(
     () => printer.value.lastJob,
     (job) => {
         if (!job) return
 
-        if (lastEnqueuedJobId.value === job.id) {
+        // Don’t react to lastJob until we’ve hydrated from the snapshot.
+        if (!hasHydratedFromSnapshot.value) {
             return
         }
 
-        lastEnqueuedJobId.value = job.id
+        // If we have already realized this job on the tape (via hydration or
+        // a previous stream), do nothing.
+        if (realizedJobIds.has(job.id)) {
+            return
+        }
 
         const text =
             printer.value.lastJobFullText != null
@@ -664,6 +752,8 @@ watch(
                 : job.preview ?? ''
 
         if (!text) return
+
+        realizedJobIds.add(job.id)
 
         const newJob: QueuedJob = { id: job.id, text }
 
@@ -783,6 +873,8 @@ onBeforeUnmount(() => {
     pendingText.value = ''
     jobQueue.value = []
     activeJobId.value = null
+    realizedJobIds.clear()
+    hasHydratedFromSnapshot.value = false
 })
 
 /* -------------------------------------------------------------------------- */
@@ -966,7 +1058,7 @@ function resetSpeed() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Ready / Spooling / Printing / Queued                                */
+/* Ready / Spooling / Printing / Queued                               */
 /* ------------------------------------------------------------------ */
 
 /* READY → phase='connected' (green, mirrors CF "Media Ready") */
@@ -987,7 +1079,7 @@ function resetSpeed() {
     background: #38bdf8;
 }
 
-/* PRINTING → phase='receiving' while streaming (also yellow, CF "Busy") */
+/* PRINTING → phase='receiving' while streaming (yellow, like CF "Busy") */
 .status-badge[data-phase='receiving'][data-streaming='true'] {
     border-color: #facc15;
     background: #3b2900;
@@ -996,10 +1088,25 @@ function resetSpeed() {
     background: #facc15;
 }
 
-/* Make the dot pulse while SPOOLING or PRINTING */
+/* Pulsing dot for spooling/printing (CF-style: scale + opacity) */
+@keyframes pulse-dot {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.35);
+        opacity: 0.4;
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
 .status-badge[data-phase='receiving'][data-streaming='false'] .dot,
 .status-badge[data-phase='receiving'][data-streaming='true'] .dot {
-    animation: pulse-dot 1.1s ease-in-out infinite;
+    animation: pulse-dot 900ms ease-in-out infinite;
 }
 
 /* Optional: keep queued distinct (purple) */
@@ -1230,25 +1337,6 @@ function resetSpeed() {
     }
     100% {
         transform: translateY(0);
-    }
-}
-
-/* Pulsing dot for busy/printing states */
-@keyframes pulse-dot {
-    0% {
-        transform: scale(1);
-        opacity: 1;
-        box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.6);
-    }
-    50% {
-        transform: scale(1.25);
-        opacity: 0.75;
-        box-shadow: 0 0 0 4px rgba(250, 204, 21, 0);
-    }
-    100% {
-        transform: scale(1);
-        opacity: 1;
-        box-shadow: 0 0 0 0 rgba(250, 204, 21, 0);
     }
 }
 
