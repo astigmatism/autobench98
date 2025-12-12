@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION_NAME="autobench98"
+
+cd "$HOME/autobench98"
+
+# If the tmux session already exists, exit quietly
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  echo "tmux session '$SESSION_NAME' already exists; nothing to do."
+  exit 0
+fi
+
+# Create a new detached tmux session and run the app
+tmux new-session -d -s "$SESSION_NAME" "./linux-start.sh --no-env-ask"
