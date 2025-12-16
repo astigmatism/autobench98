@@ -234,7 +234,7 @@
             v-if="overlayActive"
             class="cf-modal-backdrop"
           >
-            <!-- General-purpose modal dialog (new folder / rename / delete / read-name) -->
+            <!-- General-purpose modal dialog (new folder / rename / delete / read-name / write-confirm) -->
             <div
               v-if="modalVisible"
               class="cf-modal"
@@ -255,7 +255,7 @@
               </h3>
 
               <div class="cf-modal-body">
-                <!-- Message-only mode (e.g., delete confirmation) -->
+                <!-- Message-only mode (e.g., delete / write confirmation) -->
                 <p
                   v-if="!modalHasInput && modalMessage"
                   class="cf-modal-message"
@@ -782,7 +782,13 @@ const canWriteImage = computed(() => isMediaReady.value && hasSelectedFile.value
 /*  Modal dialog state (general-purpose)                                      */
 /* -------------------------------------------------------------------------- */
 
-type ModalMode = 'new-folder' | 'rename' | 'delete' | 'read-image' | 'generic'
+type ModalMode =
+  | 'new-folder'
+  | 'rename'
+  | 'delete'
+  | 'read-image'
+  | 'write-confirm'
+  | 'generic'
 
 const modalVisible = ref(false)
 const modalMode = ref<ModalMode>('generic')
@@ -790,6 +796,14 @@ const modalTitle = ref('')
 const modalMessage = ref('')
 const modalInput = ref('')
 const modalInputRef = ref<HTMLInputElement | null>(null)
+
+/**
+ * Pending state for write confirmation:
+ * - cwd where the selected image resides
+ * - fileName (without any hidden extension munging; this is what the backend expects)
+ */
+const pendingWriteCwd = ref<string | null>(null)
+const pendingWriteFileName = ref<string | null>(null)
 
 const modalHasInput = computed(
   () =>
@@ -846,10 +860,33 @@ function openReadImageModal() {
   modalVisible.value = true
 }
 
+/**
+ * Write confirmation modal:
+ * - message-only (no input)
+ * - Enter = confirm, Escape = cancel
+ */
+function openWriteConfirmModal(cwd: string, fileName: string) {
+  pendingWriteCwd.value = cwd
+  pendingWriteFileName.value = fileName
+  modalMode.value = 'write-confirm'
+  modalTitle.value = 'Write image to CF media'
+
+  const devicePath = view.value.device?.path ?? 'the attached CF reader'
+  modalMessage.value =
+    `Write “${fileName}” to the CF card at ${devicePath}? ` +
+    'This will permanently overwrite all data on the card.'
+
+  modalInput.value = ''
+  modalVisible.value = true
+}
+
 function closeModal() {
   modalVisible.value = false
   // If user cancels, ensure we don't leave a sticky overlay around
   stickyOverlay.value = false
+  // Clear any pending write state on close
+  pendingWriteCwd.value = null
+  pendingWriteFileName.value = null
 }
 
 /* -------------------------------------------------------------------------- */
@@ -904,6 +941,31 @@ function confirmModal() {
       newName: trimmed
     })
     closeModal()
+    return
+  }
+
+  if (modalMode.value === 'write-confirm') {
+    const cwd = pendingWriteCwd.value
+    const fileName = pendingWriteFileName.value
+
+    if (!cwd || !fileName) {
+      // Defensive: nothing to act on, just close.
+      closeModal()
+      return
+    }
+
+    // Immediately block the UI while we wait for backend to flip to busy/currentOp
+    stickyOverlay.value = true
+
+    sendCfImagerCommand('writeImage', {
+      cwd,
+      fileName
+    })
+
+    // Clear pending state; keep backdrop via stickyOverlay
+    pendingWriteCwd.value = null
+    pendingWriteFileName.value = null
+    modalVisible.value = false
     return
   }
 
@@ -1046,15 +1108,8 @@ function onWriteImageClick() {
     return
   }
 
-  // Same UX as read: block UI between command send and progress modal
-  stickyOverlay.value = true
-
-  sendCfImagerCommand('writeImage', {
-    cwd,
-    fileName
-  })
-
-  // No dialog to close here, but overlayActive stays true via stickyOverlay
+  // Show confirmation modal instead of firing the command directly.
+  openWriteConfirmModal(cwd, fileName)
 }
 
 /* -------------------------------------------------------------------------- */
