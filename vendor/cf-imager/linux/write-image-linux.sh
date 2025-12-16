@@ -24,8 +24,12 @@ export PATH="/usr/sbin:/sbin:$PATH"
 # Notes:
 #   - Non-interactive: no prompts.
 #   - DEVICE_PATH should be the whole CF device node (e.g. /dev/sda).
-#   - The image is assumed to contain its own partition table; we write it
-#     to the device as a whole, not to a single existing partition.
+#   - The image is assumed to contain the contents of a single partition, while
+#     the matching .part file holds the partition table. On write, we:
+#       * apply the partition table (if available) via sfdisk
+#       * write the image into the first partition on the device
+#     If the .part file is missing or sfdisk is unavailable, we fall back to
+#     writing directly to the whole device (previous behavior).
 #   - Safety check: ensure image size <= total capacity of the target device.
 #   - Progress:
 #       * Uses `pv -n -s TOTAL_BYTES` to emit a numeric percentage to stderr.
@@ -43,7 +47,7 @@ SRC_IMG="$1"
 DEVICE="$2"
 PART_TABLE="${3:-}"
 
-# Keep the third arg for future parity with read scripts; not used currently.
+# Keep the third arg for parity with read scripts.
 if [[ -z "$PART_TABLE" ]]; then
   PART_TABLE="${SRC_IMG%.img}.part"
 fi
@@ -203,10 +207,53 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Apply partition table from .part (if present) and determine write target.
+#
+# If we successfully apply the .part via sfdisk, we look up the first
+# partition node and write the image into that partition. This mirrors the
+# read script behavior (imaging a single partition + saving the layout).
+#
+# If .part is missing or sfdisk is unavailable, we fall back to writing
+# to the whole device (previous behavior).
+# ---------------------------------------------------------------------------
+
+TARGET="$DEVICE"
+
+if [[ -f "$PART_TABLE" ]]; then
+  if command -v sfdisk >/dev/null 2>&1; then
+    log "Applying partition table from '${PART_TABLE}' to '${DEVICE}'"
+    if ! sfdisk "$DEVICE" < "$PART_TABLE"; then
+      log "ERROR: failed to apply partition table from '${PART_TABLE}' to '${DEVICE}'"
+      exit 1
+    fi
+
+    # After re-partitioning, locate the first partition and treat it as the
+    # primary write target, matching the semantics of the read script.
+    if command -v lsblk >/dev/null 2>&1; then
+      first_part="$(
+        lsblk -lnpo NAME,TYPE "$DEVICE" 2>/dev/null | awk '$2=="part" {print $1; exit}'
+      )"
+      if [[ -n "$first_part" ]]; then
+        TARGET="$first_part"
+        log "Writing image into first partition ${TARGET}"
+      else
+        log "WARNING: no partitions visible on ${DEVICE} after applying table; writing to whole device"
+      fi
+    else
+      log "WARNING: lsblk not available; cannot locate partition node; writing to whole device"
+    fi
+  else
+    log "WARNING: sfdisk not found; cannot apply partition table file '${PART_TABLE}'"
+  fi
+else
+  log "WARNING: partition table file '${PART_TABLE}' not found; using existing layout on ${DEVICE}"
+fi
+
+# ---------------------------------------------------------------------------
 # Run pv and stream progress.
 #
 # We use:
-#   pv -n -s TOTAL_BYTES "$SRC_IMG" > "$DEVICE"
+#   pv -n -s TOTAL_BYTES "$SRC_IMG" > "$TARGET"
 #
 # - `-n` makes pv emit a bare numeric percentage (0–100) to stderr.
 # - `-s TOTAL_BYTES` gives pv the total size for ETA and accurate percent.
@@ -219,7 +266,7 @@ fi
 copy_rc=0
 
 {
-  pv -n -s "$TOTAL_BYTES" "$SRC_IMG" > "$DEVICE"
+  pv -n -s "$TOTAL_BYTES" "$SRC_IMG" > "$TARGET"
   copy_rc=$?
 } 2> >(
   while IFS= read -r line; do

@@ -232,5 +232,14 @@ fi
 
 sync || true
 
+# ---------------------------------------------------------------------------
+# NEW: Save the partition table to a .part file next to the .img
+# ---------------------------------------------------------------------------
+
+log "Saving partition table for '$DEVICE' to '$PART_TABLE'"
+if ! diskutil list "$DEVICE" > "$PART_TABLE" 2>/dev/null; then
+  log "WARNING: failed to write partition table to $PART_TABLE"
+fi
+
 echo "READ_COMPLETE dest=${DEST_IMG}"
 exit 0

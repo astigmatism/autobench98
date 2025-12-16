@@ -20,8 +20,8 @@ set -euo pipefail
 # Notes:
 #   - Non-interactive: no prompts.
 #   - DEVICE_PATH should normally be the whole disk node (e.g. /dev/disk6).
-#   - The image is assumed to contain its own partition table; we write it
-#     to the device as a whole, not to an existing partition slice.
+#   - The image is assumed to contain its own filesystem contents; the
+#     Linux workflow can additionally use a .part sidecar for geometry.
 #   - Safety check: ensure image size <= total capacity of the target device.
 
 log() { printf '[cf-write-macos] %s\n' "$*" >&2; }
@@ -150,6 +150,23 @@ echo "CAPACITY bytes=${TOTAL_BYTES}"
 # ---------------------------------------------------------------------------
 
 echo "BEGIN_WRITE source=${SRC_IMG} dest=${DEVICE}"
+
+# ---------------------------------------------------------------------------
+# Partition-table sidecar handling (informational on macOS).
+#
+# On Linux, the .part file is an sfdisk-compatible dump and the write script
+# can reapply it. There is no direct, safe macOS analog for that format, so
+# we *do not* attempt to auto-apply it here. Instead, we log its presence and
+# rely on the disk already being partitioned appropriately.
+# ---------------------------------------------------------------------------
+
+if [[ -f "$PART_TABLE" ]]; then
+  log "Partition table sidecar '${PART_TABLE}' found."
+  log "NOTE: write-image-macos.sh does not automatically apply this file."
+  log "      Ensure ${BASE_DEV} is pre-partitioned to match the original layout."
+else
+  log "WARNING: partition table sidecar '${PART_TABLE}' not found; proceeding with existing layout on ${BASE_DEV}"
+fi
 
 # ---------------------------------------------------------------------------
 # Unmount the whole disk so dd doesn't hit 'Resource busy'

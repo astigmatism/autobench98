@@ -208,5 +208,33 @@ fi
 
 sync || true
 
+# ---------------------------------------------------------------------------
+# Save the partition table to a .part file next to the .img
+# ---------------------------------------------------------------------------
+
+if command -v sfdisk >/dev/null 2>&1; then
+  # Determine the parent disk device for the partition/device we imaged
+  DISK_DEV="$DEVICE"
+
+  if [[ "$DEVICE" =~ [0-9]$ ]]; then
+    base="${DEVICE#/dev/}"
+    if [[ "$base" =~ ^nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+      # /dev/nvme0n1p1 -> /dev/nvme0n1
+      DISK_DEV="/dev/${base%p[0-9]*}"
+    else
+      # /dev/sda1 -> /dev/sda
+      DISK_DEV="/dev/${base%%[0-9]*}"
+    fi
+  fi
+
+  log "Saving partition table from '$DISK_DEV' to '$PART_TABLE'"
+
+  if ! sfdisk -d "$DISK_DEV" > "$PART_TABLE" 2>/dev/null; then
+    log "WARNING: failed to write partition table to $PART_TABLE"
+  fi
+else
+  log "NOTE: sfdisk not found; skipping partition table dump"
+fi
+
 echo "READ_COMPLETE dest=${DEST_IMG}"
 exit 0

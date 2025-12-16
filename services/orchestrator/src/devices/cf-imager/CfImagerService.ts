@@ -263,6 +263,103 @@ export class CfImagerService {
             const fromAbs = resolveUnderRoot(this.config.rootDir, fromRel)
             const toAbs = resolveUnderRoot(this.config.rootDir, toRel)
 
+            const fromDir = dirname(fromAbs)
+            const toDir = dirname(toAbs)
+            const fromBase = basename(fromAbs)
+            const toBase = basename(toAbs)
+
+            const isFromImgPath = fromBase.toLowerCase().endsWith('.img')
+            const isToImgPath = toBase.toLowerCase().endsWith('.img')
+
+            // Small helper: existence check without throwing
+            const pathExists = async (p: string): Promise<boolean> => {
+                try {
+                    await fsp.stat(p)
+                    return true
+                } catch (err) {
+                    const e = err as NodeJS.ErrnoException
+                    if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) {
+                        return false
+                    }
+                    throw err
+                }
+            }
+
+            // -------------------------------------------------------------------
+            // Image-group aware branch:
+            //
+            // We want to treat "<name>.img" and "<name>.part" as a logical unit,
+            // regardless of whether fromRel/toRel include ".img" explicitly or
+            // are extensionless UI names.
+            // -------------------------------------------------------------------
+
+            // Candidates derived from the *base* name (handles extensionless UI).
+            const imgFromBase = join(fromDir, `${fromBase}.img`)
+            const partFromBase = join(fromDir, `${fromBase}.part`)
+
+            const imgFromBaseExists = await pathExists(imgFromBase)
+            const partFromBaseExists = await pathExists(partFromBase)
+
+            // Decide what we’re actually renaming for the image payload:
+            const fromImgAbs =
+                isFromImgPath
+                    ? fromAbs
+                    : imgFromBaseExists
+                    ? imgFromBase
+                    : null
+
+            const fromPartAbs =
+                isFromImgPath
+                    ? fromAbs.replace(/\.img$/i, '.part')
+                    : partFromBaseExists
+                    ? partFromBase
+                    : null
+
+            const toImgAbs =
+                isToImgPath
+                    ? toAbs
+                    : join(toDir, `${toBase}.img`)
+
+            const toPartAbs = toImgAbs.replace(/\.img$/i, '.part')
+
+            const isImageGroupRename = !!fromImgAbs || !!fromPartAbs
+
+            if (isImageGroupRename) {
+                // Safeguard: do not overwrite existing targets for either .img or .part.
+                if (fromImgAbs && toImgAbs !== fromImgAbs && (await pathExists(toImgAbs))) {
+                    // Target .img already exists – silently no-op per UI contract.
+                    return
+                }
+                if (fromPartAbs && toPartAbs !== fromPartAbs && (await pathExists(toPartAbs))) {
+                    // Target .part already exists – silently no-op.
+                    return
+                }
+
+                // Rename .img payload if present.
+                if (fromImgAbs && (await pathExists(fromImgAbs))) {
+                    await fsp.rename(fromImgAbs, toImgAbs)
+                }
+
+                // Rename .part sidecar if present.
+                if (fromPartAbs && (await pathExists(fromPartAbs))) {
+                    try {
+                        await fsp.rename(fromPartAbs, toPartAbs)
+                    } catch {
+                        // If the .part rename fails, we don’t fail the entire op;
+                        // worst case, the sidecar is left behind.
+                    }
+                }
+
+                await this.emitFsUpdated()
+                return
+            }
+
+            // -------------------------------------------------------------------
+            // Generic fallback:
+            // - Non-image files/folders.
+            // - Behavior: do not overwrite existing targets, then rename.
+            // -------------------------------------------------------------------
+
             // Silently reject if the target already exists (file or directory).
             // We do this before attempting the rename so we don't overwrite.
             try {
@@ -278,28 +375,15 @@ export class CfImagerService {
                 }
             }
 
-            // Rename main path
+            // Simple rename (no image-group semantics)
             await fsp.rename(fromAbs, toAbs)
-
-            // If this is a .img rename, also handle .part companion.
-            const fromBase = basename(fromAbs)
-            const toBase = basename(toAbs)
-
-            if (fromBase.toLowerCase().endsWith('.img')) {
-                const fromPart = fromAbs.replace(/\.img$/i, '.part')
-                const toPart = toAbs.replace(/\.img$/i, '.part')
-                try {
-                    await fsp.rename(fromPart, toPart)
-                } catch {
-                    // .part may not exist; silently ignore.
-                }
-            }
 
             await this.emitFsUpdated()
         } catch (err) {
             this.emitError(`renamePath failed: ${(err as Error).message}`)
         }
     }
+
 
     public async deletePath(relPath: string): Promise<void> {
         // console.log('[cf-imager] deletePath', { relPath })
@@ -389,6 +473,7 @@ export class CfImagerService {
             this.emitError(`deletePath failed: ${(err as Error).message}`)
         }
     }
+
 
     /* ---------------------------------------------------------------------- */
     /*  Imaging operations (write now wired, read already wired)              */
