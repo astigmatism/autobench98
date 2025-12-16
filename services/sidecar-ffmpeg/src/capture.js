@@ -76,20 +76,20 @@ function parseFfmpegOutputLine(line) {
 /**
  * Broadcast a single JPEG frame buffer to all connected clients.
  *
- * Safety addition:
- * - If res.write() returns false for a client (backpressure), we log and
- *   proactively close that client to avoid unbounded buffering for slow
- *   connections.
- * Screenshot support:
- * - We cache the most recent frame in state.capture.lastFrame so /screenshot
- *   can serve it on demand.
+ * We:
+ * - Update lastFrame / lastFrameTs for screenshot support.
+ * - Write the multipart chunk to each connected client.
+ * - Only drop clients on actual errors or if their socket is closed.
+ *
+ * We deliberately DO NOT drop clients just because res.write() returns false;
+ * for your expected client counts (a handful of viewers), Node and the OS
+ * can handle backpressure without us aggressively killing connections.
  */
 function broadcastFrame(frameBuffer) {
   const now = Date.now();
   state.capture.lastFrameTs = now;
 
   // Cache the most recent frame for screenshot/lastFrame use.
-  // We copy the buffer so later mutations can't affect the cache.
   state.capture.lastFrame = Buffer.from(frameBuffer);
 
   if (streamClients.size === 0) {
@@ -108,29 +108,12 @@ function broadcastFrame(frameBuffer) {
       continue;
     }
 
-    let ok = true;
-
     try {
-      ok = res.write(header);
-      if (ok) ok = res.write(frameBuffer);
-      if (ok) ok = res.write(footer);
+      res.write(header);
+      res.write(frameBuffer);
+      res.write(footer);
     } catch (err) {
       console.error(`[capture] Failed to write frame to client ${id}:`, err);
-      try {
-        res.end();
-      } catch (_) {
-        // ignore
-      }
-      streamClients.delete(client);
-      continue;
-    }
-
-    if (!ok) {
-      // Backpressure detected; proactively drop this client to avoid
-      // buffering frames in Node for a slow consumer.
-      console.warn(
-        `[capture] Backpressure detected for client ${id}, closing stream to protect performance`
-      );
       try {
         res.end();
       } catch (_) {
