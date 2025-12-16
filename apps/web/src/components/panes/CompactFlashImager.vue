@@ -315,6 +315,12 @@
                 <p class="cf-modal-message" v-if="opPathsDisplay">
                   {{ opPathsDisplay }}
                 </p>
+                <p
+                  v-if="opFinalizingMessage"
+                  class="cf-modal-message cf-modal-message--finalizing"
+                >
+                  {{ opFinalizingMessage }}
+                </p>
 
                 <div class="cf-modal-progress-block">
                   <div class="cf-modal-progress-bar">
@@ -626,7 +632,8 @@ const opEtaDisplay = computed(() => {
 
   const remainingBytes = bytesTotal - bytesDone
   if (remainingBytes <= 0) {
-    return '0s'
+    // At this point we're effectively in the "finalizing" phase; hide ETA.
+    return ''
   }
 
   const seconds = remainingBytes / bytesPerSec
@@ -635,6 +642,21 @@ const opEtaDisplay = computed(() => {
   }
 
   return formatEta(seconds)
+})
+
+/**
+ * Finalizing message shown when a write op reports 100% but the phase
+ * is still "busy" (kernel / device is flushing the tail of the write).
+ */
+const opFinalizingMessage = computed(() => {
+  const op = view.value.currentOp
+  if (!op || op.kind !== 'write') return ''
+  const pct = progressPctDisplay.value
+  if (!Number.isFinite(pct)) return ''
+  if (view.value.phase === 'busy' && pct >= 100) {
+    return 'Finalizing write to CF card… Please wait; it is not yet safe to remove the card.'
+  }
+  return ''
 })
 
 const sortedEntries = computed<CfImagerFsEntry[]>(() => {
@@ -1711,6 +1733,12 @@ function formatEta(totalSeconds: number): string {
   opacity: 0.95;
 }
 
+.cf-modal-message--finalizing {
+  margin-top: 2px;
+  font-size: 0.78rem;
+  opacity: 0.9;
+}
+
 .cf-modal-field {
   display: flex;
   flex-direction: column;
@@ -1850,6 +1878,7 @@ function formatEta(totalSeconds: number): string {
 .cf-modal-stat-row .value {
   text-align: right;
 }
+
 .monospace {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     'Courier New', monospace;
