@@ -176,7 +176,9 @@ npm install
 
 ...and more:
 
+sudo apt-get update
 sudo apt-get install pv
+sudo apt-get install -y ffmpeg
 
 read the linux-disk-access doc!
 read the linux-tmux-guide doc!

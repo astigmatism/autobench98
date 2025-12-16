@@ -1,19 +1,16 @@
 {
-  "name": "autobench98-sidecar-ffmpeg",
+  "name": "sidecar-ffmpeg",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
+  "description": "FFmpeg sidecar service for AutoBench98",
   "main": "src/server.js",
   "scripts": {
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "dev": "NODE_ENV=development node src/server.js"
   },
   "dependencies": {
-    "@autobench98/logging": "0.0.2",
-    "@fastify/cors": "^10.0.0",
-    "@fastify/websocket": "^11.0.0",
-    "fastify": "^5.0.0",
-    "pino": "^9.0.0",
-    "pino-pretty": "^11.3.0"
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
