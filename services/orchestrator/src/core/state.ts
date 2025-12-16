@@ -108,7 +108,6 @@ export type SerialPrinterSnapshot = {
     maxRecentJobs: number
 }
 
-
 /* -------------------------------------------------------------------------- */
 /*  Atlona controller snapshot                                                */
 /* -------------------------------------------------------------------------- */
@@ -134,6 +133,34 @@ export type CfImagerMediaSnapshot = CfImagerMediaStatus
 // (already named CfImagerSnapshot in the import)
 
 /* -------------------------------------------------------------------------- */
+/*  Sidecar snapshot                                                          */
+/* -------------------------------------------------------------------------- */
+
+export type SidecarSnapshot = {
+    // Raw env values (for debug/inspection in the UI if needed).
+    host: string
+    port: number
+
+    // Canonical base URL as seen from the orchestrator host.
+    // NOTE: This may or may not be directly usable from the browser depending
+    // on how Studio is hosted; the frontend can still choose to ignore it.
+    baseUrl: string
+
+    // Path for the MJPEG stream on the sidecar.
+    streamPath: string
+
+    // Convenience, fully combined URL (baseUrl + streamPath).
+    // Frontend panes can use this directly if it matches their hosting model,
+    // or override/ignore it if the orchestrator proxies /stream differently.
+    streamUrl: string
+
+    // Lightweight health/status; initially unknown.
+    status: 'unknown' | 'up' | 'down'
+    lastCheckedAt: number | null
+    lastError?: string
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Full AppState                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -147,6 +174,7 @@ export type AppState = {
     serialPrinter: SerialPrinterSnapshot
     atlonaController: AtlonaControllerSnapshot
     cfImager: CfImagerSnapshot
+    sidecar: SidecarSnapshot
 }
 
 /* -------------------------------------------------------------------------- */
@@ -175,7 +203,10 @@ function bool(v: unknown, def: boolean): boolean {
 }
 function csv(v: unknown): string[] {
     if (typeof v !== 'string') return []
-    return v.split(',').map(s => s.trim()).filter(Boolean)
+    return v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
 }
 
 /* -------------------------------------------------------------------------- */
@@ -197,6 +228,14 @@ const WS_RECONNECT_JITTER = num(process.env.VITE_WS_RECONNECT_JITTER, 0.2)
 
 // How many full-text jobs to keep in memory/server snapshots
 const SERIAL_PRINTER_HISTORY_LIMIT = num(process.env.SERIAL_PRINTER_HISTORY_LIMIT, 10)
+
+// Sidecar env-derived defaults
+const SIDECAR_HOST = (process.env.SIDECAR_HOST || '127.0.0.1').trim()
+const SIDECAR_PORT = num(process.env.SIDECAR_PORT, 3100)
+// For now the sidecar only promises /stream; screenshot/recordings are separate.
+const SIDECAR_STREAM_PATH = '/stream'
+const SIDECAR_BASE_URL = `http://${SIDECAR_HOST}:${SIDECAR_PORT}`
+const SIDECAR_STREAM_URL = `${SIDECAR_BASE_URL}${SIDECAR_STREAM_PATH}`
 
 const startedAt = new Date().toISOString()
 
@@ -274,6 +313,21 @@ const initialCfImager: CfImagerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Initial Sidecar slice                                                     */
+/* -------------------------------------------------------------------------- */
+
+const initialSidecar: SidecarSnapshot = {
+    host: SIDECAR_HOST,
+    port: SIDECAR_PORT,
+    baseUrl: SIDECAR_BASE_URL,
+    streamPath: SIDECAR_STREAM_PATH,
+    streamUrl: SIDECAR_STREAM_URL,
+    status: 'unknown',
+    lastCheckedAt: null,
+    lastError: undefined,
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initial full state                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -303,6 +357,7 @@ let state: AppState = {
     serialPrinter: initialSerialPrinter,
     atlonaController: initialAtlonaController,
     cfImager: initialCfImager,
+    sidecar: initialSidecar,
 }
 
 /* -------------------------------------------------------------------------- */
@@ -529,4 +584,21 @@ export function updateCfImagerSnapshot(partial: {
     }
 
     set('cfImager', merged)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Sidecar update helpers                                                    */
+/* -------------------------------------------------------------------------- */
+
+export function setSidecarSnapshot(next: SidecarSnapshot) {
+    set('sidecar', next)
+}
+
+export function updateSidecarSnapshot(partial: Partial<SidecarSnapshot>) {
+    const prev = state.sidecar
+    const merged: SidecarSnapshot = {
+        ...prev,
+        ...partial,
+    }
+    set('sidecar', merged)
 }
