@@ -654,7 +654,7 @@ const opFinalizingMessage = computed(() => {
   const pct = progressPctDisplay.value
   if (!Number.isFinite(pct)) return ''
   if (view.value.phase === 'busy' && pct >= 100) {
-    return 'Finalizing write to CF card… Please wait; it is not yet safe to remove the card.'
+    return 'Finalizing write. Please wait...'
   }
   return ''
 })
