@@ -1,4 +1,4 @@
-<!-- apps/web/src/panes/Stream.vue -->
+<!-- apps/web/src/panes/StreamPane.vue -->
 <template>
     <div class="stream-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
         <!-- Hotspot region: only hovering here shows the advanced controls button -->
@@ -125,19 +125,21 @@ type PaneInfo = {
 
 /**
  * NOTE:
- * We deliberately do NOT take a streamSrc prop here.
- * The stream URL is derived from the AppState sidecar slice:
+ * We do NOT take a streamSrc prop.
+ * The stream URL is derived from the AppState sidecar slice, plus
+ * the browser's own hostname:
  *
- *   mirror.data.sidecar.streamUrl
- *
- * which is hydrated from orchestrator env in core/state.ts.
+ *   window.location.hostname + ":" + sidecar.port + sidecar.streamPath
  */
 const props = defineProps<{
     pane?: PaneInfo
 }>()
 
-/** Minimal local view of the sidecar slice we care about. */
+/** Local view of the sidecar slice we care about. */
 type SidecarSnapshot = {
+    host?: string
+    port?: number
+    streamPath?: string
     streamUrl?: string
     status?: 'unknown' | 'up' | 'down'
 }
@@ -151,11 +153,39 @@ const sidecar = computed<SidecarSnapshot | undefined>(() => {
     return raw as SidecarSnapshot
 })
 
-/** Resolved stream src: sidecar.streamUrl → fallback to "/stream". */
+/**
+ * Resolved stream src:
+ * 1) If sidecar.streamUrl is present and NOT built on 0.0.0.0/::, use it.
+ * 2) Otherwise, build URL from current window.location.hostname and sidecar.port.
+ * 3) Fallback: "/stream" (in case we later proxy through orchestrator).
+ */
 const resolvedStreamSrc = computed(() => {
-    const u = sidecar.value?.streamUrl
-    if (typeof u === 'string' && u.trim().length > 0) return u.trim()
-    return '/stream'
+    const sc = sidecar.value
+    const rawUrl = sc?.streamUrl
+
+    // If server provided a usable URL (not 0.0.0.0 / ::), prefer it.
+    if (typeof rawUrl === 'string' && rawUrl.trim().length > 0) {
+        const u = rawUrl.trim()
+        const bad =
+            u.includes('://0.0.0.0') ||
+            u.includes('://[::]') ||
+            u.includes('://::')
+        if (!bad) return u
+        // otherwise fall through and compute client-side
+    }
+
+    const port = sc?.port ?? 3100
+    const path = sc?.streamPath ?? '/stream'
+
+    try {
+        const loc = window.location
+        const host = loc.hostname || 'localhost'
+        const proto = loc.protocol || 'http:'
+        return `${proto}//${host}:${port}${path}`
+    } catch {
+        // Very defensive fallback: relative path, in case orchestrator proxies /stream
+        return '/stream'
+    }
 })
 
 /** Optional, human-readable status label from sidecar.status. */
