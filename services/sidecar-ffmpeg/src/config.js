@@ -38,6 +38,11 @@ function envBool(name, defaultValue = false) {
 // - Fallback: 3100 (matches the launch script’s default).
 const portFromEnv = process.env.SIDECAR_PORT;
 
+// Default cap for buffered FFmpeg stdout data (in bytes).
+// This is a safety mechanism to avoid unbounded growth if frames
+// are malformed or markers are missing.
+const defaultMaxCaptureBufferBytes = 8 * 1024 * 1024; // 8 MiB
+
 const config = {
   serviceName: 'sidecar-ffmpeg',
 
@@ -46,13 +51,22 @@ const config = {
 
   env: envOrDefault('NODE_ENV', 'development'),
 
-  // Raw FFmpeg argument string, mirroring your existing orchestrator CaptureDevice.
-  // Example (from your previous work, conceptually):
-  //   FFMPEG_ARGS="-f v4l2 -input_format yuyv422 -framerate 30 -video_size 1280x720 -i /dev/video0 -f mjpeg -q:v 5"
+  // Raw FFmpeg argument string, mirroring your existing CaptureDevice behavior.
+  // Example:
+  //   FFMPEG_ARGS='-f v4l2 -framerate 60 -input_format nv12 -video_size 1280x1024 -i /dev/video0 -c:v mjpeg -b:v 10M -threads auto -f mjpeg'
   ffmpegArgs: envOrDefault('FFMPEG_ARGS', ''),
 
-  // Optional: maximum number of concurrent /stream clients (0 or negative = unlimited)
+  // Maximum number of concurrent /stream clients (0 or negative = unlimited).
   maxStreamClients: Number(envOrDefault('SIDECAR_MAX_STREAM_CLIENTS', '100')),
+
+  // Safety cap on the amount of buffered stdout data from FFmpeg (bytes).
+  // If exceeded without finding a full frame, the buffer is reset and a warning logged.
+  maxCaptureBufferBytes: Number(
+    envOrDefault(
+      'SIDECAR_MAX_CAPTURE_BUFFER_BYTES',
+      String(defaultMaxCaptureBufferBytes)
+    )
+  ),
 };
 
 module.exports = {

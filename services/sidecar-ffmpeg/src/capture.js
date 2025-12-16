@@ -2,6 +2,7 @@
 // FFmpeg-based capture pipeline that reads from the configured device using
 // FFMPEG_ARGS (mirroring your existing CaptureDevice), produces MJPEG frames,
 // and fans them out to connected HTTP clients as multipart/x-mixed-replace.
+// Also maintains a lastFrame cache for optional screenshot support.
 
 const { spawn } = require('child_process');
 const { config } = require('./config');
@@ -12,6 +13,14 @@ const { state } = require('./state');
 // directly, and each part writes `--${boundary}`, which yields lines like
 // "----frameboundary". We reproduce that behavior exactly here.
 const BOUNDARY = '--frameboundary';
+
+// Safety cap for the buffered stdout data before we've sliced frames.
+// This comes from config, with a sensible default (8 MiB).
+const MAX_BUFFER_BYTES =
+  typeof config.maxCaptureBufferBytes === 'number' &&
+  !Number.isNaN(config.maxCaptureBufferBytes)
+    ? config.maxCaptureBufferBytes
+    : 8 * 1024 * 1024;
 
 // Track connected MJPEG clients: Set<{ id, req, res }>
 const streamClients = new Set();
@@ -66,15 +75,27 @@ function parseFfmpegOutputLine(line) {
 
 /**
  * Broadcast a single JPEG frame buffer to all connected clients.
+ *
+ * Safety addition:
+ * - If res.write() returns false for a client (backpressure), we log and
+ *   proactively close that client to avoid unbounded buffering for slow
+ *   connections.
+ * Screenshot support:
+ * - We cache the most recent frame in state.capture.lastFrame so /screenshot
+ *   can serve it on demand.
  */
 function broadcastFrame(frameBuffer) {
-  state.capture.lastFrameTs = Date.now();
+  const now = Date.now();
+  state.capture.lastFrameTs = now;
+
+  // Cache the most recent frame for screenshot/lastFrame use.
+  // We copy the buffer so later mutations can't affect the cache.
+  state.capture.lastFrame = Buffer.from(frameBuffer);
 
   if (streamClients.size === 0) {
     return;
   }
 
-  // Multipart chunk, mirroring your original header/body format.
   const header =
     `--${BOUNDARY}\r\n` +
     `Content-Type: image/jpeg\r\n\r\n`;
@@ -87,12 +108,29 @@ function broadcastFrame(frameBuffer) {
       continue;
     }
 
+    let ok = true;
+
     try {
-      res.write(header);
-      res.write(frameBuffer);
-      res.write(footer);
+      ok = res.write(header);
+      if (ok) ok = res.write(frameBuffer);
+      if (ok) ok = res.write(footer);
     } catch (err) {
       console.error(`[capture] Failed to write frame to client ${id}:`, err);
+      try {
+        res.end();
+      } catch (_) {
+        // ignore
+      }
+      streamClients.delete(client);
+      continue;
+    }
+
+    if (!ok) {
+      // Backpressure detected; proactively drop this client to avoid
+      // buffering frames in Node for a slow consumer.
+      console.warn(
+        `[capture] Backpressure detected for client ${id}, closing stream to protect performance`
+      );
       try {
         res.end();
       } catch (_) {
@@ -105,7 +143,8 @@ function broadcastFrame(frameBuffer) {
 
 /**
  * Handle an incoming stdout chunk from FFmpeg and slice it into frames.
- * Mirrors your frameBuffer + START/END marker logic.
+ * Mirrors your frameBuffer + START/END marker logic, with a safety cap
+ * to prevent unbounded buffer growth.
  */
 function handleStdoutChunk(chunk) {
   // Append the new chunk to the frame buffer
@@ -113,6 +152,15 @@ function handleStdoutChunk(chunk) {
 
   // Convert to a single buffer for easier processing
   let bufferedData = Buffer.concat(frameBufferParts);
+
+  // Safety: cap the maximum buffered size to avoid runaway memory usage
+  if (bufferedData.length > MAX_BUFFER_BYTES) {
+    console.warn(
+      `[capture] Buffered data exceeded cap (${bufferedData.length} > ${MAX_BUFFER_BYTES}); resetting buffer`
+    );
+    state.capture.lastError = `capture_buffer_overflow_${bufferedData.length}`;
+    bufferedData = Buffer.alloc(0);
+  }
 
   while (true) {
     const start = bufferedData.indexOf(START_MARKER);
@@ -128,7 +176,7 @@ function handleStdoutChunk(chunk) {
     // Extract frame (including end marker)
     const frame = bufferedData.slice(start, end + END_MARKER.length);
 
-    // Broadcast to clients
+    // Broadcast to clients and update lastFrame
     broadcastFrame(frame);
 
     // Trim processed data
@@ -180,6 +228,8 @@ function startCapture() {
   frameBufferParts = [];
   state.capture.running = false;
   state.capture.lastError = null;
+  state.capture.lastFrame = null;
+  state.capture.lastFrameTs = null;
 
   ffmpegProc = spawn('ffmpeg', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -230,8 +280,8 @@ function stopCapture() {
 
 /**
  * Attach an HTTP response as an MJPEG stream client.
- * Mirrors your proxyRequest header/cleanup behavior, adapted from Express
- * Request/Response to Node's IncomingMessage/ServerResponse.
+ * Mirrors your proxyRequest header/cleanup behavior, adapted from Node's
+ * IncomingMessage/ServerResponse.
  */
 function addStreamClient(req, res) {
   if (config.maxStreamClients > 0 && streamClients.size >= config.maxStreamClients) {

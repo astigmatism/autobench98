@@ -1,5 +1,6 @@
 // src/server.js
-// HTTP server exposing /health, / (root), and /stream for MJPEG video.
+// HTTP server exposing /health, / (root), /stream for MJPEG video,
+// and /screenshot to fetch the most recent captured frame as a JPEG.
 
 const http = require('http');
 const { URL } = require('url');
@@ -88,6 +89,7 @@ async function handleHealth(_req, res) {
       lastError: state.capture.lastError,
       restartCount: state.capture.restartCount,
       metrics: state.capture.metrics,
+      hasLastFrame: Boolean(state.capture.lastFrame),
     },
     reasons,
   };
@@ -104,6 +106,48 @@ async function handleStream(req, res) {
 
   // Attach this request/response as a stream client.
   addStreamClient(req, res);
+}
+
+/**
+ * Handle /screenshot endpoint.
+ *
+ * Behavior (per design doc):
+ * - GET /screenshot
+ * - Returns a single JPEG frame (the most recent frame from the capture pipeline).
+ * - Content-Type: image/jpeg
+ *
+ * If no frame is currently cached (e.g., capture hasn't produced any frames yet),
+ * we return 503 with a small JSON error payload.
+ */
+async function handleScreenshot(_req, res) {
+  const frame = state.capture.lastFrame;
+  const ts = state.capture.lastFrameTs;
+
+  if (!frame || !Buffer.isBuffer(frame)) {
+    return sendJson(res, 503, {
+      status: 'error',
+      error: 'NoScreenshotAvailable',
+      message: 'No captured frame is currently available.',
+    });
+  }
+
+  const now = Date.now();
+  const ageMs = typeof ts === 'number' ? now - ts : null;
+
+  const headers = {
+    'Content-Type': 'image/jpeg',
+    'Content-Length': frame.length,
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0',
+  };
+
+  if (ageMs !== null) {
+    headers['X-Frame-Age-Ms'] = String(ageMs);
+  }
+
+  res.writeHead(200, headers);
+  res.end(frame);
 }
 
 /**
@@ -129,12 +173,16 @@ async function requestListener(req, res) {
     return handleStream(req, res);
   }
 
+  if (req.method === 'GET' && url.pathname === '/screenshot') {
+    return handleScreenshot(req, res);
+  }
+
   if (req.method === 'GET' && url.pathname === '/') {
     return sendJson(res, 200, {
       service: config.serviceName,
       status: 'ok',
       message: 'sidecar-ffmpeg service',
-      endpoints: ['/health', '/stream'],
+      endpoints: ['/health', '/stream', '/screenshot'],
     });
   }
 
