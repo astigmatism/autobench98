@@ -80,10 +80,6 @@ function parseFfmpegOutputLine(line) {
  * - Update lastFrame / lastFrameTs for screenshot support.
  * - Write the multipart chunk to each connected client.
  * - Only drop clients on actual errors or if their socket is closed.
- *
- * We deliberately DO NOT drop clients just because res.write() returns false;
- * for your expected client counts (a handful of viewers), Node and the OS
- * can handle backpressure without us aggressively killing connections.
  */
 function broadcastFrame(frameBuffer) {
   const now = Date.now();

@@ -1,6 +1,10 @@
 // src/server.js
-// HTTP server exposing /health, / (root), /stream for MJPEG video,
-// and /screenshot to fetch the most recent captured frame as a JPEG.
+// HTTP server exposing:
+// - /health          : JSON health status
+// - /                : root info
+// - /stream          : MJPEG video stream
+// - /screenshot      : latest frame as JPEG
+// - /recordings/*    : start/stop/status of recordings
 
 const http = require('http');
 const { URL } = require('url');
@@ -8,6 +12,12 @@ const os = require('os');
 const { config } = require('./config');
 const { state } = require('./state');
 const { startCapture, addStreamClient } = require('./capture');
+const {
+  startRecording,
+  stopRecording,
+  getRecordingStatus,
+  clearAllRecordings,
+} = require('./recordings');
 
 const startedAt = state.service.startedAt;
 
@@ -82,6 +92,8 @@ async function handleHealth(_req, res) {
       host: config.host,
       ffmpegArgsConfigured: Boolean(config.ffmpegArgs && config.ffmpegArgs.trim()),
       maxStreamClients: config.maxStreamClients,
+      recordingsRoot: config.recordingsRoot,
+      maxRecordings: config.maxRecordings,
     },
     capture: {
       running: state.capture.running,
@@ -110,14 +122,6 @@ async function handleStream(req, res) {
 
 /**
  * Handle /screenshot endpoint.
- *
- * Behavior (per design doc):
- * - GET /screenshot
- * - Returns a single JPEG frame (the most recent frame from the capture pipeline).
- * - Content-Type: image/jpeg
- *
- * If no frame is currently cached (e.g., capture hasn't produced any frames yet),
- * we return 503 with a small JSON error payload.
  */
 async function handleScreenshot(_req, res) {
   const frame = state.capture.lastFrame;
@@ -151,6 +155,180 @@ async function handleScreenshot(_req, res) {
 }
 
 /**
+ * Utility to read a JSON body from a request (for POST endpoints).
+ */
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB cap
+
+    req.on('data', (chunk) => {
+      data += chunk.toString('utf8');
+      if (Buffer.byteLength(data, 'utf8') > MAX_BODY_BYTES) {
+        reject(new Error('Request body too large'));
+      }
+    });
+
+    req.on('end', () => {
+      if (!data.trim()) {
+        return resolve({});
+      }
+      try {
+        const parsed = JSON.parse(data);
+        resolve(parsed);
+      } catch (_err) {
+        reject(new Error('Invalid JSON body'));
+      }
+    });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Handle POST /recordings/start
+ *
+ * Body fields we care about:
+ * - referenceId | runId : stable id from orchestrator (used in dir/file naming)
+ * - label               : human-friendly label (optional)
+ * - subdir              : optional explicit subdir override (rarely needed)
+ */
+async function handleStartRecording(req, res) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, 400, {
+      status: 'error',
+      error: 'BadRequest',
+      message: err.message || 'Failed to parse request body',
+    });
+  }
+
+  const label =
+    typeof body.label === 'string' && body.label.trim() ? body.label : undefined;
+
+  // Allow orchestrator to send either "referenceId" or "runId"
+  const referenceIdRaw =
+    (typeof body.referenceId === 'string' && body.referenceId.trim()
+      ? body.referenceId
+      : null) ||
+    (typeof body.runId === 'string' && body.runId.trim() ? body.runId : null);
+
+  const subdir =
+    typeof body.subdir === 'string' && body.subdir.trim() ? body.subdir : undefined;
+
+  try {
+    const rec = await startRecording({
+      label,
+      referenceId: referenceIdRaw || undefined,
+      subdir,
+    });
+    return sendJson(res, 201, {
+      status: 'ok',
+      recording: rec,
+    });
+  } catch (err) {
+    // Concurrency limit exceeded
+    if (err && err.code === 'EMAXREC') {
+      return sendJson(res, 429, {
+        status: 'error',
+        error: 'TooManyRecordings',
+        message:
+          err.message ||
+          `Maximum concurrent recordings (${config.maxRecordings}) reached.`,
+        maxRecordings: config.maxRecordings,
+      });
+    }
+
+    return sendJson(res, 500, {
+      status: 'error',
+      error: 'RecordingStartFailed',
+      message: err && err.message ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Handle POST /recordings/:id/stop
+ */
+async function handleStopRecording(req, res, recordingId) {
+  try {
+    const rec = await stopRecording(recordingId);
+    return sendJson(res, 200, {
+      status: 'ok',
+      recording: rec,
+    });
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      return sendJson(res, 404, {
+        status: 'error',
+        error: 'RecordingNotFound',
+        message: `Recording not found: ${recordingId}`,
+      });
+    }
+    return sendJson(res, 500, {
+      status: 'error',
+      error: 'RecordingStopFailed',
+      message: err && err.message ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Handle GET /recordings/:id/status
+ */
+async function handleRecordingStatus(_req, res, recordingId) {
+  const rec = getRecordingStatus(recordingId);
+  if (!rec) {
+    return sendJson(res, 404, {
+      status: 'error',
+      error: 'RecordingNotFound',
+      message: `Recording not found: ${recordingId}`,
+    });
+  }
+
+  return sendJson(res, 200, {
+    status: 'ok',
+    recording: rec,
+  });
+}
+
+/**
+ * POST /recordings/clear
+ * Clears all files/directories under recordingsRoot.
+ * Fails with 409 if any recording is currently active.
+ */
+async function handleClearRecordings(_req, res) {
+  try {
+    const result = await clearAllRecordings();
+    return sendJson(res, 200, {
+      status: 'ok',
+      root: result.root,
+      deletedEntries: result.deletedEntries,
+    });
+  } catch (err) {
+    if (err && err.code === 'EACTIVE') {
+      return sendJson(res, 409, {
+        status: 'error',
+        error: 'ActiveRecordingsPresent',
+        message:
+          err.message ||
+          'Cannot clear recordings while one or more recordings are active.',
+      });
+    }
+
+    return sendJson(res, 500, {
+      status: 'error',
+      error: 'RecordingClearFailed',
+      message: err && err.message ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * Request router.
  */
 async function requestListener(req, res) {
@@ -160,37 +338,76 @@ async function requestListener(req, res) {
   } catch (_err) {
     return sendJson(res, 400, {
       status: 'error',
-      error: 'Bad Request',
+      error: 'BadRequest',
       message: 'Malformed URL',
     });
   }
 
-  if (req.method === 'GET' && url.pathname === '/health') {
+  const { pathname } = url;
+
+  // Health
+  if (req.method === 'GET' && pathname === '/health') {
     return handleHealth(req, res);
   }
 
-  if (req.method === 'GET' && url.pathname === '/stream') {
+  // Stream
+  if (req.method === 'GET' && pathname === '/stream') {
     return handleStream(req, res);
   }
 
-  if (req.method === 'GET' && url.pathname === '/screenshot') {
+  // Screenshot
+  if (req.method === 'GET' && pathname === '/screenshot') {
     return handleScreenshot(req, res);
   }
 
-  if (req.method === 'GET' && url.pathname === '/') {
+  // Recordings
+  if (pathname === '/recordings/start' && req.method === 'POST') {
+    return handleStartRecording(req, res);
+  }
+
+  if (pathname === '/recordings/clear' && req.method === 'POST') {
+    return handleClearRecordings(req, res);
+  }
+
+  if (pathname.startsWith('/recordings/') && pathname !== '/recordings/start') {
+    const parts = pathname.split('/').filter(Boolean); // e.g. ["recordings", "<id>", "stop"|"status"]
+    if (parts.length === 3 && parts[0] === 'recordings') {
+      const recordingId = parts[1];
+      const action = parts[2];
+
+      if (action === 'stop' && req.method === 'POST') {
+        return handleStopRecording(req, res, recordingId);
+      }
+
+      if (action === 'status' && req.method === 'GET') {
+        return handleRecordingStatus(req, res, recordingId);
+      }
+    }
+  }
+
+  // Root
+  if (req.method === 'GET' && pathname === '/') {
     return sendJson(res, 200, {
       service: config.serviceName,
       status: 'ok',
       message: 'sidecar-ffmpeg service',
-      endpoints: ['/health', '/stream', '/screenshot'],
+      endpoints: [
+        '/health',
+        '/stream',
+        '/screenshot',
+        '/recordings/start',
+        '/recordings/clear',
+        '/recordings/:id/stop',
+        '/recordings/:id/status',
+      ],
     });
   }
 
   // Fallback 404
   sendJson(res, 404, {
     status: 'error',
-    error: 'Not Found',
-    path: url.pathname,
+    error: 'NotFound',
+    path: pathname,
   });
 }
 
@@ -202,7 +419,7 @@ const server = http.createServer((req, res) => {
     if (!res.headersSent) {
       sendJson(res, 500, {
         status: 'error',
-        error: 'Internal Server Error',
+        error: 'InternalServerError',
       });
     } else {
       res.destroy();

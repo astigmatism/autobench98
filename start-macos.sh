@@ -107,6 +107,40 @@ else
   warn "CF_IMAGER_ROOT is not set. CfImagerService will use its default root (if any)."
 fi
 
+# --- ensure SIDECAR_RECORDINGS_ROOT exists, is writable, and empty -----------
+if [[ -n "${SIDECAR_RECORDINGS_ROOT:-}" ]]; then
+  # Expand leading ~ to $HOME if present
+  REC_ROOT="${SIDECAR_RECORDINGS_ROOT/#\~/$HOME}"
+  log "SIDECAR_RECORDINGS_ROOT => ${REC_ROOT}"
+
+  if [[ -e "$REC_ROOT" ]]; then
+    if [[ ! -d "$REC_ROOT" ]]; then
+      die "SIDECAR_RECORDINGS_ROOT exists but is not a directory: ${REC_ROOT}"
+    fi
+  else
+    log "Creating SIDECAR_RECORDINGS_ROOT directory at ${REC_ROOT}"
+    mkdir -p "$REC_ROOT" || die "Failed to create SIDECAR_RECORDINGS_ROOT directory: ${REC_ROOT}"
+  fi
+
+  # Ensure it is writable by the current user
+  if [[ ! -w "$REC_ROOT" ]]; then
+    warn "SIDECAR_RECORDINGS_ROOT is not writable by $(id -un). Attempting to adjust permissions..."
+    chmod u+rwx "$REC_ROOT" 2>/dev/null || warn "Failed to chmod SIDECAR_RECORDINGS_ROOT (${REC_ROOT}); recordings may fail with EACCES."
+  fi
+
+  # Clear any existing recordings on startup (short-lived workspace)
+  if [[ -d "$REC_ROOT" ]]; then
+    log "Clearing SIDECAR_RECORDINGS_ROOT contents at ${REC_ROOT}"
+    if [[ "$REC_ROOT" == "/" ]]; then
+      warn "Refusing to clear SIDECAR_RECORDINGS_ROOT because it resolved to /"
+    else
+      rm -rf "${REC_ROOT:?}/"* 2>/dev/null || true
+    fi
+  fi
+else
+  warn "SIDECAR_RECORDINGS_ROOT is not set. Sidecar will use its internal default recordings root (if any)."
+fi
+
 # --- host-friendly defaults ---------------------------------------------------
 : "${API_PORT:=3000}"
 : "${SIDECAR_PORT:=3100}"

@@ -2,7 +2,7 @@
 // Centralized configuration loader using dotenv
 //
 // IMPORTANT:
-// - The macOS launcher already loads a root .env and sets SIDECAR_PORT, API_PORT, etc.
+// - The macOS and Linux launchers already load a root .env and set SIDECAR_PORT, API_PORT, etc.
 // - We just consume those values here.
 // - When running the sidecar directly (node src/server.js), we also load the same root .env
 //   so you still only maintain a single .env file at the repo root.
@@ -43,6 +43,15 @@ const portFromEnv = process.env.SIDECAR_PORT;
 // are malformed or markers are missing.
 const defaultMaxCaptureBufferBytes = 8 * 1024 * 1024; // 8 MiB
 
+// Default recordings root: <repo>/data/sidecar-recordings
+const defaultRecordingsRoot = path.resolve(
+  __dirname,
+  '..',
+  '..',
+  'data',
+  'sidecar-recordings'
+);
+
 const config = {
   serviceName: 'sidecar-ffmpeg',
 
@@ -67,6 +76,16 @@ const config = {
       String(defaultMaxCaptureBufferBytes)
     )
   ),
+
+  // Root directory where recording files will be written.
+  // This should be on a readable/writable filesystem.
+  recordingsRoot: path.resolve(
+    envOrDefault('SIDECAR_RECORDINGS_ROOT', defaultRecordingsRoot)
+  ),
+
+  // Maximum number of concurrent recording FFmpeg processes.
+  // Default is 2, but can be raised via SIDECAR_MAX_RECORDINGS if the host can handle more.
+  maxRecordings: Number(envOrDefault('SIDECAR_MAX_RECORDINGS', '2')),
 };
 
 module.exports = {
