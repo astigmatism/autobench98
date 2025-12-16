@@ -27,7 +27,7 @@ interface CfImagerServiceDeps {
  * - Integrates with CfBlockDiscoveryService via onDeviceIdentified/onDeviceLost.
  * - Constrains all FS operations to a configured root directory.
  * - Exposes high-level operations for the frontend pane (list/create/rename/delete).
- * - Spawns external bash scripts to read/write CF images (stubbed initially).
+ * - Spawns external bash scripts to read/write CF images.
  *
  * NOTE: Only a single operation (read/write) is allowed at a time.
  */
@@ -391,7 +391,7 @@ export class CfImagerService {
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  Imaging operations (still stubbed for write, real for read)           */
+    /*  Imaging operations (write now wired, read already wired)              */
     /* ---------------------------------------------------------------------- */
 
     private async ensureDeviceAndMediaForOp(opName: string): Promise<boolean> {
@@ -437,12 +437,61 @@ export class CfImagerService {
         // console.log('[cf-imager] writeImageToDevice requested', { imageRelPath })
         if (!await this.ensureDeviceAndMediaForOp('writeImageToDevice')) return
 
-        const now = new Date().toISOString()
+        // UI sends an extensionless image name (e.g. "Shuttle-GeForce2")
+        // relative to the current cwd. We must reconstruct "<cwd>/<name>.img"
+        // under CF_IMAGER_ROOT and treat ONLY that as a valid image.
+        const safeName = sanitizeName(imageRelPath)
+        if (!safeName) {
+            this.emitError('writeImageToDevice: image name is required')
+            this.state.phase = 'idle'
+            return
+        }
+
+        const relWithImg = join(this.relCwd(), `${safeName}.img`)
+
+        let imgAbs: string
+        try {
+            imgAbs = resolveUnderRoot(this.config.rootDir, relWithImg)
+        } catch (err) {
+            this.emitError(
+                `writeImageToDevice: invalid image name "${imageRelPath}": ${(err as Error).message}`
+            )
+            this.state.phase = 'idle'
+            return
+        }
+
+        try {
+            const st = await fsp.stat(imgAbs)
+            if (!st.isFile()) {
+                this.emitError(
+                    `writeImageToDevice: image path is not a regular file: "${safeName}.img"`
+                )
+                this.state.phase = 'idle'
+                return
+            }
+        } catch {
+            this.emitError(
+                `writeImageToDevice: image file not found: "${safeName}.img"`
+            )
+            this.state.phase = 'idle'
+            return
+        }
+
+        const script = this.config.writeScriptPath
+        if (!script) {
+            this.emitError('writeImageToDevice: writeScriptPath is not configured')
+            this.state.phase = 'idle'
+            return
+        }
+
+        const imgRel = this.relFromRoot(imgAbs)
+        const nowIso = new Date().toISOString()
+
         const op: CfImagerCurrentOp = {
             kind: 'write',
-            source: imageRelPath,
+            source: imgRel,
             destination: this.device!.path,
-            startedAt: now,
+            startedAt: nowIso,
             progressPct: 0,
         }
 
@@ -450,25 +499,159 @@ export class CfImagerService {
         this.state.currentOp = op
         this.state.message = undefined
 
+        // Reset progress samples specifically for this op (seed at 0 bytes).
+        this.progressSamples = [{ t: Date.now(), bytes: 0 }]
+
         this.deps.events.publish({
             kind: 'cf-op-started',
             at: Date.now(),
             op,
         })
 
-        // TODO: replace this stub with spawn(this.config.writeScriptPath, [...])
-        this.deps.events.publish({
-            kind: 'cf-op-error',
-            at: Date.now(),
-            op,
-            error: 'writeImageToDevice not yet implemented',
-        })
+        // ------------------------------------------------------------------
+        // Spawn the platform-specific write script and capture PROGRESS lines
+        // ------------------------------------------------------------------
 
-        this.state.phase = 'idle'
-        this.state.currentOp = undefined
-        this.state.message = 'Write not yet implemented'
+        try {
+            const child = spawn(script, [imgAbs, this.device!.path], {
+                stdio: ['pipe', 'pipe', 'pipe'],
+            })
 
-        // console.log('[cf-imager] writeImageToDevice stub completed')
+            this.child = child
+
+            // Stream stdout line-by-line, looking for PROGRESS lines.
+            child.stdout.setEncoding('utf8')
+            let stdoutBuf = ''
+
+            child.stdout.on('data', (chunk: string) => {
+                stdoutBuf += chunk
+                let idx: number
+                while ((idx = stdoutBuf.indexOf('\n')) !== -1) {
+                    const line = stdoutBuf.slice(0, idx).trim()
+                    stdoutBuf = stdoutBuf.slice(idx + 1)
+                    if (!line) continue
+
+                    if (line.startsWith('PROGRESS ')) {
+                        const progress = parseProgressLine(line)
+                        if (progress) {
+                            const { bytes, total, pct } = progress
+
+                            /*
+                            console.log(
+                                '[cf-imager] progress (write):',
+                                `bytes=${bytes} total=${total} pct=${pct}`
+                            )
+                            */
+
+                            // Update our moving progress window for speed calculation.
+                            this.recordProgressSample(bytes)
+
+                            const speedBps = this.computeAverageSpeedBps()
+                            const mbPerSec =
+                                speedBps > 0
+                                    ? speedBps / (1024 * 1024)
+                                    : 0
+
+                            // Update current op (service-local) and emit a cf-op-progress
+                            if (this.state.currentOp && this.state.currentOp.kind === 'write') {
+                                const updatedOp: CfImagerCurrentOp = {
+                                    ...this.state.currentOp,
+                                    progressPct: pct,
+                                    bytesDone: bytes,
+                                    bytesTotal: total,
+                                    bytesPerSec: speedBps,
+                                    mbPerSec,
+                                }
+
+                                this.state.currentOp = updatedOp
+
+                                this.deps.events.publish({
+                                    kind: 'cf-op-progress',
+                                    at: Date.now(),
+                                    op: updatedOp,
+                                })
+                            }
+                        }
+                    }
+                }
+            })
+
+            // Optional: stderr logging for debugging
+            child.stderr.setEncoding('utf8')
+            child.stderr.on('data', (chunk: string) => {
+                const text = String(chunk).trim()
+                if (text) {
+                    console.error('[cf-imager] write-image stderr:', text)
+                }
+            })
+
+            child.on('error', (err) => {
+                console.error('[cf-imager] writeImageToDevice spawn error:', err)
+                this.child = null
+                this.emitError(`writeImageToDevice failed to start: ${(err as Error).message}`)
+                this.state.phase = 'idle'
+                this.state.currentOp = undefined
+
+                // Ensure watchdog remains active.
+                this.resumeFsWatchdogAfterOp({ refreshFs: false })
+            })
+
+            child.on('close', (code, signal) => {
+                this.child = null
+
+                if (code === 0) {
+                    // Successful completion
+                    this.state.phase = 'idle'
+                    this.state.message = 'Write complete'
+
+                    // Final progress snapshot for clients: force 100% and full bytes.
+                    const finalOp: CfImagerCurrentOp = this.state.currentOp
+                        ? {
+                              ...this.state.currentOp,
+                              progressPct: 100,
+                              bytesDone:
+                                  typeof this.state.currentOp.bytesDone === 'number'
+                                      ? this.state.currentOp.bytesDone
+                                      : this.state.currentOp.bytesTotal ?? 0,
+                          }
+                        : {
+                              ...op,
+                              progressPct: 100,
+                          }
+
+                    this.deps.events.publish({
+                        kind: 'cf-op-completed',
+                        at: Date.now(),
+                        op: finalOp,
+                    })
+
+                    // Writes do not change CF_IMAGER_ROOT, so no FS refresh needed.
+                    this.resumeFsWatchdogAfterOp({ refreshFs: false })
+                } else {
+                    const reason =
+                        code !== null
+                            ? `exit code ${code}`
+                            : signal
+                            ? `signal ${signal}`
+                            : 'unknown failure'
+                    this.emitError(`writeImageToDevice script failed (${reason})`)
+
+                    // Even on failure, keep the FS watchdog healthy.
+                    this.resumeFsWatchdogAfterOp({ refreshFs: false })
+                }
+
+                this.state.currentOp = undefined
+                this.progressSamples = []
+            })
+        } catch (err) {
+            this.child = null
+            this.emitError(`writeImageToDevice: spawn failed: ${(err as Error).message}`)
+            this.state.phase = 'idle'
+            this.state.currentOp = undefined
+
+            this.resumeFsWatchdogAfterOp({ refreshFs: false })
+            this.progressSamples = []
+        }
     }
 
     public async readDeviceToImage(targetDirRel: string, imageName: string): Promise<void> {
@@ -680,7 +863,7 @@ export class CfImagerService {
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  Child-process management (future wiring)                               */
+    /*  Child-process management                                              */
     /* ---------------------------------------------------------------------- */
 
     private async cancelCurrentChild(
@@ -1282,7 +1465,7 @@ function sanitizeName(name: string | undefined): string {
 }
 
 /**
- * Parse a PROGRESS line from the read-image scripts.
+ * Parse a PROGRESS line from the read/write image scripts.
  *
  * Expected formats (both platforms share the same keys):
  *   PROGRESS bytes=281018368 total=12572352512 pct=2.235 rate=46299681 elapsed=6.069553
