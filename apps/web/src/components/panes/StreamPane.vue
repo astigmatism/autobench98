@@ -1,4 +1,3 @@
-<!-- apps/web/src/panes/StreamPane.vue -->
 <template>
     <div class="stream-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
         <!-- Hotspot region: only hovering here shows the advanced controls button -->
@@ -22,9 +21,6 @@
                         <!-- Plain text uses pane foreground -->
                         <span class="plain-text meta">
                             Stream controls
-                            <span v-if="sidecarStatus" class="status-pill">
-                                {{ sidecarStatus }}
-                            </span>
                         </span>
 
                         <div class="controls">
@@ -65,7 +61,7 @@
                         </div>
                     </div>
                     <div class="right">
-                        <!-- Placeholder for future info (resolution/fps) -->
+                        <!-- Placeholder for future info (resolution/fps, status) -->
                     </div>
                 </div>
             </div>
@@ -81,7 +77,7 @@
                     :key="reloadKey"
                     class="stream-img"
                     :data-scale="scaleMode"
-                    :src="resolvedStreamSrc"
+                    :src="STREAM_ENDPOINT"
                     alt="Test machine stream"
                 />
             </div>
@@ -94,7 +90,6 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useMirror } from '@/stores/mirror'
 
 /** Accept pane context (optional). */
 type Direction = 'row' | 'col'
@@ -123,84 +118,15 @@ type PaneInfo = {
     }
 }
 
-/**
- * NOTE:
- * We do NOT take a streamSrc prop.
- * The stream URL is derived from the AppState sidecar slice, plus
- * the browser's own hostname:
- *
- *   window.location.hostname + ":" + sidecar.port + sidecar.streamPath
- */
 const props = defineProps<{
     pane?: PaneInfo
 }>()
 
-/** Local view of the sidecar slice we care about. */
-type SidecarSnapshot = {
-    host?: string
-    port?: number
-    streamPath?: string
-    streamUrl?: string
-    status?: 'unknown' | 'up' | 'down'
-}
-
-/** Mirror store (AppState snapshot from WS). */
-const mirror = useMirror()
-
-const sidecar = computed<SidecarSnapshot | undefined>(() => {
-    const raw = (mirror.data as any)?.sidecar
-    if (!raw || typeof raw !== 'object') return undefined
-    return raw as SidecarSnapshot
-})
-
 /**
- * Resolved stream src:
- * 1) If sidecar.streamUrl is present and NOT built on 0.0.0.0/::, use it.
- * 2) Otherwise, build URL from current window.location.hostname and sidecar.port.
- * 3) Fallback: "/stream" (in case we later proxy through orchestrator).
+ * Endpoint is always the orchestrator proxy.
+ * The orchestrator is responsible for talking to the sidecar on localhost.
  */
-const resolvedStreamSrc = computed(() => {
-    const sc = sidecar.value
-    const rawUrl = sc?.streamUrl
-
-    // If server provided a usable URL (not 0.0.0.0 / ::), prefer it.
-    if (typeof rawUrl === 'string' && rawUrl.trim().length > 0) {
-        const u = rawUrl.trim()
-        const bad =
-            u.includes('://0.0.0.0') ||
-            u.includes('://[::]') ||
-            u.includes('://::')
-        if (!bad) return u
-        // otherwise fall through and compute client-side
-    }
-
-    const port = sc?.port ?? 3100
-    const path = sc?.streamPath ?? '/stream'
-
-    try {
-        const loc = window.location
-        const host = loc.hostname || 'localhost'
-        const proto = loc.protocol || 'http:'
-        return `${proto}//${host}:${port}${path}`
-    } catch {
-        // Very defensive fallback: relative path, in case orchestrator proxies /stream
-        return '/stream'
-    }
-})
-
-/** Optional, human-readable status label from sidecar.status. */
-const sidecarStatus = computed(() => {
-    const s = sidecar.value?.status
-    switch (s) {
-        case 'up':
-            return 'Sidecar: up'
-        case 'down':
-            return 'Sidecar: down'
-        case 'unknown':
-        default:
-            return ''
-    }
-})
+const STREAM_ENDPOINT = '/api/sidecar/stream'
 
 /** Contrast-aware plain-text color from pane background (for non-panel text) */
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
@@ -251,7 +177,7 @@ const scaleMode = ref<'fit' | 'fill' | 'stretch' | 'native'>('fit')
 /** Background mode: black (default) or pane background. */
 const bgMode = ref<'black' | 'pane'>('black')
 
-/** Reload key forces <img> to re-request the stream. */
+/** Reload key forces <img> to re-request the stream (by remounting it). */
 const reloadKey = ref(0)
 
 function onEnabledChange() {
@@ -360,16 +286,6 @@ function reloadStream() {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-}
-
-/* small status pill */
-.status-pill {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid #444;
-    background: #0f0f0f;
-    color: var(--panel-fg);
 }
 
 /* Panel-styled controls keep panel foreground for readability */

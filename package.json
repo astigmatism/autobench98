@@ -21,6 +21,7 @@
         "clean": "find . -type d -name node_modules -prune -exec rm -rf '{}' +"
     },
     "dependencies": {
-        "dotenv": "^17.2.3"
+        "dotenv": "^17.2.3",
+        "undici": "^7.16.0"
     }
 }

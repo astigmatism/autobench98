@@ -31,6 +31,7 @@ import powerMeterPlugin from './plugins/powerMeter.js'
 import serialPrinterPlugin from './plugins/serialPrinter.js'
 import atlonaControllerPlugin from './plugins/atlonaController.js'
 import cfImagerPlugin from './plugins/cfImager.js'
+import streamProxyPlugin from './plugins/streamProxy.js'
 
 declare module 'fastify' {
     interface FastifyInstance {
@@ -103,6 +104,8 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(powerMeterPlugin)
     void app.register(serialPrinterPlugin)
     void app.register(cfImagerPlugin)
+
+    void app.register(streamProxyPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
