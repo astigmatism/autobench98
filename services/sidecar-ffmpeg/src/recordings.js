@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { config } = require('./config');
+const { log } = require('./log');
 
 // In-memory tracking of active and completed recordings.
 // Map<string, RecordingState>
@@ -46,14 +47,20 @@ function ensureRecordingsRoot() {
   try {
     fs.mkdirSync(root, { recursive: true });
   } catch (err) {
-    console.error('[recordings] Failed to create recordings root:', root, err);
+    log.sidecar.error('Failed to create recordings root directory', {
+      root,
+      error: String(err && err.message ? err.message : err),
+    });
     throw new Error(`Failed to create recordings root directory: ${root}`);
   }
 
   try {
     fs.accessSync(root, fs.constants.W_OK | fs.constants.R_OK);
   } catch (err) {
-    console.error('[recordings] Recordings root is not readable/writable:', root, err);
+    log.sidecar.error('Recordings root is not readable/writable', {
+      root,
+      error: String(err && err.message ? err.message : err),
+    });
     throw new Error(`Recordings root is not readable/writable: ${root}`);
   }
 }
@@ -219,7 +226,11 @@ async function startRecording(options) {
   try {
     fs.mkdirSync(rec.dir, { recursive: true });
   } catch (err) {
-    console.error('[recordings] Failed to create recording directory:', rec.dir, err);
+    log.sidecar.error('Failed to create recording directory', {
+      dir: rec.dir,
+      recordingId: rec.id,
+      error: String(err && err.message ? err.message : err),
+    });
     throw new Error(`Failed to create recording directory: ${rec.dir}`);
   }
 
@@ -246,12 +257,15 @@ async function startRecording(options) {
     rec.outputPath,
   ];
 
-  console.log(
-    `[recordings] Starting recording ${rec.id}` +
-      (rec.referenceId ? ` (ref=${rec.referenceId})` : '') +
-      ` -> ${rec.outputPath}`
-  );
-  console.log('[recordings] FFmpeg args:', ffmpegArgs.join(' '));
+  log.sidecar.info('Starting recording', {
+    recordingId: rec.id,
+    referenceId: rec.referenceId,
+    outputPath: rec.outputPath,
+  });
+  log.ffmpeg.debug('Recording FFmpeg args', {
+    recordingId: rec.id,
+    args: ffmpegArgs,
+  });
 
   rec.state = 'recording';
   rec.error = null;
@@ -265,7 +279,10 @@ async function startRecording(options) {
   // Optional: log FFmpeg stderr for this recording
   ffmpegProc.stderr.on('data', (chunk) => {
     const line = chunk.toString();
-    process.stderr.write(`[ffmpeg-rec ${rec.id}] ${line}`);
+    const trimmed = line.trim();
+    if (trimmed) {
+      log.ffmpeg.debug(trimmed, { recordingId: rec.id });
+    }
   });
 
   ffmpegProc.stdout.on('data', (_chunk) => {
@@ -276,7 +293,7 @@ async function startRecording(options) {
     const msg = `Recording FFmpeg process error: ${
       err && err.message ? err.message : String(err)
     }`;
-    console.error('[recordings]', msg);
+    log.ffmpeg.error(msg, { recordingId: rec.id });
     rec.state = 'failed';
     rec.error = msg;
     rec.stoppedAt = new Date();
@@ -289,7 +306,12 @@ async function startRecording(options) {
 
   ffmpegProc.on('close', (code, signal) => {
     const msg = `Recording FFmpeg exited with code=${code}, signal=${signal || 'null'}`;
-    console.log('[recordings]', msg);
+    log.ffmpeg.info(msg, {
+      recordingId: rec.id,
+      referenceId: rec.referenceId,
+      code,
+      signal: signal || null,
+    });
     rec.ffmpegProc = null;
 
     if (rec.state === 'stopping') {
@@ -335,16 +357,19 @@ async function stopRecording(id) {
     return serializeRecording(rec);
   }
 
-  console.log(
-    `[recordings] Stopping recording ${rec.id}` +
-      (rec.referenceId ? ` (ref=${rec.referenceId})` : '')
-  );
+  log.sidecar.info('Stopping recording', {
+    recordingId: rec.id,
+    referenceId: rec.referenceId,
+  });
   rec.state = 'stopping';
 
   try {
     rec.ffmpegProc.kill('SIGINT');
   } catch (err) {
-    console.error('[recordings] Error killing recording FFmpeg:', err);
+    log.sidecar.error('Error killing recording FFmpeg process', {
+      recordingId: rec.id,
+      error: String(err && err.message ? err.message : err),
+    });
     rec.state = 'failed';
     rec.error = `Failed to stop recording: ${
       err && err.message ? err.message : String(err)
@@ -403,23 +428,26 @@ async function clearAllRecordings() {
         fs.rmSync(fullPath, { recursive: true, force: true });
         deletedEntries += 1;
       } catch (err) {
-        console.error(
-          '[recordings] Failed to remove entry during clear:',
-          fullPath,
-          err
-        );
+        log.sidecar.warn('Failed to remove entry during recordings clear', {
+          path: fullPath,
+          error: String(err && err.message ? err.message : err),
+        });
       }
     }
   } catch (err) {
-    console.error('[recordings] Failed to read recordings root during clear:', err);
+    log.sidecar.error('Failed to read recordings root during clear', {
+      root,
+      error: String(err && err.message ? err.message : err),
+    });
     throw new Error(`Failed to clear recordings root: ${root}`);
   }
 
   recordings.clear();
 
-  console.log(
-    `[recordings] Cleared ${deletedEntries} top-level entries from recordings root: ${root}`
-  );
+  log.sidecar.info('Cleared recordings root', {
+    root,
+    deletedEntries,
+  });
 
   return {
     root,

@@ -7,6 +7,7 @@
 const { spawn } = require('child_process');
 const { config } = require('./config');
 const { state } = require('./state');
+const { log } = require('./log');
 
 // Boundary string mirroring your existing implementation.
 // NOTE: In your TS code, boundary = '--frameboundary', header uses that value
@@ -109,7 +110,7 @@ function broadcastFrame(frameBuffer) {
       res.write(frameBuffer);
       res.write(footer);
     } catch (err) {
-      console.error(`[capture] Failed to write frame to client ${id}:`, err);
+      log.stream.warn('Failed to write frame to client', { id, error: String(err && err.message ? err.message : err) });
       try {
         res.end();
       } catch (_) {
@@ -134,9 +135,10 @@ function handleStdoutChunk(chunk) {
 
   // Safety: cap the maximum buffered size to avoid runaway memory usage
   if (bufferedData.length > MAX_BUFFER_BYTES) {
-    console.warn(
-      `[capture] Buffered data exceeded cap (${bufferedData.length} > ${MAX_BUFFER_BYTES}); resetting buffer`
-    );
+    log.ffmpeg.warn('Buffered data exceeded cap; resetting buffer', {
+      bufferedBytes: bufferedData.length,
+      maxBufferBytes: MAX_BUFFER_BYTES,
+    });
     state.capture.lastError = `capture_buffer_overflow_${bufferedData.length}`;
     bufferedData = Buffer.alloc(0);
   }
@@ -170,7 +172,7 @@ function handleStdoutChunk(chunk) {
  * Schedule a restart of the FFmpeg capture process with a small backoff.
  */
 function scheduleRestart(reason) {
-  console.error('[capture] Scheduling FFmpeg restart:', reason);
+  log.ffmpeg.warn('Scheduling FFmpeg restart', { reason });
   if (restartTimer) {
     return; // already scheduled
   }
@@ -178,6 +180,7 @@ function scheduleRestart(reason) {
   restartTimer = setTimeout(() => {
     restartTimer = null;
     state.capture.restartCount += 1;
+    log.ffmpeg.info('Restarting FFmpeg capture', { restartCount: state.capture.restartCount });
     startCapture();
   }, 2000);
 }
@@ -193,7 +196,7 @@ function startCapture() {
 
   if (!config.ffmpegArgs || !config.ffmpegArgs.trim()) {
     const msg = 'FFMPEG_ARGS is not configured; capture cannot start.';
-    console.error('[capture]', msg);
+    log.sidecar.error(msg);
     state.capture.running = false;
     state.capture.lastError = msg;
     return;
@@ -202,13 +205,13 @@ function startCapture() {
   const args = config.ffmpegArgs.split(' ').filter(Boolean);
   args.push('pipe:');
 
-  // console.log('[capture] Starting FFmpeg with args:', args.join(' '));
-
   frameBufferParts = [];
   state.capture.running = false;
   state.capture.lastError = null;
   state.capture.lastFrame = null;
   state.capture.lastFrameTs = null;
+
+  log.ffmpeg.info('Starting FFmpeg capture', { args });
 
   ffmpegProc = spawn('ffmpeg', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -220,13 +223,17 @@ function startCapture() {
 
   ffmpegProc.stderr.on('data', (chunk) => {
     const line = chunk.toString();
-    process.stderr.write(`[ffmpeg] ${line}`);
+    // Keep stderr signal but route via logger in a compact way
+    const trimmed = line.trim();
+    if (trimmed) {
+      log.ffmpeg.debug(trimmed);
+    }
     parseFfmpegOutputLine(line);
   });
 
   ffmpegProc.on('error', (err) => {
     const msg = `FFmpeg process error: ${err && err.message ? err.message : String(err)}`;
-    console.error('[capture]', msg);
+    log.ffmpeg.error(msg);
     state.capture.running = false;
     state.capture.lastError = msg;
     ffmpegProc = null;
@@ -235,7 +242,7 @@ function startCapture() {
 
   ffmpegProc.on('close', (code, signal) => {
     const msg = `FFmpeg process exited with code=${code}, signal=${signal || 'null'}`;
-    console.error('[capture]', msg);
+    log.ffmpeg.error(msg, { code, signal: signal || null });
     state.capture.running = false;
     state.capture.lastError = msg;
     ffmpegProc = null;
@@ -251,9 +258,12 @@ function startCapture() {
 function stopCapture() {
   if (!ffmpegProc) return;
   try {
+    log.ffmpeg.info('Stopping FFmpeg capture');
     ffmpegProc.kill('SIGTERM');
   } catch (err) {
-    console.error('[capture] Error killing FFmpeg:', err);
+    log.ffmpeg.error('Error killing FFmpeg', {
+      error: String(err && err.message ? err.message : err),
+    });
   }
 }
 
@@ -264,7 +274,11 @@ function stopCapture() {
  */
 function addStreamClient(req, res) {
   if (config.maxStreamClients > 0 && streamClients.size >= config.maxStreamClients) {
-    console.log('[capture] Maximum client limit reached, new connection closed.');
+    log.stream.warn('Maximum stream client limit reached; new connection closed', {
+      maxClients: config.maxStreamClients,
+      currentClients: streamClients.size,
+    });
+
     res.writeHead(503, {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-cache',
@@ -293,14 +307,22 @@ function addStreamClient(req, res) {
   });
 
   const id = nextClientId++;
-  // console.log(`[capture] New stream client ${id} connected (total=${streamClients.size + 1})`);
 
   const client = { id, req, res };
   streamClients.add(client);
 
+  log.stream.info('New stream client connected', {
+    clientId: id,
+    totalClients: streamClients.size,
+    remoteAddress: req.socket && req.socket.remoteAddress,
+  });
+
   const removeClient = () => {
     if (streamClients.delete(client)) {
-      // console.log(`[capture] Stream client ${id} disconnected (total=${streamClients.size})`);
+      log.stream.info('Stream client disconnected', {
+        clientId: id,
+        totalClients: streamClients.size,
+      });
     }
   };
 

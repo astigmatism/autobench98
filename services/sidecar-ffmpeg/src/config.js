@@ -52,6 +52,9 @@ const defaultRecordingsRoot = path.resolve(
   'sidecar-recordings'
 );
 
+// Orchestrator API port (used for log ingest default).
+const defaultApiPort = envOrDefault('API_PORT', '3000');
+
 const config = {
   serviceName: 'sidecar-ffmpeg',
 
@@ -86,6 +89,20 @@ const config = {
   // Maximum number of concurrent recording FFmpeg processes.
   // Default is 2, but can be raised via SIDECAR_MAX_RECORDINGS if the host can handle more.
   maxRecordings: Number(envOrDefault('SIDECAR_MAX_RECORDINGS', '2')),
+
+  // Orchestrator log ingest wiring:
+  //
+  // By default, we assume the orchestrator is listening on 127.0.0.1:API_PORT
+  // and exposing POST /api/logs/ingest (as in apps/orchestrator/src/app.ts).
+  //
+  // You can override the URL entirely via LOG_INGEST_URL if needed.
+  logIngestEnabled: envBool('LOG_INGEST_ENABLED', true),
+  logIngestUrl: envOrDefault(
+    'LOG_INGEST_URL',
+    `http://127.0.0.1:${defaultApiPort}/api/logs/ingest`
+  ),
+  // Token must match orchestrator's LOG_INGEST_TOKEN to be accepted (if set there).
+  logIngestToken: envOrDefault('LOG_INGEST_TOKEN', ''),
 };
 
 module.exports = {
