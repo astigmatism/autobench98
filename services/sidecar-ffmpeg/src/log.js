@@ -1,44 +1,35 @@
 // src/log.js
+// Shared logging wrapper for the sidecar.
 //
-// Minimal logging wrapper for the sidecar.
-// Sends logs BOTH to stdout AND to the orchestrator's /api/logs/ingest,
-// using the same channel names used by the orchestrator log system.
-//
-// Channels supported here:
-//   - sidecar  (lifecycle + server behavior)
-//   - stream   (client connections, screenshots, MJPEG events)
-//   - ffmpeg   (ffmpeg start/stop/errors/metrics)
+// - Uses @autobench98/logging (same as orchestrator)
+// - Fans logs out to the orchestrator's /api/logs/ingest endpoint (fire-and-forget)
+// - Exposes three channels: sidecar, ffmpeg, stream
 
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
+
 const { config } = require('./config');
+const { createLogger, LogChannel } = require('@autobench98/logging');
 
-// ---------------------------------------------------------------------------
-// stdout logger — very simple, human readable
-// ---------------------------------------------------------------------------
-function stdoutLog(level, channel, msg) {
-  const ts = new Date().toISOString();
-  // eslint-disable-next-line no-console
-  console.log(`[${ts}] [${channel}] [${level}] ${msg}`);
-}
+// Base logger for this process
+const { channel } = createLogger('sidecar');
 
-// ---------------------------------------------------------------------------
-// Orchestrator ingest setup
-// ---------------------------------------------------------------------------
-let ingestClient = null;
+// Remote log ingest configuration
+let ingestModule = null; // http | https
+let ingestBaseOptions = null;
 
-(function initIngest() {
+(function initLogIngest() {
   if (!config.logIngestEnabled || !config.logIngestUrl) {
-    return; // disabled
+    return;
   }
 
   try {
     const url = new URL(config.logIngestUrl);
     const isHttps = url.protocol === 'https:';
 
-    ingestClient = {
-      module: isHttps ? https : http,
+    ingestModule = isHttps ? https : http;
+    ingestBaseOptions = {
       hostname: url.hostname,
       port: url.port
         ? Number(url.port)
@@ -46,80 +37,72 @@ let ingestClient = null;
         ? 443
         : 80,
       path: url.pathname + (url.search || ''),
-      token: config.logIngestToken || '',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
     };
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('Invalid LOG_INGEST_URL:', config.logIngestUrl);
-    ingestClient = null;
+
+    if (config.logIngestToken) {
+      ingestBaseOptions.headers.Authorization = `Bearer ${config.logIngestToken}`;
+    }
+  } catch (_err) {
+    // Malformed URL → disable ingest silently
+    ingestModule = null;
+    ingestBaseOptions = null;
   }
 })();
 
-// ---------------------------------------------------------------------------
-// Send a log entry to /api/logs/ingest
-// Fire-and-forget, MUST NOT affect sidecar operation.
-// ---------------------------------------------------------------------------
-function sendToOrchestrator(level, channel, message) {
-  if (!ingestClient) return;
-
-  const entry = JSON.stringify({
-    ts: Date.now(),
-    level,
-    channel,
-    message,
-  });
-
-  const headers = {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(entry),
-  };
-
-  if (ingestClient.token) {
-    headers.Authorization = `Bearer ${ingestClient.token}`;
-  }
-
-  const opts = {
-    hostname: ingestClient.hostname,
-    port: ingestClient.port,
-    path: ingestClient.path,
-    method: 'POST',
-    headers,
-  };
+/**
+ * Fire-and-forget HTTP POST to orchestrator's /api/logs/ingest.
+ */
+function sendLogToIngest(entry) {
+  if (!ingestModule || !ingestBaseOptions) return;
 
   try {
-    const req = ingestClient.module.request(opts, (res) => {
-      // Drain the response; we don't use it.
+    const payload = JSON.stringify(entry);
+    const options = {
+      ...ingestBaseOptions,
+      headers: {
+        ...ingestBaseOptions.headers,
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    };
+
+    const req = ingestModule.request(options, (res) => {
+      // Drain response; we don't care about the body.
       res.on('data', () => {});
       res.on('end', () => {});
     });
 
     req.on('error', () => {
-      /* swallow */
+      // Best-effort only; never throw from logging.
     });
 
-    req.write(entry);
+    req.write(payload);
     req.end();
   } catch {
-    /* swallow */
+    // Swallow — logging must not break the sidecar.
   }
 }
 
-// ---------------------------------------------------------------------------
-// Logger factory for each channel
-// ---------------------------------------------------------------------------
-function makeChannelLogger(channel) {
+/**
+ * Wrap a channel logger so every call also fans out to /api/logs/ingest.
+ */
+function makeChannelWithIngest(channelId) {
+  const baseLogger = channel(channelId);
+
   const wrap = (level) => (msg, extra) => {
-    // Format message if extra object exists
-    let finalMsg = msg;
-    if (extra && typeof extra === 'object') {
-      finalMsg = `${msg} ${JSON.stringify(extra)}`;
-    }
+    // Local stdout (pino + pretty + emoji)
+    baseLogger[level](msg, extra);
 
-    // Local stdout
-    stdoutLog(level, channel, finalMsg);
-
-    // Remote ingest
-    sendToOrchestrator(level, channel, finalMsg);
+    // Minimal remote entry – orchestrator's normalizeEntry fills emoji/color.
+    sendLogToIngest({
+      ts: Date.now(),
+      level, // 'debug' | 'info' | 'warn' | 'error' | 'fatal'
+      channel: channelId,
+      message: msg,
+    });
   };
 
   return {
@@ -131,13 +114,10 @@ function makeChannelLogger(channel) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Export loggers
-// ---------------------------------------------------------------------------
-module.exports = {
-  log: {
-    sidecar: makeChannelLogger('sidecar'),
-    stream: makeChannelLogger('stream'),
-    ffmpeg: makeChannelLogger('ffmpeg'),
-  },
+const log = {
+  sidecar: makeChannelWithIngest(LogChannel.sidecar),
+  ffmpeg: makeChannelWithIngest(LogChannel.ffmpeg),
+  stream: makeChannelWithIngest(LogChannel.stream),
 };
+
+module.exports = { log };

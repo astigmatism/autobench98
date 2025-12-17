@@ -19,13 +19,10 @@ const {
   getRecordingStatus,
   clearAllRecordings,
 } = require('./recordings');
+
 const { log } = require('./log');
 
 const startedAt = state.service.startedAt;
-
-// Channel handles from shared logger wrapper
-const logSidecar = log.sidecar;
-const logStream = log.stream;
 
 /* -------------------------------------------------------------------------- */
 /*  Basic JSON response helper                                                */
@@ -114,7 +111,7 @@ async function handleHealth(_req, res) {
   };
 
   if (!ok) {
-    logSidecar.warn('health check indicates unhealthy state', { reasons });
+    log.sidecar.warn('health check indicates unhealthy state', { reasons });
   }
 
   sendJson(res, ok ? 200 : 503, payload);
@@ -124,10 +121,6 @@ async function handleHealth(_req, res) {
  * Handle /stream MJPEG endpoint.
  */
 async function handleStream(req, res) {
-  logStream.info('incoming stream client', {
-    remoteAddress: req.socket && req.socket.remoteAddress,
-  });
-
   // Ensure the capture pipeline is running.
   startCapture();
 
@@ -269,7 +262,7 @@ async function handleStartRecording(req, res) {
 /**
  * Handle POST /recordings/:id/stop
  */
-async function handleStopRecording(req, res, recordingId) {
+async function handleStopRecording(_req, res, recordingId) {
   try {
     const rec = await stopRecording(recordingId);
     return sendJson(res, 200, {
@@ -430,7 +423,7 @@ async function requestListener(req, res) {
 const server = http.createServer((req, res) => {
   // Wrap in a catch-all in case async handlers throw
   Promise.resolve(requestListener(req, res)).catch((err) => {
-    logSidecar.error('Unexpected error while handling request', {
+    log.sidecar.error('Unexpected error while handling request', {
       error: err && err.message ? err.message : String(err),
     });
     if (!res.headersSent) {
@@ -445,12 +438,10 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(config.port, config.host, () => {
-  logSidecar.info('sidecar listening', {
+  log.sidecar.info('sidecar listening', {
     host: config.host,
     port: config.port,
     env: config.env,
-    // These flags are still useful for quick verification of remote logging wiring,
-    // even though the actual ingest wiring now lives in ./log.js.
     logIngestEnabled: !!(config.logIngestEnabled && config.logIngestUrl),
     logIngestUrl: config.logIngestEnabled ? config.logIngestUrl : undefined,
   });
