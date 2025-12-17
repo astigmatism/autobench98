@@ -4,6 +4,7 @@
 // - Uses @autobench98/logging (same as orchestrator)
 // - Fans logs out to the orchestrator's /api/logs/ingest endpoint (fire-and-forget)
 // - Exposes three channels: sidecar, ffmpeg, stream
+// - Forces all logs to be single-line key=value style by disallowing metadata objects.
 
 const http = require('http');
 const https = require('https');
@@ -29,13 +30,10 @@ let ingestBaseOptions = null;
     const isHttps = url.protocol === 'https:';
 
     ingestModule = isHttps ? https : http;
+
     ingestBaseOptions = {
       hostname: url.hostname,
-      port: url.port
-        ? Number(url.port)
-        : isHttps
-        ? 443
-        : 80,
+      port: url.port ? Number(url.port) : isHttps ? 443 : 80,
       path: url.pathname + (url.search || ''),
       method: 'POST',
       headers: {
@@ -46,7 +44,7 @@ let ingestBaseOptions = null;
     if (config.logIngestToken) {
       ingestBaseOptions.headers.Authorization = `Bearer ${config.logIngestToken}`;
     }
-  } catch (_err) {
+  } catch {
     // Malformed URL → disable ingest silently
     ingestModule = null;
     ingestBaseOptions = null;
@@ -61,6 +59,7 @@ function sendLogToIngest(entry) {
 
   try {
     const payload = JSON.stringify(entry);
+
     const options = {
       ...ingestBaseOptions,
       headers: {
@@ -70,38 +69,45 @@ function sendLogToIngest(entry) {
     };
 
     const req = ingestModule.request(options, (res) => {
-      // Drain response; we don't care about the body.
+      // Drain response; we do not read body
       res.on('data', () => {});
       res.on('end', () => {});
     });
 
     req.on('error', () => {
-      // Best-effort only; never throw from logging.
+      // Best-effort only
     });
 
     req.write(payload);
     req.end();
   } catch {
-    // Swallow — logging must not break the sidecar.
+    // Never throw from logging
   }
 }
 
 /**
- * Wrap a channel logger so every call also fans out to /api/logs/ingest.
+ * Wrap a channel logger so every call:
+ *   - ALWAYS logs a single string message (no objects)
+ *   - Fan-outs to /api/logs/ingest
+ *
+ * This guarantees pino-pretty never emits multi-line logs.
  */
 function makeChannelWithIngest(channelId) {
   const baseLogger = channel(channelId);
 
-  const wrap = (level) => (msg, extra) => {
-    // Local stdout (pino + pretty + emoji)
-    baseLogger[level](msg, extra);
+  const wrap = (level) => (msg) => {
+    // Force type to string
+    const text = typeof msg === 'string' ? msg : String(msg);
 
-    // Minimal remote entry – orchestrator's normalizeEntry fills emoji/color.
+    // Local stdout via pino-pretty
+    baseLogger[level](text);
+
+    // Remote ingest
     sendLogToIngest({
       ts: Date.now(),
-      level, // 'debug' | 'info' | 'warn' | 'error' | 'fatal'
+      level,        // "info" | "warn" | ...
       channel: channelId,
-      message: msg,
+      message: text,
     });
   };
 

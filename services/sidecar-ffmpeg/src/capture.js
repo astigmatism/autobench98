@@ -110,10 +110,10 @@ function broadcastFrame(frameBuffer) {
       res.write(frameBuffer);
       res.write(footer);
     } catch (err) {
-      log.stream.warn('Failed to write frame to client', {
-        id,
-        error: String(err && err.message ? err.message : err),
-      });
+      const msg = String(err && err.message ? err.message : err);
+      log.stream.warn(
+        `Failed to write frame to client clientId=${id} error=${msg}`
+      );
       try {
         res.end();
       } catch (_) {
@@ -138,10 +138,9 @@ function handleStdoutChunk(chunk) {
 
   // Safety: cap the maximum buffered size to avoid runaway memory usage
   if (bufferedData.length > MAX_BUFFER_BYTES) {
-    log.ffmpeg.warn('Buffered data exceeded cap; resetting buffer', {
-      bufferedBytes: bufferedData.length,
-      maxBufferBytes: MAX_BUFFER_BYTES,
-    });
+    log.ffmpeg.warn(
+      `Buffered data exceeded cap; resetting buffer bufferedBytes=${bufferedData.length} maxBufferBytes=${MAX_BUFFER_BYTES}`
+    );
     state.capture.lastError = `capture_buffer_overflow_${bufferedData.length}`;
     bufferedData = Buffer.alloc(0);
   }
@@ -175,7 +174,7 @@ function handleStdoutChunk(chunk) {
  * Schedule a restart of the FFmpeg capture process with a small backoff.
  */
 function scheduleRestart(reason) {
-  log.ffmpeg.warn('Scheduling FFmpeg restart', { reason });
+  log.ffmpeg.warn(`Scheduling FFmpeg restart reason=${reason}`);
   if (restartTimer) {
     return; // already scheduled
   }
@@ -183,9 +182,9 @@ function scheduleRestart(reason) {
   restartTimer = setTimeout(() => {
     restartTimer = null;
     state.capture.restartCount += 1;
-    log.ffmpeg.info('Restarting FFmpeg capture', {
-      restartCount: state.capture.restartCount,
-    });
+    log.ffmpeg.info(
+      `Restarting FFmpeg capture restartCount=${state.capture.restartCount}`
+    );
     startCapture();
   }, 2000);
 }
@@ -216,7 +215,9 @@ function startCapture() {
   state.capture.lastFrame = null;
   state.capture.lastFrameTs = null;
 
-  log.ffmpeg.info('Starting FFmpeg capture', { args });
+  log.ffmpeg.info(
+    `Starting FFmpeg capture args="${args.join(' ')}"`
+  );
 
   ffmpegProc = spawn('ffmpeg', args, {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -255,7 +256,9 @@ function startCapture() {
 
   ffmpegProc.on('close', (code, signal) => {
     const msg = `FFmpeg process exited with code=${code}, signal=${signal || 'null'}`;
-    log.ffmpeg.error(msg, { code, signal: signal || null });
+    log.ffmpeg.error(
+      `FFmpeg process exited code=${code} signal=${signal || 'null'}`
+    );
     state.capture.running = false;
     state.capture.lastError = msg;
     ffmpegProc = null;
@@ -274,9 +277,8 @@ function stopCapture() {
     log.ffmpeg.info('Stopping FFmpeg capture');
     ffmpegProc.kill('SIGTERM');
   } catch (err) {
-    log.ffmpeg.error('Error killing FFmpeg', {
-      error: String(err && err.message ? err.message : err),
-    });
+    const msg = String(err && err.message ? err.message : err);
+    log.ffmpeg.error(`Error killing FFmpeg error=${msg}`);
   }
 }
 
@@ -287,10 +289,9 @@ function stopCapture() {
  */
 function addStreamClient(req, res) {
   if (config.maxStreamClients > 0 && streamClients.size >= config.maxStreamClients) {
-    log.stream.warn('Maximum stream client limit reached; new connection closed', {
-      maxClients: config.maxStreamClients,
-      currentClients: streamClients.size,
-    });
+    log.stream.warn(
+      `Maximum stream client limit reached; new connection closed maxClients=${config.maxStreamClients} currentClients=${streamClients.size}`
+    );
 
     res.writeHead(503, {
       'Content-Type': 'application/json; charset=utf-8',
@@ -324,18 +325,18 @@ function addStreamClient(req, res) {
   const client = { id, req, res };
   streamClients.add(client);
 
-  log.stream.info('New stream client connected', {
-    clientId: id,
-    totalClients: streamClients.size,
-    remoteAddress: req.socket && req.socket.remoteAddress,
-  });
+  const remoteAddress =
+    (req.socket && req.socket.remoteAddress) || 'unknown';
+
+  log.stream.info(
+    `New stream client connected clientId=${id} totalClients=${streamClients.size} remoteAddress=${remoteAddress}`
+  );
 
   const removeClient = () => {
     if (streamClients.delete(client)) {
-      log.stream.info('Stream client disconnected', {
-        clientId: id,
-        totalClients: streamClients.size,
-      });
+      log.stream.info(
+        `Stream client disconnected clientId=${id} totalClients=${streamClients.size}`
+      );
     }
   };
 

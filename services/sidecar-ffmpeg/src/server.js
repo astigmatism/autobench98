@@ -111,7 +111,10 @@ async function handleHealth(_req, res) {
   };
 
   if (!ok) {
-    log.sidecar.warn('health check indicates unhealthy state', { reasons });
+    // Single-line, key=value style
+    log.sidecar.warn(
+      `health check indicates unhealthy state reasons=${JSON.stringify(reasons)}`
+    );
   }
 
   sendJson(res, ok ? 200 : 503, payload);
@@ -423,9 +426,8 @@ async function requestListener(req, res) {
 const server = http.createServer((req, res) => {
   // Wrap in a catch-all in case async handlers throw
   Promise.resolve(requestListener(req, res)).catch((err) => {
-    log.sidecar.error('Unexpected error while handling request', {
-      error: err && err.message ? err.message : String(err),
-    });
+    const msg = String(err && err.message ? err.message : err);
+    log.sidecar.error(`Unexpected error while handling request error="${msg}"`);
     if (!res.headersSent) {
       sendJson(res, 500, {
         status: 'error',
@@ -438,11 +440,9 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(config.port, config.host, () => {
-  log.sidecar.info('sidecar listening', {
-    host: config.host,
-    port: config.port,
-    env: config.env,
-    logIngestEnabled: !!(config.logIngestEnabled && config.logIngestUrl),
-    logIngestUrl: config.logIngestEnabled ? config.logIngestUrl : undefined,
-  });
+  const enabled = !!(config.logIngestEnabled && config.logIngestUrl);
+  const ingestUrl = enabled ? config.logIngestUrl : 'disabled';
+  log.sidecar.info(
+    `sidecar listening host=${config.host} port=${config.port} env=${config.env} logIngestEnabled=${enabled} logIngestUrl=${ingestUrl}`
+  );
 });
