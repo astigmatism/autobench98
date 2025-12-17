@@ -109,6 +109,11 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
+        // 🚫 Don't generate request logs for the high-volume log ingest endpoint.
+        if (req.url === '/api/logs/ingest') {
+            return
+        }
+
         if (WS_DEBUG && req.url === '/ws') {
             const headers = req.headers as Record<string, unknown>
             const upgrade = headers['upgrade']
@@ -135,6 +140,11 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     })
 
     app.addHook('onResponse', async (req: FastifyRequest, reply: FastifyReply) => {
+        // 🚫 Mirror the same exemption on the way out.
+        if (req.url === '/api/logs/ingest') {
+            return
+        }
+
         if (!sampledIds.has(req.id)) return
         sampledIds.delete(req.id)
 

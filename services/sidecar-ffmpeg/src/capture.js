@@ -110,7 +110,10 @@ function broadcastFrame(frameBuffer) {
       res.write(frameBuffer);
       res.write(footer);
     } catch (err) {
-      log.stream.warn('Failed to write frame to client', { id, error: String(err && err.message ? err.message : err) });
+      log.stream.warn('Failed to write frame to client', {
+        id,
+        error: String(err && err.message ? err.message : err),
+      });
       try {
         res.end();
       } catch (_) {
@@ -180,7 +183,9 @@ function scheduleRestart(reason) {
   restartTimer = setTimeout(() => {
     restartTimer = null;
     state.capture.restartCount += 1;
-    log.ffmpeg.info('Restarting FFmpeg capture', { restartCount: state.capture.restartCount });
+    log.ffmpeg.info('Restarting FFmpeg capture', {
+      restartCount: state.capture.restartCount,
+    });
     startCapture();
   }, 2000);
 }
@@ -223,16 +228,24 @@ function startCapture() {
 
   ffmpegProc.stderr.on('data', (chunk) => {
     const line = chunk.toString();
-    // Keep stderr signal but route via logger in a compact way
-    const trimmed = line.trim();
-    if (trimmed) {
-      log.ffmpeg.debug(trimmed);
-    }
+
+    // Always parse for metrics so /health stays useful
     parseFfmpegOutputLine(line);
+
+    // Only surface stderr when it looks like a problem; suppress frame/fps spam.
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    if (/\b(error|fail|failed|invalid|no such file|permission denied|unable to)\b/i.test(trimmed)) {
+      log.ffmpeg.error(trimmed);
+    }
+    // Otherwise, ignore normal progress lines entirely.
   });
 
   ffmpegProc.on('error', (err) => {
-    const msg = `FFmpeg process error: ${err && err.message ? err.message : String(err)}`;
+    const msg = `FFmpeg process error: ${
+      err && err.message ? err.message : String(err)
+    }`;
     log.ffmpeg.error(msg);
     state.capture.running = false;
     state.capture.lastError = msg;

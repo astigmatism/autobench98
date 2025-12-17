@@ -276,13 +276,16 @@ async function startRecording(options) {
   });
   rec.ffmpegProc = ffmpegProc;
 
-  // Optional: log FFmpeg stderr for this recording
+  // Optional: log FFmpeg stderr for this recording, but avoid frame/fps spam.
   ffmpegProc.stderr.on('data', (chunk) => {
     const line = chunk.toString();
     const trimmed = line.trim();
-    if (trimmed) {
-      log.ffmpeg.debug(trimmed, { recordingId: rec.id });
+    if (!trimmed) return;
+
+    if (/\b(error|fail|failed|invalid|no such file|permission denied|unable to)\b/i.test(trimmed)) {
+      log.ffmpeg.error(trimmed, { recordingId: rec.id });
     }
+    // otherwise, ignore the normal progress output
   });
 
   ffmpegProc.stdout.on('data', (_chunk) => {
