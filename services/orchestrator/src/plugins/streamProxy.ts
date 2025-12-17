@@ -22,6 +22,7 @@ declare module 'fastify' {
  *
  * Current surface:
  *   GET /api/sidecar/stream  →  GET http://127.0.0.1:SIDECAR_PORT/stream
+ *   GET /api/sidecar/health  →  GET http://127.0.0.1:SIDECAR_PORT/health
  *
  * Sidecar is expected to bind to 0.0.0.0 or 127.0.0.1 on SIDECAR_PORT. We
  * always talk to it via 127.0.0.1 here, so the sidecar port does not need
@@ -74,6 +75,71 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
             return {
                 ok: false,
                 error: 'sidecar stream unavailable',
+            }
+        }
+    })
+
+    /**
+     * Health proxy.
+     *
+     * Used by StreamPane advanced panel to show sidecar uptime and capture metrics.
+     */
+    app.get('/api/sidecar/health', async (_req, reply) => {
+        const target = `${baseUrl}/health`
+
+        try {
+            const { statusCode, body } = await request(target, {
+                method: 'GET',
+                headers: {
+                    accept: 'application/json',
+                },
+            })
+
+            // Non-2xx from sidecar: surface as error to the client.
+            if (statusCode < 200 || statusCode >= 300) {
+                const text = await body.text().catch(() => '')
+                log.warn('sidecar health returned non-2xx', {
+                    statusCode,
+                    bodyPreview: text.slice(0, 200),
+                })
+
+                reply.status(statusCode)
+                return {
+                    ok: false,
+                    error: `sidecar health returned HTTP ${statusCode}`,
+                }
+            }
+
+            // Parse JSON payload and forward it as-is.
+            let json: unknown
+            try {
+                // undici body.json() is available, but be defensive in case of text.
+                json = await body.json()
+            } catch {
+                const text = await body.text().catch(() => '')
+                log.warn('failed to parse sidecar health JSON', {
+                    bodyPreview: text.slice(0, 200),
+                })
+                reply.status(502)
+                return {
+                    ok: false,
+                    error: 'invalid sidecar health payload',
+                }
+            }
+
+            reply
+                .status(200)
+                .header('content-type', 'application/json; charset=utf-8')
+
+            return json
+        } catch (err) {
+            const msg = (err as Error).message ?? String(err)
+            log.warn('error proxying sidecar health', { error: msg })
+
+            reply.status(502)
+            return {
+                ok: false,
+                error: 'sidecar health unavailable',
             }
         }
     })
