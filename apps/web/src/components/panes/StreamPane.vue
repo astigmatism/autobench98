@@ -7,88 +7,167 @@
                 :aria-expanded="showControls ? 'true' : 'false'"
                 aria-controls="stream-controls-panel"
                 title="Show stream settings"
-                @click="showControls = !showControls"
+                @click="toggleControls"
             >
                 ⚙️
             </button>
         </div>
 
-        <!-- Panel wrapper (matches other panes: interior content + advanced panel inside) -->
-        <div class="panel">
-            <div class="panel-body">
-                <!-- Advanced / settings panel (hidden by default), lives inside the panel now -->
-                <transition name="slide-fade">
-                    <div
-                        v-show="showControls"
-                        id="stream-controls-panel"
-                        class="controls-panel"
-                    >
-                        <div class="toolbar">
-                            <div class="left">
-                                <div class="controls">
-                                    <!-- Enable / disable stream -->
-                                    <label class="checkbox panel panel-text">
-                                        <input
-                                            type="checkbox"
-                                            v-model="enabled"
-                                            @change="onEnabledChange"
-                                        />
-                                        <span>Show stream</span>
-                                    </label>
+        <!-- Settings panel (hidden by default) -->
+        <transition name="slide-fade">
+            <div
+                v-show="showControls"
+                id="stream-controls-panel"
+                class="controls-panel"
+            >
+                <div class="toolbar">
+                    <div class="left">
+                        <div class="controls">
+                            <!-- Enable / disable stream -->
+                            <label class="checkbox panel panel-text">
+                                <input
+                                    type="checkbox"
+                                    v-model="enabled"
+                                    @change="onEnabledChange"
+                                />
+                                <span>Show stream</span>
+                            </label>
 
-                                    <!-- Scale mode -->
-                                    <label class="select panel-text">
-                                        <span>Scale</span>
-                                        <select v-model="scaleMode">
-                                            <option value="fit">Fit</option>
-                                            <option value="fill">Fill</option>
-                                            <option value="stretch">Stretch</option>
-                                            <option value="native">1:1</option>
-                                        </select>
-                                    </label>
+                            <!-- Scale mode -->
+                            <label class="select panel-text">
+                                <span>Scale</span>
+                                <select v-model="scaleMode">
+                                    <option value="fit">Fit</option>
+                                    <option value="fill">Fill</option>
+                                    <option value="stretch">Stretch</option>
+                                    <option value="native">1:1</option>
+                                </select>
+                            </label>
 
-                                    <!-- Background style (for black vs pane background) -->
-                                    <label class="select panel-text">
-                                        <span>Background</span>
-                                        <select v-model="bgMode">
-                                            <option value="black">Black</option>
-                                            <option value="pane">Pane</option>
-                                        </select>
-                                    </label>
-                                </div>
-                            </div>
-                            <div class="right">
-                                <!-- Placeholder for future info (resolution/fps, status) -->
-                            </div>
+                            <!-- Background style (for black vs pane background) -->
+                            <label class="select panel-text">
+                                <span>Background</span>
+                                <select v-model="bgMode">
+                                    <option value="black">Black</option>
+                                    <option value="pane">Pane</option>
+                                </select>
+                            </label>
                         </div>
                     </div>
-                </transition>
-
-                <!-- Main viewport (panel-styled) -->
-                <div
-                    class="viewport"
-                    :data-bg="bgMode"
-                >
-                    <div v-if="enabled" class="viewport-inner">
-                        <img
-                            :key="reloadKey"
-                            class="stream-img"
-                            :data-scale="scaleMode"
-                            :src="STREAM_ENDPOINT"
-                            alt="Test machine stream"
-                        />
-                    </div>
-                    <div v-else class="viewport-placeholder">
-                        <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
+                    <div class="right">
+                        <!-- Placeholder for future info (resolution/fps, status) -->
                     </div>
                 </div>
+
+                <!-- Sidecar / stream health details -->
+                <div class="health-panel">
+                    <div class="health-header">
+                        <span class="health-title">Sidecar / Stream health</span>
+
+                        <span class="health-meta">
+                            <span
+                                v-if="healthLoading"
+                                class="health-pill health-pill--loading"
+                            >
+                                Loading…
+                            </span>
+                            <span
+                                v-else-if="health"
+                                class="health-pill health-pill--ok"
+                            >
+                                {{ health.status === 'ok' ? 'OK' : health.status }}
+                            </span>
+                            <span
+                                v-else-if="healthError"
+                                class="health-pill health-pill--error"
+                            >
+                                Error
+                            </span>
+                        </span>
+                    </div>
+
+                    <div v-if="healthError" class="health-error">
+                        ⚠️ {{ healthError }}
+                    </div>
+
+                    <div v-else-if="health" class="health-grid">
+                        <div class="health-row">
+                            <span class="label">Service</span>
+                            <span class="value monospace">{{ health.service }}</span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Uptime</span>
+                            <span class="value">
+                                {{ formattedUptime }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Capture</span>
+                            <span class="value">
+                                <span v-if="health.capture?.running">Running</span>
+                                <span v-else>Stopped</span>
+                                <span v-if="health.capture?.restartCount != null">
+                                    · {{ health.capture.restartCount }} restart<span
+                                        v-if="health.capture.restartCount !== 1"
+                                    >s</span>
+                                </span>
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Frame</span>
+                            <span class="value monospace">
+                                {{ health.capture?.metrics?.frame ?? '—' }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">FPS</span>
+                            <span class="value monospace">
+                                {{ health.capture?.metrics?.fps ?? '—' }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Quality</span>
+                            <span class="value monospace">
+                                {{ health.capture?.metrics?.quality ?? '—' }}
+                            </span>
+                        </div>
+                    </div>
+
+                    <div v-else class="health-empty">
+                        No health data yet.
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- Main viewport (panel-styled) -->
+        <div
+            class="viewport"
+            :data-bg="bgMode"
+        >
+            <div v-if="enabled" class="viewport-inner">
+                <img
+                    :key="reloadKey"
+                    class="stream-img"
+                    :data-scale="scaleMode"
+                    :src="STREAM_ENDPOINT"
+                    alt="Test machine stream"
+                />
+            </div>
+            <div v-else class="viewport-placeholder">
+                <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
             </div>
         </div>
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 /** Accept pane context (optional). */
 type Direction = 'row' | 'col'
@@ -126,6 +205,48 @@ const props = defineProps<{
  * The orchestrator is responsible for talking to the sidecar on localhost.
  */
 const STREAM_ENDPOINT = '/api/sidecar/stream'
+const HEALTH_ENDPOINT = '/api/sidecar/health'
+
+/* -------------------------------------------------------------------------- */
+/*  Sidecar health shape                                                      */
+/* -------------------------------------------------------------------------- */
+
+type SidecarHealthMetrics = {
+    frame?: string
+    fps?: string
+    quality?: string
+    time?: string
+}
+
+type SidecarHealthCapture = {
+    running: boolean
+    lastFrameTs: number | null
+    lastError: string | null
+    restartCount: number
+    metrics?: SidecarHealthMetrics
+    hasLastFrame: boolean
+}
+
+type SidecarHealthEnv = {
+    nodeEnv: string
+    port: number
+    host: string
+    ffmpegArgsConfigured: boolean
+    maxStreamClients: number
+    recordingsRoot: string
+    maxRecordings: number
+}
+
+type SidecarHealth = {
+    service: string
+    status: string
+    timestamp: string
+    uptimeSec: number
+    hostname: string
+    env: SidecarHealthEnv
+    capture?: SidecarHealthCapture
+    reasons: string[]
+}
 
 /** Contrast-aware plain-text color from pane background (for non-panel text) */
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
@@ -179,6 +300,72 @@ const bgMode = ref<'black' | 'pane'>('black')
 /** Reload key forces <img> to re-request the stream (by remounting it). */
 const reloadKey = ref(0)
 
+/* ------------- health state ------------- */
+
+const health = ref<SidecarHealth | null>(null)
+const healthLoading = ref(false)
+const healthError = ref<string | null>(null)
+
+/* Format uptime like "1h 32m 10s" or "12m 05s" etc. */
+const formattedUptime = computed(() => {
+    const sec = health.value?.uptimeSec
+    if (sec == null || !Number.isFinite(sec) || sec < 0) return '—'
+
+    const total = Math.floor(sec)
+    const hours = Math.floor(total / 3600)
+    const minutes = Math.floor((total % 3600) / 60)
+    const seconds = total % 60
+
+    const parts: string[] = []
+    if (hours > 0) parts.push(`${hours}h`)
+    if (minutes > 0 || hours > 0) parts.push(`${minutes}m`)
+    parts.push(`${seconds}s`)
+
+    return parts.join(' ')
+})
+
+async function loadHealth() {
+    healthLoading.value = true
+    healthError.value = null
+
+    try {
+        const res = await fetch(HEALTH_ENDPOINT, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json'
+            }
+        })
+
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`)
+        }
+
+        const json = (await res.json()) as SidecarHealth
+        health.value = json
+    } catch (err: any) {
+        health.value = null
+        healthError.value =
+            err?.message ? `Failed to load health: ${err.message}` : 'Failed to load health'
+    } finally {
+        healthLoading.value = false
+    }
+}
+
+function toggleControls() {
+    const next = !showControls.value
+    showControls.value = next
+}
+
+/* When advanced panel is opened, fetch fresh health details. */
+watch(
+    () => showControls.value,
+    (open) => {
+        if (open) {
+            void loadHealth()
+        }
+    }
+)
+
 function onEnabledChange() {
     // When re-enabling the stream, force a reload so we don't rely on a stale connection.
     if (enabled.value) {
@@ -219,7 +406,7 @@ function reloadStream() {
     z-index: 30;
 }
 
-/* Gear button (same pattern as logs pane) */
+/* Gear button (same pattern as logs / CF pane) */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -235,7 +422,10 @@ function reloadStream() {
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease,
+    transition:
+        opacity 120ms ease,
+        background 120ms ease,
+        border-color 120ms ease,
         transform 60ms ease;
     z-index: 31;
 }
@@ -252,29 +442,6 @@ function reloadStream() {
     transform: translateY(-1px);
 }
 
-/* Main panel wrapper (matches other panes: CF Imager, etc.) */
-.panel {
-    background: #0b0d12;
-    border: 1px solid #1f2933;
-    border-radius: 8px;
-    padding: 8px;
-    color: var(--panel-fg);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-height: 0;
-    flex: 1 1 0%;
-}
-
-.panel-body {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    flex: 1 1 0%;
-    min-height: 0;
-}
-
 /* Slide-fade transition (for controls panel) */
 .slide-fade-enter-active,
 .slide-fade-leave-active {
@@ -286,7 +453,7 @@ function reloadStream() {
     transform: translateY(-6px);
 }
 
-/* Panel container for controls */
+/* Panel container */
 .controls-panel {
     display: flex;
     flex-direction: column;
@@ -300,14 +467,6 @@ function reloadStream() {
     align-items: center;
     gap: 8px;
     font-size: 14px;
-}
-
-/* plain text bits should use pane foreground */
-.plain-text {
-    color: var(--pane-fg);
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
 }
 
 /* Panel-styled controls keep panel foreground for readability */
@@ -394,6 +553,90 @@ function reloadStream() {
     background: #1a1a1a;
 }
 
+/* Health panel */
+.health-panel {
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px dashed #4b5563;
+    background: #020617;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.76rem;
+    color: var(--panel-fg);
+}
+
+.health-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+}
+
+.health-title {
+    font-weight: 500;
+    opacity: 0.9;
+}
+
+.health-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.health-pill {
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid #374151;
+    font-size: 0.72rem;
+    line-height: 1.4;
+}
+
+.health-pill--ok {
+    border-color: #22c55e;
+    background: #022c22;
+}
+
+.health-pill--loading {
+    border-color: #38bdf8;
+    background: #022c3a;
+}
+
+.health-pill--error {
+    border-color: #ef4444;
+    background: #450a0a;
+}
+
+.health-error {
+    font-size: 0.74rem;
+    color: #fecaca;
+}
+
+.health-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 10px;
+}
+
+.health-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.health-row .label {
+    opacity: 0.7;
+}
+
+.health-row .value {
+    text-align: right;
+}
+
+.health-empty {
+    opacity: 0.7;
+}
+
 /* Main viewport */
 .viewport {
     flex: 1;
@@ -460,5 +703,10 @@ function reloadStream() {
     color: var(--panel-fg);
     font-size: 13px;
     opacity: 0.75;
+}
+
+.monospace {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+        'Courier New', monospace;
 }
 </style>
