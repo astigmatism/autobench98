@@ -18,11 +18,6 @@
             <div v-show="showControls" id="stream-controls-panel" class="controls-panel">
                 <div class="toolbar">
                     <div class="left">
-                        <!-- Plain text uses pane foreground -->
-                        <span class="plain-text meta">
-                            Stream controls
-                        </span>
-
                         <div class="controls">
                             <!-- Enable / disable stream -->
                             <label class="checkbox panel panel-text">
@@ -53,11 +48,6 @@
                                     <option value="pane">Pane</option>
                                 </select>
                             </label>
-
-                            <!-- Reload -->
-                            <button class="btn" @click="reloadStream">
-                                Reload
-                            </button>
                         </div>
                     </div>
                     <div class="right">
@@ -388,6 +378,7 @@ function reloadStream() {
 /* Background mode: pane vs black */
 .viewport[data-bg='pane'] {
     background: transparent;
+    border-color: transparent;
 }
 
 /* Inner container centers the stream visually */
