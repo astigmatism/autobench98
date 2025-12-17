@@ -13,66 +13,75 @@
             </button>
         </div>
 
-        <!-- Settings panel (hidden by default) -->
-        <transition name="slide-fade">
-            <div v-show="showControls" id="stream-controls-panel" class="controls-panel">
-                <div class="toolbar">
-                    <div class="left">
-                        <div class="controls">
-                            <!-- Enable / disable stream -->
-                            <label class="checkbox panel panel-text">
-                                <input
-                                    type="checkbox"
-                                    v-model="enabled"
-                                    @change="onEnabledChange"
-                                />
-                                <span>Show stream</span>
-                            </label>
+        <!-- Panel wrapper (matches other panes: interior content + advanced panel inside) -->
+        <div class="panel">
+            <div class="panel-body">
+                <!-- Advanced / settings panel (hidden by default), lives inside the panel now -->
+                <transition name="slide-fade">
+                    <div
+                        v-show="showControls"
+                        id="stream-controls-panel"
+                        class="controls-panel"
+                    >
+                        <div class="toolbar">
+                            <div class="left">
+                                <div class="controls">
+                                    <!-- Enable / disable stream -->
+                                    <label class="checkbox panel panel-text">
+                                        <input
+                                            type="checkbox"
+                                            v-model="enabled"
+                                            @change="onEnabledChange"
+                                        />
+                                        <span>Show stream</span>
+                                    </label>
 
-                            <!-- Scale mode -->
-                            <label class="select panel-text">
-                                <span>Scale</span>
-                                <select v-model="scaleMode">
-                                    <option value="fit">Fit</option>
-                                    <option value="fill">Fill</option>
-                                    <option value="stretch">Stretch</option>
-                                    <option value="native">1:1</option>
-                                </select>
-                            </label>
+                                    <!-- Scale mode -->
+                                    <label class="select panel-text">
+                                        <span>Scale</span>
+                                        <select v-model="scaleMode">
+                                            <option value="fit">Fit</option>
+                                            <option value="fill">Fill</option>
+                                            <option value="stretch">Stretch</option>
+                                            <option value="native">1:1</option>
+                                        </select>
+                                    </label>
 
-                            <!-- Background style (for black vs pane background) -->
-                            <label class="select panel-text">
-                                <span>Background</span>
-                                <select v-model="bgMode">
-                                    <option value="black">Black</option>
-                                    <option value="pane">Pane</option>
-                                </select>
-                            </label>
+                                    <!-- Background style (for black vs pane background) -->
+                                    <label class="select panel-text">
+                                        <span>Background</span>
+                                        <select v-model="bgMode">
+                                            <option value="black">Black</option>
+                                            <option value="pane">Pane</option>
+                                        </select>
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="right">
+                                <!-- Placeholder for future info (resolution/fps, status) -->
+                            </div>
                         </div>
                     </div>
-                    <div class="right">
-                        <!-- Placeholder for future info (resolution/fps, status) -->
+                </transition>
+
+                <!-- Main viewport (panel-styled) -->
+                <div
+                    class="viewport"
+                    :data-bg="bgMode"
+                >
+                    <div v-if="enabled" class="viewport-inner">
+                        <img
+                            :key="reloadKey"
+                            class="stream-img"
+                            :data-scale="scaleMode"
+                            :src="STREAM_ENDPOINT"
+                            alt="Test machine stream"
+                        />
+                    </div>
+                    <div v-else class="viewport-placeholder">
+                        <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
                     </div>
                 </div>
-            </div>
-        </transition>
-
-        <!-- Main viewport (panel-styled) -->
-        <div
-            class="viewport"
-            :data-bg="bgMode"
-        >
-            <div v-if="enabled" class="viewport-inner">
-                <img
-                    :key="reloadKey"
-                    class="stream-img"
-                    :data-scale="scaleMode"
-                    :src="STREAM_ENDPOINT"
-                    alt="Test machine stream"
-                />
-            </div>
-            <div v-else class="viewport-placeholder">
-                <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
             </div>
         </div>
     </div>
@@ -243,6 +252,29 @@ function reloadStream() {
     transform: translateY(-1px);
 }
 
+/* Main panel wrapper (matches other panes: CF Imager, etc.) */
+.panel {
+    background: #0b0d12;
+    border: 1px solid #1f2933;
+    border-radius: 8px;
+    padding: 8px;
+    color: var(--panel-fg);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    flex: 1 1 0%;
+}
+
+.panel-body {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1 1 0%;
+    min-height: 0;
+}
+
 /* Slide-fade transition (for controls panel) */
 .slide-fade-enter-active,
 .slide-fade-leave-active {
@@ -254,7 +286,7 @@ function reloadStream() {
     transform: translateY(-6px);
 }
 
-/* Panel container */
+/* Panel container for controls */
 .controls-panel {
     display: flex;
     flex-direction: column;
