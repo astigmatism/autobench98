@@ -202,7 +202,7 @@ function startCapture() {
   const args = config.ffmpegArgs.split(' ').filter(Boolean);
   args.push('pipe:');
 
-  console.log('[capture] Starting FFmpeg with args:', args.join(' '));
+  // console.log('[capture] Starting FFmpeg with args:', args.join(' '));
 
   frameBufferParts = [];
   state.capture.running = false;
@@ -293,18 +293,14 @@ function addStreamClient(req, res) {
   });
 
   const id = nextClientId++;
-  console.log(
-    `[capture] New stream client ${id} connected (total=${streamClients.size + 1})`
-  );
+  // console.log(`[capture] New stream client ${id} connected (total=${streamClients.size + 1})`);
 
   const client = { id, req, res };
   streamClients.add(client);
 
   const removeClient = () => {
     if (streamClients.delete(client)) {
-      console.log(
-        `[capture] Stream client ${id} disconnected (total=${streamClients.size})`
-      );
+      // console.log(`[capture] Stream client ${id} disconnected (total=${streamClients.size})`);
     }
   };
 
