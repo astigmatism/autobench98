@@ -2,7 +2,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { promises as fsp } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, relative, extname } from 'node:path'
 
 import type {
     CfImagerConfig,
@@ -224,6 +224,160 @@ export class CfImagerService {
     public async changeDirectory(newRel: string): Promise<void> {
         // console.log('[cf-imager] changeDirectory', { newRel })
         await this.listDirectory(newRel)
+    }
+
+    /**
+     * Search within the given cwd (and all subdirectories) for files whose
+     * basename either:
+     *   1) starts with the query (highest priority), or
+     *   2) contains the query (secondary priority).
+     *
+     * Results are returned as a synthetic directory listing where each entry's
+     * name is the path *relative to the search origin* (e.g. "subdir/foo.img").
+     *
+     * If the query is empty or shorter than 2 characters, this behaves as a
+     * "clear search" and emits a normal directory snapshot for cwd.
+     */
+    public async search(cwdRel: string, query: string): Promise<void> {
+        const rawQuery = (query ?? '').trim().toLowerCase()
+
+        // Clear-search behavior for short queries: just show the normal listing
+        // rooted at the requested cwd.
+        if (!rawQuery || rawQuery.length < 2) {
+            try {
+                const abs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
+                this.cwdAbs = abs
+                await this.emitFsUpdated()
+            } catch (err) {
+                this.emitError(`search (clear) failed: ${(err as Error).message}`)
+            }
+            return
+        }
+
+        try {
+            const originAbs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
+            this.cwdAbs = originAbs
+
+            const rootDir = this.config.rootDir
+            const maxResults = this.config.maxEntriesPerDir ?? 256
+            const visibleExts = (this.config.visibleExtensions ?? []).map(e =>
+                e.toLowerCase()
+            )
+            const hasVisibleFilter = visibleExts.length > 0
+
+            const prefixMatches: CfImagerFsState['entries'] = []
+            const partialMatches: CfImagerFsState['entries'] = []
+
+            type QueueItem = { absDir: string }
+            const queue: QueueItem[] = [{ absDir: originAbs }]
+
+            const shouldIncludeFile = (fileName: string, fileAbs: string): boolean => {
+                if (!hasVisibleFilter) return true
+                const ext = extname(fileAbs).toLowerCase()
+                return visibleExts.includes(ext)
+            }
+
+            while (queue.length > 0 && (prefixMatches.length + partialMatches.length) < maxResults) {
+                const { absDir } = queue.shift()!
+
+                let dirEntries: import('node:fs').Dirent[]
+                try {
+                    dirEntries = await fsp.readdir(absDir, { withFileTypes: true })
+                } catch {
+                    // If a directory becomes unavailable mid-scan, just skip it.
+                    continue
+                }
+
+                for (const dirent of dirEntries) {
+                    const name = dirent.name
+                    const entryAbs = join(absDir, name)
+
+                    if (dirent.isDirectory()) {
+                        // Always walk into subdirectories; we don't add them as search results
+                        // unless you later decide directories should also be surfaced.
+                        queue.push({ absDir: entryAbs })
+                        continue
+                    }
+
+                    if (!dirent.isFile()) {
+                        continue
+                    }
+
+                    if (!shouldIncludeFile(name, entryAbs)) {
+                        continue
+                    }
+
+                    const lowerBase = name.toLowerCase()
+                    const isPrefix = lowerBase.startsWith(rawQuery)
+                    const isContains = !isPrefix && lowerBase.includes(rawQuery)
+
+                    if (!isPrefix && !isContains) {
+                        continue
+                    }
+
+                    // Name for the synthetic entry is the path relative to the search origin
+                    // so that operations (rename/move/delete) still resolve correctly when
+                    // combined with the current cwd on the frontend.
+                    const relFromOriginRaw = relative(originAbs, entryAbs)
+                    const relFromOrigin = relFromOriginRaw.replace(/\\/g, '/')
+
+                    let stat
+                    try {
+                        stat = await fsp.stat(entryAbs)
+                    } catch {
+                        // If the file disappears between readdir and stat, skip it.
+                        continue
+                    }
+
+                    const entry = {
+                        name: relFromOrigin,
+                        kind: 'file' as const,
+                        sizeBytes: stat.size,
+                        modifiedAt: stat.mtime.toISOString(),
+                    }
+
+                    if (isPrefix) {
+                        prefixMatches.push(entry)
+                    } else if (isContains) {
+                        partialMatches.push(entry)
+                    }
+
+                    if ((prefixMatches.length + partialMatches.length) >= maxResults) {
+                        break
+                    }
+                }
+            }
+
+            // Build FS state rooted at the search origin for consistency with normal listings.
+            const baseFs = listDirectoryState(
+                rootDir,
+                originAbs,
+                this.config.maxEntriesPerDir,
+                this.config.visibleExtensions
+            )
+
+            const entries = prefixMatches.concat(partialMatches).slice(0, maxResults)
+
+            const fs: CfImagerFsState = {
+                rootPath: baseFs.rootPath,
+                cwd: baseFs.cwd,
+                entries,
+            }
+
+            this.state.fs = fs
+
+            const diskFreeBytes = await this.getDiskFreeBytes()
+            this.state.diskFreeBytes = diskFreeBytes
+
+            this.deps.events.publish({
+                kind: 'cf-fs-updated',
+                at: Date.now(),
+                fs,
+                diskFreeBytes,
+            })
+        } catch (err) {
+            this.emitError(`search failed: ${(err as Error).message}`)
+        }
     }
 
     public async createFolder(name: string): Promise<void> {

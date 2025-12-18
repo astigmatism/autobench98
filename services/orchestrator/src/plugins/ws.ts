@@ -512,6 +512,33 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             return
         }
 
+        if (kind === 'search') {
+            const cwdRaw = payload.cwd
+            const queryRaw = payload.query
+
+            const cwd =
+                typeof cwdRaw === 'string' && cwdRaw.trim()
+                    ? cwdRaw.trim()
+                    : '.'
+            const query =
+                typeof queryRaw === 'string'
+                    ? queryRaw.trim()
+                    : ''
+
+            try {
+                // Empty query is allowed and can mean "clear search / show normal listing".
+                await cfImager.search(cwd, query)
+            } catch (e) {
+                logWs.warn('cf-imager.command search failed', {
+                    cwd: cwdRaw,
+                    query: queryRaw,
+                    err: (e as Error).message
+                })
+            }
+
+            return
+        }
+
         // Unknown / unsupported command kind
         logWs.warn('cf-imager.command: unknown kind', { kind })
     }
