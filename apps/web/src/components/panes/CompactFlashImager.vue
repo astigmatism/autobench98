@@ -132,7 +132,7 @@
                 type="text"
                 v-model="pathInput"
                 spellcheck="false"
-                placeholder="Type at least 2 characters…"
+                placeholder=""
               />
             </label>
 
@@ -1854,7 +1854,7 @@ function formatEta(totalSeconds: number): string {
   border: 1px solid #374151;
   border-radius: 6px;
   padding: 0 8px;
-  min-width: 180px;
+  min-width: 120px;
   font-size: 0.76rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     'Courier New', monospace;
