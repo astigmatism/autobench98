@@ -234,15 +234,19 @@ export class CfImagerService {
     }
 
     /**
-     * Search within the given cwd (and all subdirectories) for files and folders
-     * whose basename either:
+     * Search within the given cwd (and all of its subdirectories) for files and
+     * folders whose basename either:
      *   1) starts with the query (highest priority), or
      *   2) contains the query (secondary priority).
+     *
+     * The search is *rooted at the current directory*: it does not search up
+     * toward the global root and it does not start from the service root unless
+     * the cwd itself is the root.
      *
      * Results are returned as a synthetic directory listing where each entry's
      * name is the path *relative to the search origin* (e.g. "subdir/foo.img").
      *
-     * If the query is empty or shorter than 1 characters, this behaves as a
+     * If the query is empty or shorter than 1 character, this behaves as a
      * "clear search" and emits a normal directory snapshot for cwd.
      */
     public async search(cwdRel: string, query: string): Promise<void> {
@@ -269,6 +273,7 @@ export class CfImagerService {
         }
 
         try {
+            // IMPORTANT: root the search at the current directory, not the global root.
             const originAbs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
             this.cwdAbs = originAbs
 
@@ -295,7 +300,10 @@ export class CfImagerService {
                 return visibleExts.includes(ext)
             }
 
-            while (queue.length > 0 && (prefixMatches.length + partialMatches.length) < maxResults) {
+            while (
+                queue.length > 0 &&
+                (prefixMatches.length + partialMatches.length) < maxResults
+            ) {
                 const { absDir } = queue.shift()!
 
                 let dirEntries: import('node:fs').Dirent[]
@@ -318,7 +326,7 @@ export class CfImagerService {
                     const isContains = !isPrefix && lowerBase.includes(rawQuery)
 
                     if (dirent.isDirectory()) {
-                        // Always walk into subdirectories.
+                        // Always walk into subdirectories (downward only).
                         queue.push({ absDir: entryAbs })
 
                         // Also surface matching directories as results.
@@ -377,7 +385,8 @@ export class CfImagerService {
                 }
             }
 
-            // Build FS state rooted at the search origin for consistency with normal listings.
+            // Build FS state rooted at the search origin for consistency with
+            // normal listings (cwd is still the directory where the search started).
             const baseFs = listDirectoryState(
                 rootDir,
                 originAbs,
@@ -414,6 +423,7 @@ export class CfImagerService {
             this.emitError(msg)
         }
     }
+
 
     public async createFolder(name: string): Promise<void> {
         // console.log('[cf-imager] createFolder', { name })
