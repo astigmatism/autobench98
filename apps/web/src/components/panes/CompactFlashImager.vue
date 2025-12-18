@@ -1115,8 +1115,10 @@ watch(
 
 /**
  * Search behavior:
- * - With < 2 characters, we treat it as "no search" and ask backend to clear search.
- * - With >= 2 characters, we request a recursive search from the current cwd.
+ * - With < 2 characters, we treat it as "no search" and ask backend to clear search
+ *   but we DO NOT show the FS shim.
+ * - With >= 2 characters, we request a recursive search from the current cwd,
+ *   and show the shim while we wait.
  * - We debounce to avoid spamming the backend while typing.
  */
 let searchTimeout: number | null = null
@@ -1138,17 +1140,18 @@ watch(
         return
       }
 
-      // Mark FS as busy while we wait for search results.
-      fsBusy.value = true
-
       if (query.length < SEARCH_MIN_CHARS) {
-        // Clearing search: reset client-side search state and ask the backend
-        // for a normal directory listing.
+        // Not enough characters: treat as "no search" locally and send a clear
+        // hint to the backend, but don't block the UI with the shim.
         searchInFlight.value = false
         searchResults.value = null
+        fsBusy.value = false
+
         sendCfImagerCommand('search', { cwd, query: '' })
       } else {
-        // New / updated search query – capture the next fs snapshot as results.
+        // New / updated search query – capture the next fs snapshot as results,
+        // and show the busy shim while we wait.
+        fsBusy.value = true
         searchInFlight.value = true
         sendCfImagerCommand('search', { cwd, query })
       }
