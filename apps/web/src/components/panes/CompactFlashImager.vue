@@ -729,14 +729,49 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
 }
 
 /**
- * Drag-and-drop selection (simplified):
+ * Drag-and-drop selection (with custom preview):
  * - dragSelection: the set of names currently being dragged.
  * - dropTargetName: folder name currently highlighted as a drop target.
  * - dragActive: simple boolean flag to gate dragover/drop handling.
+ * - dragPreviewEl: DOM element used as composite drag ghost.
  */
 const dragSelection = ref<string[]>([])
 const dropTargetName = ref<string | null>(null)
 const dragActive = ref(false)
+const dragPreviewEl = ref<HTMLElement | null>(null)
+
+function buildDragPreview(names: string[]): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'fs-drag-preview'
+
+  const header = document.createElement('div')
+  header.className = 'fs-drag-preview-header'
+  header.textContent =
+    names.length === 1 ? (names[0] ?? '') : `${names.length} items`
+  el.appendChild(header)
+
+  const list = document.createElement('div')
+  list.className = 'fs-drag-preview-list'
+
+  const toShow = names.slice(0, 3)
+  toShow.forEach(name => {
+    const row = document.createElement('div')
+    row.className = 'fs-drag-preview-row'
+    row.textContent = name
+    list.appendChild(row)
+  })
+
+  if (names.length > 3) {
+    const more = document.createElement('div')
+    more.className = 'fs-drag-preview-more'
+    more.textContent = `+ ${names.length - 3} more`
+    list.appendChild(more)
+  }
+
+  el.appendChild(list)
+  document.body.appendChild(el)
+  return el
+}
 
 function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
   const name = entry.name
@@ -760,6 +795,12 @@ function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
   try {
     dt.setData('application/x-cf-imager-names', JSON.stringify({ names }))
     dt.effectAllowed = 'move'
+
+    if (typeof dt.setDragImage === 'function') {
+      const preview = buildDragPreview(names)
+      dragPreviewEl.value = preview
+      dt.setDragImage(preview, 10, 10)
+    }
   } catch {
     // Ignore; browser will still show a basic drag ghost.
   }
@@ -769,6 +810,12 @@ function onEntryDragEnd(_ev: DragEvent) {
   dragSelection.value = []
   dragActive.value = false
   dropTargetName.value = null
+
+  const preview = dragPreviewEl.value
+  if (preview && preview.parentNode) {
+    preview.parentNode.removeChild(preview)
+  }
+  dragPreviewEl.value = null
 }
 
 function onEntryDragOver(ev: DragEvent, entry: CfImagerFsEntry) {
@@ -1794,7 +1841,7 @@ function formatEta(totalSeconds: number): string {
 
 .fs-shim-inner {
   display: inline-flex;
-  align-items: center;
+  alignments: center;
   gap: 8px;
   font-size: 0.8rem;
   color: #e5e7eb;
@@ -2071,5 +2118,46 @@ function formatEta(totalSeconds: number): string {
     max-width: none;
     margin: 0 8px;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Drag preview (multi-item ghost)                                           */
+/* -------------------------------------------------------------------------- */
+
+.fs-drag-preview {
+  position: fixed;
+  top: -9999px;
+  left: -9999px;
+  z-index: 9999;
+  pointer-events: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid #4b5563;
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.75),
+    0 0 0 1px rgba(15, 23, 42, 0.9);
+  color: #e5e7eb;
+  font-size: 0.76rem;
+}
+
+.fs-drag-preview-header {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.fs-drag-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fs-drag-preview-row {
+  opacity: 0.9;
+}
+
+.fs-drag-preview-more {
+  opacity: 0.7;
+  font-style: italic;
 }
 </style>
