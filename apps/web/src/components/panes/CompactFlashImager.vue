@@ -171,8 +171,16 @@
               class="fs-row"
               :data-kind="entry.kind"
               :data-selected="isSelected(entry) ? 'true' : 'false'"
+              :data-drop-target="dropTargetName === entry.name ? 'true' : 'false'"
+              :draggable="entry.kind === 'file' || entry.kind === 'dir'"
               @click.stop.prevent="onEntryClick($event, entry)"
               @dblclick.stop.prevent="onEntryDblClick(entry)"
+              @dragstart="onEntryDragStart($event, entry)"
+              @dragend="onEntryDragEnd($event)"
+              @dragover="onEntryDragOver($event, entry)"
+              @dragenter="onEntryDragEnter($event, entry)"
+              @dragleave="onEntryDragLeave($event, entry)"
+              @drop="onEntryDrop($event, entry)"
             >
               <span class="name">
                 <span class="icon">{{ entry.kind === 'dir' ? '📁' : '📄' }}</span>
@@ -189,7 +197,7 @@
             </div>
           </div>
 
-          <!-- Shim overlay while FS is busy (dir changes / delete refresh) -->
+          <!-- Shim overlay while FS is busy (dir changes / delete refresh / move refresh) -->
           <div v-if="fsBusy" class="fs-shim">
             <div class="fs-shim-inner">
               <span class="spinner shim-spinner"></span>
@@ -688,7 +696,7 @@ const diskFreeDisplay = computed(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Selection state                                                           */
+/*  Selection + drag state                                                    */
 /* -------------------------------------------------------------------------- */
 
 const selectedNames = ref<string[]>([])
@@ -717,6 +725,95 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
   } else {
     selectedNames.value = [name]
   }
+}
+
+/**
+ * Drag-and-drop selection:
+ * - dragSelection: the set of names currently being dragged.
+ * - dropTargetName: folder name currently highlighted as a drop target.
+ */
+const dragSelection = ref<string[]>([])
+const dropTargetName = ref<string | null>(null)
+const dragActive = computed(() => dragSelection.value.length > 0)
+
+function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
+  const name = entry.name
+
+  // If the entry is already part of the multi-selection, drag all selected.
+  // Otherwise, drag just this one and reset selection to it.
+  let names: string[]
+  if (selectedNames.value.includes(name) && selectedNames.value.length > 0) {
+    names = selectedNames.value.slice()
+  } else {
+    selectedNames.value = [name]
+    names = [name]
+  }
+
+  dragSelection.value = names
+
+  if (ev.dataTransfer) {
+    try {
+      ev.dataTransfer.setData('text/plain', names.join(','))
+      ev.dataTransfer.effectAllowed = 'move'
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function onEntryDragEnd(_ev: DragEvent) {
+  dragSelection.value = []
+  dropTargetName.value = null
+}
+
+function onEntryDragOver(ev: DragEvent, entry: CfImagerFsEntry) {
+  if (!dragActive.value) return
+  if (entry.kind !== 'dir') return
+  if (dragSelection.value.includes(entry.name)) return
+
+  // Allow drop on valid folder targets.
+  ev.preventDefault()
+  if (ev.dataTransfer) {
+    ev.dataTransfer.dropEffect = 'move'
+  }
+}
+
+function onEntryDragEnter(ev: DragEvent, entry: CfImagerFsEntry) {
+  if (!dragActive.value) return
+  if (entry.kind !== 'dir') return
+  if (dragSelection.value.includes(entry.name)) return
+
+  ev.preventDefault()
+  dropTargetName.value = entry.name
+}
+
+function onEntryDragLeave(_ev: DragEvent, entry: CfImagerFsEntry) {
+  if (dropTargetName.value === entry.name) {
+    dropTargetName.value = null
+  }
+}
+
+function onEntryDrop(ev: DragEvent, entry: CfImagerFsEntry) {
+  if (!dragActive.value) return
+  if (entry.kind !== 'dir') return
+
+  const names = dragSelection.value.slice()
+  if (names.length === 0) return
+  // Don't attempt to move a folder into itself
+  if (names.includes(entry.name)) return
+
+  ev.preventDefault()
+
+  dropTargetName.value = null
+  dragSelection.value = []
+
+  // Show shim while backend processes the move and refreshes this directory.
+  fsBusy.value = true
+
+  sendCfImagerCommand('move', {
+    names,
+    targetDirName: entry.name
+  })
 }
 
 /* -------------------------------------------------------------------------- */
@@ -751,16 +848,20 @@ watch(
     pathInput.value = cwd
     fsBusy.value = false
     selectedNames.value = []
+    dragSelection.value = []
+    dropTargetName.value = null
   },
   { immediate: true }
 )
 
-// Clear busy state and selection when entries list changes (e.g., delete completes)
+// Clear busy state and selection when entries list changes (e.g., delete/move completes)
 watch(
   () => view.value.fs.entries.length,
   () => {
     fsBusy.value = false
     selectedNames.value = []
+    dragSelection.value = []
+    dropTargetName.value = null
   }
 )
 
@@ -1065,6 +1166,7 @@ type CfImagerCommandKind =
   | 'delete'
   | 'readImage'
   | 'writeImage'
+  | 'move'
 
 type CfImagerCommandPayload = Record<string, unknown>
 
@@ -1607,6 +1709,15 @@ function formatEta(totalSeconds: number): string {
 }
 .fs-row[data-selected='true'] .name {
   color: #e5e7eb;
+}
+
+/* Highlight folder when it's the current drop target */
+.fs-row[data-kind='dir'][data-drop-target='true'] {
+  background: #052e16;
+  border-bottom-color: #14532d;
+}
+.fs-row[data-kind='dir'][data-drop-target='true'] .name {
+  color: #bbf7d0;
 }
 
 .fs-row .name {
