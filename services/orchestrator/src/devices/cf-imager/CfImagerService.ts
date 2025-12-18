@@ -234,8 +234,8 @@ export class CfImagerService {
     }
 
     /**
-     * Search within the given cwd (and all subdirectories) for files whose
-     * basename either:
+     * Search within the given cwd (and all subdirectories) for files and folders
+     * whose basename either:
      *   1) starts with the query (highest priority), or
      *   2) contains the query (secondary priority).
      *
@@ -310,10 +310,31 @@ export class CfImagerService {
                     const name = dirent.name
                     const entryAbs = join(absDir, name)
 
+                    // Compute rel-from-origin once; used for both dirs and files.
+                    const relFromOriginRaw = relative(originAbs, entryAbs)
+                    const relFromOrigin = relFromOriginRaw.replace(/\\/g, '/')
+                    const lowerBase = name.toLowerCase()
+                    const isPrefix = lowerBase.startsWith(rawQuery)
+                    const isContains = !isPrefix && lowerBase.includes(rawQuery)
+
                     if (dirent.isDirectory()) {
-                        // Always walk into subdirectories; we don't add them as search results
-                        // unless you later decide directories should also be surfaced.
+                        // Always walk into subdirectories.
                         queue.push({ absDir: entryAbs })
+
+                        // Also surface matching directories as results.
+                        if (isPrefix || isContains) {
+                            const entry = {
+                                name: relFromOrigin,
+                                kind: 'dir' as const,
+                            }
+
+                            if (isPrefix) {
+                                prefixMatches.push(entry)
+                            } else {
+                                partialMatches.push(entry)
+                            }
+                        }
+
                         continue
                     }
 
@@ -325,19 +346,9 @@ export class CfImagerService {
                         continue
                     }
 
-                    const lowerBase = name.toLowerCase()
-                    const isPrefix = lowerBase.startsWith(rawQuery)
-                    const isContains = !isPrefix && lowerBase.includes(rawQuery)
-
                     if (!isPrefix && !isContains) {
                         continue
                     }
-
-                    // Name for the synthetic entry is the path relative to the search origin
-                    // so that operations (rename/move/delete) still resolve correctly when
-                    // combined with the current cwd on the frontend.
-                    const relFromOriginRaw = relative(originAbs, entryAbs)
-                    const relFromOrigin = relFromOriginRaw.replace(/\\/g, '/')
 
                     let stat
                     try {
@@ -347,7 +358,7 @@ export class CfImagerService {
                         continue
                     }
 
-                    const entry = {
+                    const fileEntry = {
                         name: relFromOrigin,
                         kind: 'file' as const,
                         sizeBytes: stat.size,
@@ -355,9 +366,9 @@ export class CfImagerService {
                     }
 
                     if (isPrefix) {
-                        prefixMatches.push(entry)
-                    } else if (isContains) {
-                        partialMatches.push(entry)
+                        prefixMatches.push(fileEntry)
+                    } else {
+                        partialMatches.push(fileEntry)
                     }
 
                     if ((prefixMatches.length + partialMatches.length) >= maxResults) {
@@ -403,7 +414,6 @@ export class CfImagerService {
             this.emitError(msg)
         }
     }
-
 
     public async createFolder(name: string): Promise<void> {
         // console.log('[cf-imager] createFolder', { name })
