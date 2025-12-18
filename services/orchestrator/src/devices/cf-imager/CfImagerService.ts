@@ -242,7 +242,7 @@ export class CfImagerService {
      * Results are returned as a synthetic directory listing where each entry's
      * name is the path *relative to the search origin* (e.g. "subdir/foo.img").
      *
-     * If the query is empty or shorter than 2 characters, this behaves as a
+     * If the query is empty or shorter than 1 characters, this behaves as a
      * "clear search" and emits a normal directory snapshot for cwd.
      */
     public async search(cwdRel: string, query: string): Promise<void> {
@@ -251,7 +251,7 @@ export class CfImagerService {
 
         // Clear-search behavior for short queries: just show the normal listing
         // rooted at the requested cwd.
-        if (!rawQuery || rawQuery.length < 2) {
+        if (!rawQuery || rawQuery.length < 1) {
             try {
                 this.deps.log?.debug(
                     `[cf-imager] search-clear cwd=${cwdLabel} query="${rawQuery}"`
