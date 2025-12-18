@@ -20,10 +20,10 @@ import {
 interface CfImagerServiceDeps {
     events: CfImagerEventSink
     log?: {
-        debug(msg: string): void
-        info(msg: string): void
-        warn(msg: string): void
-        error(msg: string): void
+        debug(msg: string, meta?: Record<string, unknown>): void
+        info(msg: string, meta?: Record<string, unknown>): void
+        warn(msg: string, meta?: Record<string, unknown>): void
+        error(msg: string, meta?: Record<string, unknown>): void
     }
 }
 
@@ -81,19 +81,16 @@ export class CfImagerService {
             // diskFreeBytes will be populated on the first emitFsUpdated()
         }
 
-        /*
-        console.log(
-            '[cf-imager] service constructed',
-            JSON.stringify({
-                rootDir: this.config.rootDir,
-                maxEntriesPerDir: this.config.maxEntriesPerDir,
-                readScriptPath: this.config.readScriptPath,
-                writeScriptPath: this.config.writeScriptPath,
-                visibleExtensions: this.config.visibleExtensions,
-                fsPollIntervalMs: this.config.fsPollIntervalMs ?? 0,
-            })
-        )
-        */
+        this.deps.log?.debug('[cf-imager] service constructed', {
+            rootDir: this.config.rootDir,
+            maxEntriesPerDir: this.config.maxEntriesPerDir,
+            readScriptPath: this.config.readScriptPath,
+            writeScriptPath: this.config.writeScriptPath,
+            visibleExtensions: this.config.visibleExtensions,
+            fsPollIntervalMs: this.config.fsPollIntervalMs ?? 0,
+            initialCwdAbs: this.cwdAbs,
+            initialFsCwd: fs.cwd,
+        })
     }
 
     /* ---------------------------------------------------------------------- */
@@ -253,20 +250,35 @@ export class CfImagerService {
         const rawQuery = (query ?? '').trim().toLowerCase()
         const cwdLabel = cwdRel || '.'
 
+        this.deps.log?.debug('[cf-imager] search-request', {
+            cwdRel,
+            cwdLabel,
+            rawQuery,
+            originalQuery: query,
+        })
+
         // Clear-search behavior for short queries: just show the normal listing
         // rooted at the requested cwd.
         if (!rawQuery || rawQuery.length < 1) {
             try {
-                this.deps.log?.debug(
-                    `[cf-imager] search-clear cwd=${cwdLabel} query="${rawQuery}"`
-                )
-
                 const abs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
                 this.cwdAbs = abs
+
+                this.deps.log?.info('[cf-imager] search-clear', {
+                    cwdRel,
+                    cwdLabel,
+                    resolvedCwdAbs: this.cwdAbs,
+                })
+
                 await this.emitFsUpdated()
             } catch (err) {
                 const msg = `search (clear) failed for cwd=${cwdLabel} query="${rawQuery}": ${(err as Error).message}`
-                this.deps.log?.error(`[cf-imager] ${msg}`)
+                this.deps.log?.error('[cf-imager] search-clear error', {
+                    cwdRel,
+                    cwdLabel,
+                    rawQuery,
+                    err: (err as Error).message,
+                })
                 this.emitError(msg)
             }
             return
@@ -277,10 +289,6 @@ export class CfImagerService {
             const originAbs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
             this.cwdAbs = originAbs
 
-            this.deps.log?.info(
-                `[cf-imager] search-start cwd=${cwdLabel} query="${rawQuery}"`
-            )
-
             const rootDir = this.config.rootDir
             const maxResults = this.config.maxEntriesPerDir ?? 256
             const visibleExts = (this.config.visibleExtensions ?? []).map(e =>
@@ -288,11 +296,24 @@ export class CfImagerService {
             )
             const hasVisibleFilter = visibleExts.length > 0
 
+            this.deps.log?.info('[cf-imager] search-start', {
+                cwdRel,
+                cwdLabel,
+                originAbs,
+                rootDir,
+                rawQuery,
+                maxResults,
+                visibleExtensions: hasVisibleFilter ? visibleExts : 'ALL',
+            })
+
             const prefixMatches: CfImagerFsState['entries'] = []
             const partialMatches: CfImagerFsState['entries'] = []
 
             type QueueItem = { absDir: string }
             const queue: QueueItem[] = [{ absDir: originAbs }]
+
+            let dirsScanned = 0
+            let filesScanned = 0
 
             const shouldIncludeFile = (fileName: string, fileAbs: string): boolean => {
                 if (!hasVisibleFilter) return true
@@ -305,11 +326,16 @@ export class CfImagerService {
                 (prefixMatches.length + partialMatches.length) < maxResults
             ) {
                 const { absDir } = queue.shift()!
+                dirsScanned++
 
                 let dirEntries: import('node:fs').Dirent[]
                 try {
                     dirEntries = await fsp.readdir(absDir, { withFileTypes: true })
-                } catch {
+                } catch (e) {
+                    this.deps.log?.debug('[cf-imager] search-skip-dir', {
+                        absDir,
+                        err: (e as Error).message,
+                    })
                     // If a directory becomes unavailable mid-scan, just skip it.
                     continue
                 }
@@ -350,6 +376,8 @@ export class CfImagerService {
                         continue
                     }
 
+                    filesScanned++
+
                     if (!shouldIncludeFile(name, entryAbs)) {
                         continue
                     }
@@ -361,7 +389,11 @@ export class CfImagerService {
                     let stat
                     try {
                         stat = await fsp.stat(entryAbs)
-                    } catch {
+                    } catch (e) {
+                        this.deps.log?.debug('[cf-imager] search-skip-file', {
+                            entryAbs,
+                            err: (e as Error).message,
+                        })
                         // If the file disappears between readdir and stat, skip it.
                         continue
                     }
@@ -407,19 +439,36 @@ export class CfImagerService {
             const diskFreeBytes = await this.getDiskFreeBytes()
             this.state.diskFreeBytes = diskFreeBytes
 
+            const sampleNames = entries.slice(0, 25).map(e => `${e.kind}:${e.name}`)
+
+            this.deps.log?.info('[cf-imager] search-complete', {
+                cwdRel,
+                cwdLabel,
+                originAbs,
+                rawQuery,
+                dirsScanned,
+                filesScanned,
+                resultCount: entries.length,
+                prefixMatches: prefixMatches.length,
+                partialMatches: partialMatches.length,
+                sample: sampleNames,
+                diskFreeBytes,
+            })
+
             this.deps.events.publish({
                 kind: 'cf-fs-updated',
                 at: Date.now(),
                 fs,
                 diskFreeBytes,
             })
-
-            this.deps.log?.info(
-                `[cf-imager] search-complete cwd=${cwdLabel} query="${rawQuery}" results=${entries.length} prefixMatches=${prefixMatches.length} partialMatches=${partialMatches.length}`
-            )
         } catch (err) {
             const msg = `search failed for cwd=${cwdLabel} query="${rawQuery}": ${(err as Error).message}`
-            this.deps.log?.error(`[cf-imager] ${msg}`)
+            this.deps.log?.error('[cf-imager] search-error', {
+                cwdRel,
+                cwdLabel,
+                rawQuery,
+                err: (err as Error).message,
+            })
             this.emitError(msg)
         }
     }
@@ -651,11 +700,12 @@ export class CfImagerService {
                     ? partFromBase
                     : null
 
-            const toImgAbs = fromImgAbs
-                ? isFromImgPath
-                    ? join(destDirAbs, fromBase)
-                    : join(destDirAbs, `${fromBase}.img`)
-                : null
+            const toImgAbs =
+                fromImgAbs
+                    ? isFromImgPath
+                        ? join(destDirAbs, fromBase)
+                        : join(destDirAbs, `${fromBase}.img`)
+                    : null
 
             const toPartAbs =
                 fromPartAbs && toImgAbs
@@ -1711,6 +1761,14 @@ df -k "${root}" | awk 'NR==2 { print $4 }'
 
         const diskFreeBytes = await this.getDiskFreeBytes()
         this.state.diskFreeBytes = diskFreeBytes
+
+        this.deps.log?.debug('[cf-imager] emitFsUpdated', {
+            cwdAbs: this.cwdAbs,
+            fsCwd: fs.cwd,
+            rootPath: fs.rootPath,
+            entryCount: fs.entries.length,
+            diskFreeBytes,
+        })
 
         this.deps.events.publish({
             kind: 'cf-fs-updated',
