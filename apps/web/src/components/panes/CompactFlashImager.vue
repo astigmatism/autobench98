@@ -172,15 +172,15 @@
               :data-kind="entry.kind"
               :data-selected="isSelected(entry) ? 'true' : 'false'"
               :data-drop-target="dropTargetName === entry.name ? 'true' : 'false'"
-              draggable="true"
-              @click.stop="onEntryClick($event, entry)"
+              :draggable="entry.kind === 'file' || entry.kind === 'dir'"
+              @click.stop.prevent="onEntryClick($event, entry)"
               @dblclick.stop.prevent="onEntryDblClick(entry)"
-              @dragstart.stop="onEntryDragStart($event, entry)"
-              @dragend.stop="onEntryDragEnd($event)"
-              @dragover.stop="onEntryDragOver($event, entry)"
-              @dragenter.stop="onEntryDragEnter($event, entry)"
-              @dragleave.stop="onEntryDragLeave($event, entry)"
-              @drop.stop="onEntryDrop($event, entry)"
+              @dragstart="onEntryDragStart($event, entry)"
+              @dragend="onEntryDragEnd($event)"
+              @dragover="onEntryDragOver($event, entry)"
+              @dragenter="onEntryDragEnter($event, entry)"
+              @dragleave="onEntryDragLeave($event, entry)"
+              @drop="onEntryDrop($event, entry)"
             >
               <span class="name">
                 <span class="icon">{{ entry.kind === 'dir' ? '📁' : '📄' }}</span>
@@ -710,10 +710,11 @@ function isSelected(entry: CfImagerFsEntry): boolean {
 }
 
 function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
-  const meta = ev.metaKey || ev.ctrlKey
+  // Allow Cmd-click (macOS) and Ctrl-click (Linux/Windows) for multi-select
+  const multi = ev.metaKey || ev.ctrlKey
   const name = entry.name
 
-  if (meta) {
+  if (multi) {
     const idx = selectedNames.value.indexOf(name)
     if (idx >= 0) {
       const next = selectedNames.value.slice()
