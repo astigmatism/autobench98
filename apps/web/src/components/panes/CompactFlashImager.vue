@@ -226,7 +226,7 @@
           <div class="fs-meta-text">
             <span class="fs-meta-path">
               <span class="fs-meta-path-label">Path:</span>
-              <span class="fs-meta-path-value monospace">{{ cwdDisplay }}</span>
+              <span class="fs-meta-path-value">{{ cwdDisplay }}</span>
             </span>
 
             <span class="fs-meta-sep">•</span>
