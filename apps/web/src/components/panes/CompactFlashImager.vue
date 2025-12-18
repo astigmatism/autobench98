@@ -153,15 +153,24 @@
 
         <!-- File system browser window -->
         <div class="fs-panel">
-          <!-- Empty-state: no entries and no parent row -->
-          <div v-if="sortedEntries.length === 0 && !canGoUp" class="fs-empty">
+          <!-- Empty-state -->
+          <div
+            v-if="sortedEntries.length === 0 && !searchActive && !canGoUp"
+            class="fs-empty"
+          >
             No entries in this directory.
+          </div>
+          <div
+            v-else-if="sortedEntries.length === 0 && searchActive"
+            class="fs-empty"
+          >
+            No matching items.
           </div>
 
           <div v-else class="fs-list">
-            <!-- Synthetic parent row always at top when we can go up -->
+            <!-- Synthetic parent row always at top when we can go up (but not during search) -->
             <div
-              v-if="canGoUp"
+              v-if="canGoUp && !searchActive"
               class="fs-row"
               data-kind="dir"
               :data-drop-target="dropTargetName === '..' ? 'true' : 'false'"
@@ -179,7 +188,7 @@
               <span class="meta"></span>
             </div>
 
-            <!-- Real entries from the backend -->
+            <!-- Real entries from the backend (or cached search results) -->
             <div
               v-for="entry in sortedEntries"
               :key="entryKey(entry)"
@@ -706,8 +715,22 @@ const opFinalizingMessage = computed(() => {
   return ''
 })
 
+/* -------------------------------------------------------------------------- */
+/*  Entries: directory vs search results                                      */
+/* -------------------------------------------------------------------------- */
+
+const displayEntries = computed<CfImagerFsEntry[]>(() => {
+  if (searchActive.value) {
+    // While a search is active, prefer the cached search results so that
+    // periodic directory polling from the backend does not clobber the
+    // search view.
+    return searchResults.value ?? (view.value.fs?.entries ?? [])
+  }
+  return view.value.fs?.entries ?? []
+})
+
 const sortedEntries = computed<CfImagerFsEntry[]>(() => {
-  const entries = view.value.fs?.entries ?? []
+  const entries = displayEntries.value
   return [...entries].sort((a, b) => {
     if (a.kind === 'dir' && b.kind !== 'dir') return -1
     if (a.kind !== 'dir' && b.kind === 'dir') return 1
@@ -984,8 +1007,28 @@ function onParentRowDrop(ev: DragEvent) {
 /*  Search input + FS busy + overlay glue                                     */
 /* -------------------------------------------------------------------------- */
 
-const pathInput = ref('') // now used as a search query, not the literal cwd
+const pathInput = ref('') // used as a search query, not the literal cwd
 const fsBusy = ref(false)
+
+/**
+ * Client-side search state:
+ * - searchResults: last set of results returned for the active query.
+ * - searchInFlight: we just sent a search command and are waiting for the
+ *   next fs snapshot to treat as results.
+ *
+ * This lets us keep showing search results even when the backend's periodic
+ * directory polling emits additional cf-fs-updated events.
+ */
+const searchResults = ref<CfImagerFsEntry[] | null>(null)
+const searchInFlight = ref(false)
+
+const SEARCH_MIN_CHARS = 2
+const SEARCH_DEBOUNCE_MS = 300
+
+const searchActive = computed(() => {
+  const q = (pathInput.value ?? '').trim()
+  return q.length >= SEARCH_MIN_CHARS
+})
 
 /**
  * stickyOverlay:
@@ -1020,11 +1063,13 @@ watch(
     dragSelection.value = []
     dragActive.value = false
     dropTargetName.value = null
+    searchResults.value = null
+    searchInFlight.value = false
   },
   { immediate: true }
 )
 
-// Clear busy state and selection when entries list changes (e.g., delete/move/search completes)
+// Clear busy state and selection when entries list size changes (e.g., delete/move/search completes)
 watch(
   () => view.value.fs.entries.length,
   () => {
@@ -1034,6 +1079,23 @@ watch(
     dragActive.value = false
     dropTargetName.value = null
   }
+)
+
+// Capture search results vs normal directory snapshots.
+watch(
+  () => view.value.fs.entries,
+  (entries) => {
+    if (searchActive.value && searchInFlight.value) {
+      // First snapshot after a search command: treat as canonical results.
+      searchResults.value = entries.slice()
+      searchInFlight.value = false
+    } else if (!searchActive.value) {
+      // When search is cleared, drop any stale results.
+      searchResults.value = null
+      searchInFlight.value = false
+    }
+  },
+  { deep: true }
 )
 
 // When the backend flips into an active imaging op, we no longer need stickyOverlay
@@ -1057,8 +1119,6 @@ watch(
  * - With >= 2 characters, we request a recursive search from the current cwd.
  * - We debounce to avoid spamming the backend while typing.
  */
-const SEARCH_MIN_CHARS = 2
-const SEARCH_DEBOUNCE_MS = 300
 let searchTimeout: number | null = null
 
 watch(
@@ -1082,9 +1142,14 @@ watch(
       fsBusy.value = true
 
       if (query.length < SEARCH_MIN_CHARS) {
-        // Convention: empty query = clear search / return normal directory listing.
+        // Clearing search: reset client-side search state and ask the backend
+        // for a normal directory listing.
+        searchInFlight.value = false
+        searchResults.value = null
         sendCfImagerCommand('search', { cwd, query: '' })
       } else {
+        // New / updated search query – capture the next fs snapshot as results.
+        searchInFlight.value = true
         sendCfImagerCommand('search', { cwd, query })
       }
     }, SEARCH_DEBOUNCE_MS) as unknown as number
