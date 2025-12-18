@@ -1086,13 +1086,17 @@ watch(
   () => view.value.fs.entries,
   (entries) => {
     if (searchActive.value && searchInFlight.value) {
-      // First snapshot after a search command: treat as canonical results.
+      // First snapshot after a search command: treat as canonical results
+      // and clear the shim, even if the length hasn't changed.
       searchResults.value = entries.slice()
       searchInFlight.value = false
+      fsBusy.value = false
     } else if (!searchActive.value) {
-      // When search is cleared, drop any stale results.
+      // When search is cleared, drop any stale results and clear shim for
+      // non-search FS updates (e.g., move, delete) that may not change length.
       searchResults.value = null
       searchInFlight.value = false
+      fsBusy.value = false
     }
   },
   { deep: true }
