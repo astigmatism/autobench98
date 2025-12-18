@@ -19,7 +19,14 @@ import {
 
 interface CfImagerServiceDeps {
     events: CfImagerEventSink
+    log?: {
+        debug(msg: string): void
+        info(msg: string): void
+        warn(msg: string): void
+        error(msg: string): void
+    }
 }
+
 
 /**
  * CfImagerService
@@ -240,16 +247,23 @@ export class CfImagerService {
      */
     public async search(cwdRel: string, query: string): Promise<void> {
         const rawQuery = (query ?? '').trim().toLowerCase()
+        const cwdLabel = cwdRel || '.'
 
         // Clear-search behavior for short queries: just show the normal listing
         // rooted at the requested cwd.
         if (!rawQuery || rawQuery.length < 2) {
             try {
+                this.deps.log?.debug(
+                    `[cf-imager] search-clear cwd=${cwdLabel} query="${rawQuery}"`
+                )
+
                 const abs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
                 this.cwdAbs = abs
                 await this.emitFsUpdated()
             } catch (err) {
-                this.emitError(`search (clear) failed: ${(err as Error).message}`)
+                const msg = `search (clear) failed for cwd=${cwdLabel} query="${rawQuery}": ${(err as Error).message}`
+                this.deps.log?.error(`[cf-imager] ${msg}`)
+                this.emitError(msg)
             }
             return
         }
@@ -257,6 +271,10 @@ export class CfImagerService {
         try {
             const originAbs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
             this.cwdAbs = originAbs
+
+            this.deps.log?.info(
+                `[cf-imager] search-start cwd=${cwdLabel} query="${rawQuery}"`
+            )
 
             const rootDir = this.config.rootDir
             const maxResults = this.config.maxEntriesPerDir ?? 256
@@ -375,10 +393,17 @@ export class CfImagerService {
                 fs,
                 diskFreeBytes,
             })
+
+            this.deps.log?.info(
+                `[cf-imager] search-complete cwd=${cwdLabel} query="${rawQuery}" results=${entries.length} prefixMatches=${prefixMatches.length} partialMatches=${partialMatches.length}`
+            )
         } catch (err) {
-            this.emitError(`search failed: ${(err as Error).message}`)
+            const msg = `search failed for cwd=${cwdLabel} query="${rawQuery}": ${(err as Error).message}`
+            this.deps.log?.error(`[cf-imager] ${msg}`)
+            this.emitError(msg)
         }
     }
+
 
     public async createFolder(name: string): Promise<void> {
         // console.log('[cf-imager] createFolder', { name })

@@ -1058,7 +1058,7 @@ watch(
  * - We debounce to avoid spamming the backend while typing.
  */
 const SEARCH_MIN_CHARS = 2
-const SEARCH_DEBOUNCE_MS = 220
+const SEARCH_DEBOUNCE_MS = 300
 let searchTimeout: number | null = null
 
 watch(
@@ -1489,7 +1489,7 @@ function formatSize(bytes: number): string {
 function formatDate(iso: string): string {
   try {
     const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
+    if (Number.isNaN(d.getTime())) return iso
     const yyyy = d.getFullYear()
     const mm = String(d.getMonth() + 1).padStart(2, '0')
     const dd = String(d.getDate()).padStart(2, '0')

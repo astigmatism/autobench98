@@ -527,6 +527,9 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
             try {
                 // Empty query is allowed and can mean "clear search / show normal listing".
+                logWs.warn('cf-imager.command search', {
+                    query
+                })
                 await cfImager.search(cwd, query)
             } catch (e) {
                 logWs.warn('cf-imager.command search failed', {

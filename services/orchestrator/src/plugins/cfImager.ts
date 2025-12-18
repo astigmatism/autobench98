@@ -149,7 +149,11 @@ const cfImagerPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     )
 
     // 3) Instantiate service
-    const cfImagerService = new CfImagerService(cfConfig, { events: cfEvents })
+    const cfImagerService = new CfImagerService(cfConfig, {
+        events: cfEvents,
+        log: logPlugin,
+    })
+
 
     // Expose on Fastify instance
     app.decorate('cfImager', cfImagerService)
