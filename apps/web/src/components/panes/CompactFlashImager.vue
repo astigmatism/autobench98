@@ -172,7 +172,7 @@
               :data-kind="entry.kind"
               :data-selected="isSelected(entry) ? 'true' : 'false'"
               :data-drop-target="dropTargetName === entry.name ? 'true' : 'false'"
-              :draggable="entry.kind === 'file' || entry.kind === 'dir'"
+              draggable="true"
               @click.stop.prevent="onEntryClick($event, entry)"
               @dblclick.stop.prevent="onEntryDblClick(entry)"
               @dragstart="onEntryDragStart($event, entry)"
@@ -745,11 +745,11 @@ function buildDragPreview(names: string[]): HTMLElement {
 
   const header = document.createElement('div')
   header.className = 'fs-drag-preview-header'
-const label =
-  names.length === 1 ? (names[0] ?? '') : `${names.length} items`
 
-header.textContent = label
+  const label =
+    names.length === 1 ? (names[0] ?? '') : `${names.length} items`
 
+  header.textContent = label
 
   el.appendChild(header)
 
@@ -789,20 +789,27 @@ function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
 
   dragSelection.value = names
 
-  if (ev.dataTransfer) {
-    try {
-      ev.dataTransfer.setData('text/plain', names.join(','))
-      ev.dataTransfer.effectAllowed = 'move'
+  const dt = ev.dataTransfer
+  if (!dt) {
+    // No DataTransfer available; nothing more we can do,
+    // but the row is still draggable so the browser will handle the ghost.
+    return
+  }
 
+  try {
+    dt.setData('text/plain', names.join(','))
+    dt.effectAllowed = 'move'
+
+    if (typeof dt.setDragImage === 'function') {
       // Build a composite drag preview so the user sees that multiple items
       // are moving together.
       const preview = buildDragPreview(names)
       dragPreviewEl.value = preview
       // Slight offset so the cursor isn't exactly on the top-left corner
-      ev.dataTransfer.setDragImage(preview, 10, 10)
-    } catch {
-      // ignore
+      dt.setDragImage(preview, 10, 10)
     }
+  } catch {
+    // Swallow any drag-image issues; at worst we fall back to the default ghost.
   }
 }
 
