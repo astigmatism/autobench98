@@ -745,8 +745,11 @@ function buildDragPreview(names: string[]): HTMLElement {
 
   const header = document.createElement('div')
   header.className = 'fs-drag-preview-header'
-  header.textContent =
-    names.length === 1 ? names[0] : `${names.length} items`
+const label =
+  names.length === 1 ? (names[0] ?? '') : `${names.length} items`
+
+header.textContent = label
+
 
   el.appendChild(header)
 
