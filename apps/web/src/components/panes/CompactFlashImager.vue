@@ -160,11 +160,33 @@
 
         <!-- File system browser window -->
         <div class="fs-panel">
-          <div v-if="sortedEntries.length === 0" class="fs-empty">
+          <!-- Empty-state: no entries and no parent row -->
+          <div v-if="sortedEntries.length === 0 && !canGoUp" class="fs-empty">
             No entries in this directory.
           </div>
 
           <div v-else class="fs-list">
+            <!-- Synthetic parent row always at top when we can go up -->
+            <div
+              v-if="canGoUp"
+              class="fs-row"
+              data-kind="dir"
+              :data-drop-target="dropTargetName === '..' ? 'true' : 'false'"
+              @click.stop.prevent="onParentRowClick"
+              @dblclick.stop.prevent="onGoUpClick"
+              @dragover="onParentRowDragOver"
+              @dragenter="onParentRowDragEnter"
+              @dragleave="onParentRowDragLeave"
+              @drop="onParentRowDrop"
+            >
+              <span class="name">
+                <span class="icon">📁</span>
+                ..
+              </span>
+              <span class="meta"></span>
+            </div>
+
+            <!-- Real entries from the backend -->
             <div
               v-for="entry in sortedEntries"
               :key="entryKey(entry)"
@@ -428,7 +450,7 @@ function relLuminance(hex: string): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 function contrastRatio(l1: number, l2: number): number {
-  const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, 1]
+  const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, l1]
   return (L1 + 0.05) / (L2 + 0.05)
 }
 
@@ -490,6 +512,18 @@ type CfImagerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Helpers for cwd normalization                                             */
+/* -------------------------------------------------------------------------- */
+
+function normalizeCwd(raw: string | undefined | null): string {
+  const trimmed = (raw ?? '').trim()
+  if (!trimmed || trimmed === '/' || trimmed === '.') {
+    return '.'
+  }
+  return trimmed
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Mirror + initial snapshot                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -501,8 +535,8 @@ const initialCfImager: CfImagerSnapshot = {
   message: 'Waiting for CF imager…',
   device: undefined,
   fs: {
-    rootPath: '/',
-    cwd: '/',
+    rootPath: '.',   // canonical root
+    cwd: '.',        // canonical cwd
     entries: []
   },
   currentOp: undefined,
@@ -515,10 +549,12 @@ const cfImager = computed<CfImagerSnapshot>(() => {
   const slice = root?.cfImager as Partial<CfImagerSnapshot> | undefined
   if (!slice) return initialCfImager
 
-  const fs: CfImagerFsState = slice.fs ?? {
-    rootPath: '/',
-    cwd: '/',
-    entries: []
+  const fsRaw = slice.fs
+
+  const fs: CfImagerFsState = {
+    rootPath: fsRaw?.rootPath ?? '.',
+    cwd: normalizeCwd(fsRaw?.cwd),
+    entries: fsRaw?.entries ?? []
   }
 
   const phase: CfImagerPhase = slice.phase ?? 'disconnected'
@@ -845,19 +881,6 @@ function onEntryDragLeave(_ev: DragEvent, entry: CfImagerFsEntry) {
   }
 }
 
-/**
- * Build destination cwd for a move operation:
- * - Uses the current fs.cwd from the mirror.
- * - Appends the target directory name as a child.
- *   Example: cwd="images", targetDirName="archive" -> "images/archive"
- *            cwd=".",      targetDirName="archive" -> "archive"
- */
-function buildDestCwd(targetDirName: string): string {
-  const cwd = view.value.fs.cwd || '.'
-  const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
-  return base ? `${base}/${targetDirName}` : targetDirName
-}
-
 function onEntryDrop(ev: DragEvent, entry: CfImagerFsEntry) {
   if (!dragActive.value) return
   if (entry.kind !== 'dir') return
@@ -898,15 +921,86 @@ function onEntryDrop(ev: DragEvent, entry: CfImagerFsEntry) {
   }
 
   dragSelection.value = []
+  selectedNames.value = []
 
-  // Show shim while backend processes the move and refreshes this directory.
+  // Moving into a real child directory: use the move command.
   fsBusy.value = true
-
-  const destCwd = buildDestCwd(entry.name)
 
   sendCfImagerCommand('move', {
     names,
-    destCwd
+    targetDir: entry.name
+  })
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Parent-row click + DnD                                                    */
+/* -------------------------------------------------------------------------- */
+
+function onParentRowClick(_ev: MouseEvent) {
+  // Clear selection when clicking the ".." row
+  selectedNames.value = []
+}
+
+function onParentRowDragOver(ev: DragEvent) {
+  if (!dragActive.value) return
+  if (dragSelection.value.length === 0) return
+  ev.preventDefault()
+  if (ev.dataTransfer) {
+    ev.dataTransfer.dropEffect = 'move'
+  }
+}
+
+function onParentRowDragEnter(ev: DragEvent) {
+  if (!dragActive.value) return
+  ev.preventDefault()
+  dropTargetName.value = '..'
+}
+
+function onParentRowDragLeave(_ev: DragEvent) {
+  if (dropTargetName.value === '..') {
+    dropTargetName.value = null
+  }
+}
+
+function onParentRowDrop(ev: DragEvent) {
+  if (!dragActive.value) return
+
+  ev.preventDefault()
+
+  dragActive.value = false
+  dropTargetName.value = null
+
+  let names = dragSelection.value.slice()
+
+  const dt = ev.dataTransfer
+  if (dt) {
+    const raw = dt.getData('application/x-cf-imager-names')
+    if (raw) {
+      try {
+        const parsed: any = JSON.parse(raw)
+        if (parsed && Array.isArray(parsed.names) && parsed.names.length > 0) {
+          names = parsed.names
+        }
+      } catch {
+        // fall back to dragSelection
+      }
+    }
+  }
+
+  if (!names || names.length === 0) {
+    dragSelection.value = []
+    return
+  }
+
+  dragSelection.value = []
+  selectedNames.value = []
+
+  // Move items up one directory: targetDir = ".."
+  fsBusy.value = true
+
+  sendCfImagerCommand('move', {
+    names,
+    targetDir: '..'
   })
 }
 
