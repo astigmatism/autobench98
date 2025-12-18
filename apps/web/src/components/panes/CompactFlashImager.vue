@@ -845,6 +845,19 @@ function onEntryDragLeave(_ev: DragEvent, entry: CfImagerFsEntry) {
   }
 }
 
+/**
+ * Build destination cwd for a move operation:
+ * - Uses the current fs.cwd from the mirror.
+ * - Appends the target directory name as a child.
+ *   Example: cwd="images", targetDirName="archive" -> "images/archive"
+ *            cwd=".",      targetDirName="archive" -> "archive"
+ */
+function buildDestCwd(targetDirName: string): string {
+  const cwd = view.value.fs.cwd || '.'
+  const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+  return base ? `${base}/${targetDirName}` : targetDirName
+}
+
 function onEntryDrop(ev: DragEvent, entry: CfImagerFsEntry) {
   if (!dragActive.value) return
   if (entry.kind !== 'dir') return
@@ -889,9 +902,11 @@ function onEntryDrop(ev: DragEvent, entry: CfImagerFsEntry) {
   // Show shim while backend processes the move and refreshes this directory.
   fsBusy.value = true
 
+  const destCwd = buildDestCwd(entry.name)
+
   sendCfImagerCommand('move', {
     names,
-    targetDir: entry.name
+    destCwd
   })
 }
 

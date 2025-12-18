@@ -325,6 +325,55 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             return
         }
 
+        if (kind === 'move') {
+            const namesRaw = payload.names
+            let names: string[] = []
+
+            if (Array.isArray(namesRaw)) {
+                names = namesRaw
+                    .map((n: unknown) =>
+                        typeof n === 'string' ? n.trim() : ''
+                    )
+                    .filter(Boolean)
+            } else if (typeof namesRaw === 'string') {
+                const trimmed = namesRaw.trim()
+                if (trimmed) names = [trimmed]
+            }
+
+            if (names.length === 0) {
+                logWs.warn('cf-imager.command move: empty names payload', {
+                    names: namesRaw
+                })
+                return
+            }
+
+            const destCwdRaw = payload.destCwd
+            const destCwd =
+                typeof destCwdRaw === 'string' && destCwdRaw.trim()
+                    ? destCwdRaw.trim()
+                    : '.'
+
+            try {
+                const state = cfImager.getState()
+                const cwd = state.fs?.cwd ?? '.'
+                const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+                const destBase =
+                    destCwd === '.' ? '.' : destCwd.replace(/\/+$/, '')
+
+                for (const name of names) {
+                    const fromRel = base ? `${base}/${name}` : name
+                    await cfImager.movePath(fromRel, destBase)
+                }
+            } catch (e) {
+                logWs.warn('cf-imager.command move failed', {
+                    names: namesRaw,
+                    destCwd: destCwdRaw,
+                    err: (e as Error).message
+                })
+            }
+            return
+        }
+
         if (kind === 'delete') {
             const namesRaw = payload.names
             const names: string[] = Array.isArray(namesRaw)

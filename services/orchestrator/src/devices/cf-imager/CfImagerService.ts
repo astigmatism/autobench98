@@ -384,6 +384,148 @@ export class CfImagerService {
         }
     }
 
+    public async movePath(fromRel: string, destDirRel: string): Promise<void> {
+        // console.log('[cf-imager] movePath', { fromRel, destDirRel })
+        try {
+            const fromAbs = resolveUnderRoot(this.config.rootDir, fromRel)
+            const destDirAbs = resolveUnderRoot(this.config.rootDir, destDirRel || '.')
+
+            // Ensure destination exists and is a directory.
+            try {
+                const destStat = await fsp.stat(destDirAbs)
+                if (!destStat.isDirectory()) {
+                    this.emitError('movePath failed: destination is not a directory')
+                    return
+                }
+            } catch (err) {
+                const e = err as NodeJS.ErrnoException
+                if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) {
+                    this.emitError('movePath failed: destination directory not found')
+                    return
+                }
+                throw err
+            }
+
+            const fromDir = dirname(fromAbs)
+            const fromBase = basename(fromAbs)
+
+            const isFromImgPath = fromBase.toLowerCase().endsWith('.img')
+
+            // Small helper: existence check without throwing
+            const pathExists = async (p: string): Promise<boolean> => {
+                try {
+                    await fsp.stat(p)
+                    return true
+                } catch (err) {
+                    const e = err as NodeJS.ErrnoException
+                    if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) {
+                        return false
+                    }
+                    throw err
+                }
+            }
+
+            // -------------------------------------------------------------------
+            // Image-group aware branch:
+            //
+            // Treat "<name>.img" and "<name>.part" as a logical unit when moving,
+            // regardless of whether fromRel is extensionless or includes ".img".
+            // -------------------------------------------------------------------
+
+            const imgFromBase = join(fromDir, `${fromBase}.img`)
+            const partFromBase = join(fromDir, `${fromBase}.part`)
+
+            const imgFromBaseExists = await pathExists(imgFromBase)
+            const partFromBaseExists = await pathExists(partFromBase)
+
+            const fromImgAbs =
+                isFromImgPath
+                    ? fromAbs
+                    : imgFromBaseExists
+                    ? imgFromBase
+                    : null
+
+            const fromPartAbs =
+                isFromImgPath
+                    ? fromAbs.replace(/\.img$/i, '.part')
+                    : partFromBaseExists
+                    ? partFromBase
+                    : null
+
+            const toImgAbs = fromImgAbs
+                ? isFromImgPath
+                    ? join(destDirAbs, fromBase)
+                    : join(destDirAbs, `${fromBase}.img`)
+                : null
+
+            const toPartAbs =
+                fromPartAbs && toImgAbs
+                    ? toImgAbs.replace(/\.img$/i, '.part')
+                    : fromPartAbs
+                    ? join(destDirAbs, basename(fromPartAbs))
+                    : null
+
+            const isImageGroupMove = !!fromImgAbs || !!fromPartAbs
+
+            if (isImageGroupMove) {
+                // Do not overwrite existing image targets.
+                if (fromImgAbs && toImgAbs && toImgAbs !== fromImgAbs && (await pathExists(toImgAbs))) {
+                    // Target .img already exists – silently no-op per UI contract.
+                    return
+                }
+                if (fromPartAbs && toPartAbs && toPartAbs !== fromPartAbs && (await pathExists(toPartAbs))) {
+                    // Target .part already exists – silently no-op.
+                    return
+                }
+
+                // Move .img payload if present.
+                if (fromImgAbs && toImgAbs && (await pathExists(fromImgAbs))) {
+                    await fsp.rename(fromImgAbs, toImgAbs)
+                }
+
+                // Move .part sidecar if present.
+                if (fromPartAbs && toPartAbs && (await pathExists(fromPartAbs))) {
+                    try {
+                        await fsp.rename(fromPartAbs, toPartAbs)
+                    } catch {
+                        // If the .part move fails, we don’t fail the entire op;
+                        // worst case, the sidecar is left behind.
+                    }
+                }
+
+                await this.emitFsUpdated()
+                return
+            }
+
+            // -------------------------------------------------------------------
+            // Generic fallback:
+            // - Non-image files/folders.
+            // - Behavior: do not overwrite existing targets, then move.
+            // -------------------------------------------------------------------
+
+            const toAbs = join(destDirAbs, fromBase)
+
+            // Silently reject if the target already exists (file or directory).
+            try {
+                await fsp.stat(toAbs)
+                // Something exists at toAbs -> no-op, no error.
+                return
+            } catch (err) {
+                const e = err as NodeJS.ErrnoException
+                // ENOENT / ENOTDIR => target does not exist; proceed with move.
+                if (!e || (e.code !== 'ENOENT' && e.code !== 'ENOTDIR')) {
+                    // Unexpected error looking up target; surface as a normal failure.
+                    throw err
+                }
+            }
+
+            await fsp.rename(fromAbs, toAbs)
+
+            await this.emitFsUpdated()
+        } catch (err) {
+            this.emitError(`movePath failed: ${(err as Error).message}`)
+        }
+    }
 
     public async deletePath(relPath: string): Promise<void> {
         // console.log('[cf-imager] deletePath', { relPath })
