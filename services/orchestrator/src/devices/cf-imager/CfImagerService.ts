@@ -818,24 +818,51 @@ export class CfImagerService {
         // console.log('[cf-imager] writeImageToDevice requested', { imageRelPath })
         if (!await this.ensureDeviceAndMediaForOp('writeImageToDevice')) return
 
-        // UI sends an extensionless image name (e.g. "Shuttle-GeForce2")
-        // relative to the current cwd. We must reconstruct "<cwd>/<name>.img"
-        // under CF_IMAGER_ROOT and treat ONLY that as a valid image.
-        const safeName = sanitizeName(imageRelPath)
-        if (!safeName) {
-            this.emitError('writeImageToDevice: image name is required')
+        // The WS layer now sends a *relative path* under CF_IMAGER_ROOT (which may
+        // include subdirectories) but still without the ".img" extension.
+        const raw = (imageRelPath ?? '').trim()
+        if (!raw) {
+            this.emitError('writeImageToDevice: image path is required')
             this.state.phase = 'idle'
             return
         }
 
-        const relWithImg = join(this.relCwd(), `${safeName}.img`)
+        // Normalize separators and trim leading "./" / trailing "/"
+        const normalized = raw
+            .replace(/\\/g, '/')
+            .replace(/^\.\/+/, '')
+            .replace(/\/+$/, '')
+
+        const dirRel = dirname(normalized)
+        const base = basename(normalized)
+
+        // Base segment must be a simple filename (no traversal markers)
+        if (!base || base === '.' || base === '..') {
+            this.emitError('writeImageToDevice: invalid image name')
+            this.state.phase = 'idle'
+            return
+        }
+
+        // Disallow sneaky separators in the base; resolveUnderRoot will validate the dir.
+        if (base.includes('/') || base.includes('\\')) {
+            this.emitError('writeImageToDevice: invalid image name')
+            this.state.phase = 'idle'
+            return
+        }
+
+        const relWithoutExt =
+            dirRel && dirRel !== '.'
+                ? `${dirRel.replace(/^\/+/, '')}/${base}`
+                : base
+
+        const relWithImg = `${relWithoutExt}.img`
 
         let imgAbs: string
         try {
             imgAbs = resolveUnderRoot(this.config.rootDir, relWithImg)
         } catch (err) {
             this.emitError(
-                `writeImageToDevice: invalid image name "${imageRelPath}": ${(err as Error).message}`
+                `writeImageToDevice: invalid image path "${imageRelPath}": ${(err as Error).message}`
             )
             this.state.phase = 'idle'
             return
@@ -845,14 +872,14 @@ export class CfImagerService {
             const st = await fsp.stat(imgAbs)
             if (!st.isFile()) {
                 this.emitError(
-                    `writeImageToDevice: image path is not a regular file: "${safeName}.img"`
+                    `writeImageToDevice: image path is not a regular file: "${relWithImg}"`
                 )
                 this.state.phase = 'idle'
                 return
             }
         } catch {
             this.emitError(
-                `writeImageToDevice: image file not found: "${safeName}.img"`
+                `writeImageToDevice: image file not found: "${relWithImg}"`
             )
             this.state.phase = 'idle'
             return
@@ -988,17 +1015,17 @@ export class CfImagerService {
                     // Final progress snapshot for clients: force 100% and full bytes.
                     const finalOp: CfImagerCurrentOp = this.state.currentOp
                         ? {
-                              ...this.state.currentOp,
-                              progressPct: 100,
-                              bytesDone:
-                                  typeof this.state.currentOp.bytesDone === 'number'
-                                      ? this.state.currentOp.bytesDone
-                                      : this.state.currentOp.bytesTotal ?? 0,
-                          }
+                            ...this.state.currentOp,
+                            progressPct: 100,
+                            bytesDone:
+                                typeof this.state.currentOp.bytesDone === 'number'
+                                    ? this.state.currentOp.bytesDone
+                                    : this.state.currentOp.bytesTotal ?? 0,
+                        }
                         : {
-                              ...op,
-                              progressPct: 100,
-                          }
+                            ...op,
+                            progressPct: 100,
+                        }
 
                     this.deps.events.publish({
                         kind: 'cf-op-completed',
@@ -1034,6 +1061,7 @@ export class CfImagerService {
             this.progressSamples = []
         }
     }
+
 
     public async readDeviceToImage(targetDirRel: string, imageName: string): Promise<void> {
         // console.log('[cf-imager] readDeviceToImage requested', { targetDirRel, imageName })
