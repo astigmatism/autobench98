@@ -1022,7 +1022,7 @@ const fsBusy = ref(false)
 const searchResults = ref<CfImagerFsEntry[] | null>(null)
 const searchInFlight = ref(false)
 
-const SEARCH_MIN_CHARS = 2
+const SEARCH_MIN_CHARS = 1
 const SEARCH_DEBOUNCE_MS = 300
 
 const searchActive = computed(() => {
