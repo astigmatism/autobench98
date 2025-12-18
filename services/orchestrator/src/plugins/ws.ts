@@ -348,26 +348,56 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }
 
             const destCwdRaw = payload.destCwd
-            const destCwd =
-                typeof destCwdRaw === 'string' && destCwdRaw.trim()
-                    ? destCwdRaw.trim()
-                    : '.'
+            const targetDirRaw = payload.targetDir
 
             try {
                 const state = cfImager.getState()
                 const cwd = state.fs?.cwd ?? '.'
-                const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
-                const destBase =
-                    destCwd === '.' ? '.' : destCwd.replace(/\/+$/, '')
+                const cwdBase = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+
+                let destDirRel: string
+
+                // Preferred: targetDir (what the pane sends on drag/drop).
+                if (typeof targetDirRaw === 'string' && targetDirRaw.trim()) {
+                    const targetDir = targetDirRaw.trim()
+
+                    if (targetDir === '..') {
+                        // Parent of current cwd
+                        if (!cwdBase) {
+                            destDirRel = '.'
+                        } else {
+                            const idx = cwdBase.lastIndexOf('/')
+                            destDirRel = idx <= 0 ? '.' : cwdBase.slice(0, idx)
+                        }
+                    } else if (targetDir === '.') {
+                        // Explicit "here"
+                        destDirRel = cwdBase || '.'
+                    } else {
+                        // Child directory under current cwd
+                        destDirRel = cwdBase ? `${cwdBase}/${targetDir}` : targetDir
+                    }
+                } else if (
+                    typeof destCwdRaw === 'string' &&
+                    destCwdRaw.trim()
+                ) {
+                    // Legacy contract: caller already computed the destination cwd.
+                    destDirRel = destCwdRaw.trim()
+                } else {
+                    // Fallback: current cwd.
+                    destDirRel = cwdBase || '.'
+                }
+
+                const base = cwdBase
 
                 for (const name of names) {
                     const fromRel = base ? `${base}/${name}` : name
-                    await cfImager.movePath(fromRel, destBase)
+                    await cfImager.movePath(fromRel, destDirRel)
                 }
             } catch (e) {
                 logWs.warn('cf-imager.command move failed', {
                     names: namesRaw,
                     destCwd: destCwdRaw,
+                    targetDir: targetDirRaw,
                     err: (e as Error).message
                 })
             }
@@ -461,7 +491,13 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }
 
             try {
-                const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
+                const state = cfImager.getState()
+                const currentCwd = state.fs?.cwd ?? '.'
+                const base = currentCwd === '.' ? '' : currentCwd.replace(/\/+$/, '')
+
+                // We want a path relative to CF_IMAGER_ROOT that may include
+                // directories. The service will interpret this and append ".img"
+                // if necessary.
                 const rel = base ? `${base}/${fileName}` : fileName
 
                 await cfImager.writeImageToDevice(rel)

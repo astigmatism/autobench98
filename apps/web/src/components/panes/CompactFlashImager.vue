@@ -105,25 +105,6 @@
         <!-- File system toolbar (outside the browsing window) -->
         <div class="fs-toolbar">
           <div class="fs-toolbar-left">
-            <button
-              class="btn"
-              type="button"
-              :disabled="!canGoUp"
-              @click="onGoUpClick"
-              title="Go to parent folder"
-            >
-              Parent
-            </button>
-
-            <label class="fs-path">
-              <span class="label">Path:</span>
-              <input
-                class="fs-path-input"
-                type="text"
-                v-model="pathInput"
-                spellcheck="false"
-              />
-            </label>
 
             <button
               class="btn"
@@ -144,6 +125,17 @@
               Rename
             </button>
 
+            <label class="fs-path">
+              <span class="label">Search:</span>
+              <input
+                class="fs-path-input"
+                type="text"
+                v-model="pathInput"
+                spellcheck="false"
+                placeholder="Type at least 2 characters…"
+              />
+            </label>
+
             <button
               class="btn"
               type="button"
@@ -153,6 +145,7 @@
             >
               Delete
             </button>
+
           </div>
 
           <div class="fs-toolbar-right"></div>
@@ -219,7 +212,7 @@
             </div>
           </div>
 
-          <!-- Shim overlay while FS is busy (dir changes / delete refresh / move refresh) -->
+          <!-- Shim overlay while FS is busy (dir changes / delete refresh / move refresh / search) -->
           <div v-if="fsBusy" class="fs-shim">
             <div class="fs-shim-inner">
               <span class="spinner shim-spinner"></span>
@@ -231,9 +224,19 @@
         <!-- Footer: metadata (left) + actions (right) -->
         <div class="fs-footer">
           <div class="fs-meta-text">
-            {{ sortedEntries.length }} item<span v-if="sortedEntries.length !== 1">s</span>
-            <span v-if="diskFreeDisplay"> • </span>
-            <span v-if="diskFreeDisplay">{{ diskFreeDisplay }}</span>
+            <span class="fs-meta-path">
+              <span class="fs-meta-path-label">Path:</span>
+              <span class="fs-meta-path-value monospace">{{ cwdDisplay }}</span>
+            </span>
+
+            <span class="fs-meta-sep">•</span>
+
+            <span class="fs-meta-items">
+              {{ sortedEntries.length }} item<span v-if="sortedEntries.length !== 1">s</span>
+            </span>
+
+            <span v-if="diskFreeDisplay" class="fs-meta-sep">•</span>
+            <span v-if="diskFreeDisplay" class="fs-meta-free">{{ diskFreeDisplay }}</span>
           </div>
 
           <div class="fs-actions">
@@ -535,8 +538,8 @@ const initialCfImager: CfImagerSnapshot = {
   message: 'Waiting for CF imager…',
   device: undefined,
   fs: {
-    rootPath: '.',   // canonical root
-    cwd: '.',        // canonical cwd
+    rootPath: '.',
+    cwd: '.',
     entries: []
   },
   currentOp: undefined,
@@ -722,13 +725,28 @@ const canGoUp = computed(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Disk free display                                                         */
+/*  Disk free + cwd display                                                   */
 /* -------------------------------------------------------------------------- */
 
 const diskFreeDisplay = computed(() => {
   const bytes = view.value.diskFreeBytes
   if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return ''
   return `${formatSize(bytes)} free`
+})
+
+const cwdDisplay = computed(() => {
+  let cwd = view.value.fs.cwd || '.'
+
+  if (cwd === '.' || cwd === '/') {
+    return '/'
+  }
+
+  // Normalize to "/foo/bar" style
+  if (!cwd.startsWith('/')) {
+    cwd = `/${cwd}`
+  }
+
+  return cwd
 })
 
 /* -------------------------------------------------------------------------- */
@@ -765,49 +783,18 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
 }
 
 /**
- * Drag-and-drop selection (with custom preview):
+ * Drag-and-drop selection:
  * - dragSelection: the set of names currently being dragged.
  * - dropTargetName: folder name currently highlighted as a drop target.
  * - dragActive: simple boolean flag to gate dragover/drop handling.
- * - dragPreviewEl: DOM element used as composite drag ghost.
+ *
+ * We let the browser draw the drag ghost (default behavior) instead of
+ * providing a custom drag image. This avoids cross-platform issues where
+ * a custom image can end up invisible.
  */
 const dragSelection = ref<string[]>([])
 const dropTargetName = ref<string | null>(null)
 const dragActive = ref(false)
-const dragPreviewEl = ref<HTMLElement | null>(null)
-
-function buildDragPreview(names: string[]): HTMLElement {
-  const el = document.createElement('div')
-  el.className = 'fs-drag-preview'
-
-  const header = document.createElement('div')
-  header.className = 'fs-drag-preview-header'
-  header.textContent =
-    names.length === 1 ? (names[0] ?? '') : `${names.length} items`
-  el.appendChild(header)
-
-  const list = document.createElement('div')
-  list.className = 'fs-drag-preview-list'
-
-  const toShow = names.slice(0, 3)
-  toShow.forEach(name => {
-    const row = document.createElement('div')
-    row.className = 'fs-drag-preview-row'
-    row.textContent = name
-    list.appendChild(row)
-  })
-
-  if (names.length > 3) {
-    const more = document.createElement('div')
-    more.className = 'fs-drag-preview-more'
-    more.textContent = `+ ${names.length - 3} more`
-    list.appendChild(more)
-  }
-
-  el.appendChild(list)
-  document.body.appendChild(el)
-  return el
-}
 
 function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
   const name = entry.name
@@ -831,14 +818,9 @@ function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
   try {
     dt.setData('application/x-cf-imager-names', JSON.stringify({ names }))
     dt.effectAllowed = 'move'
-
-    if (typeof dt.setDragImage === 'function') {
-      const preview = buildDragPreview(names)
-      dragPreviewEl.value = preview
-      dt.setDragImage(preview, 10, 10)
-    }
+    // Do NOT call setDragImage; rely on the browser's default drag ghost.
   } catch {
-    // Ignore; browser will still show a basic drag ghost.
+    // Ignore; drag will still function even if setData fails.
   }
 }
 
@@ -846,12 +828,6 @@ function onEntryDragEnd(_ev: DragEvent) {
   dragSelection.value = []
   dragActive.value = false
   dropTargetName.value = null
-
-  const preview = dragPreviewEl.value
-  if (preview && preview.parentNode) {
-    preview.parentNode.removeChild(preview)
-  }
-  dragPreviewEl.value = null
 }
 
 function onEntryDragOver(ev: DragEvent, entry: CfImagerFsEntry) {
@@ -1005,10 +981,10 @@ function onParentRowDrop(ev: DragEvent) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Path input + FS busy + overlay glue                                       */
+/*  Search input + FS busy + overlay glue                                     */
 /* -------------------------------------------------------------------------- */
 
-const pathInput = ref('')
+const pathInput = ref('') // now used as a search query, not the literal cwd
 const fsBusy = ref(false)
 
 /**
@@ -1030,10 +1006,15 @@ const overlayActive = computed(
   () => modalVisible.value || opProgressVisible.value || stickyOverlay.value
 )
 
+/**
+ * When cwd changes (user navigates), clear selection & drag state.
+ * We deliberately do NOT overwrite the search box with cwd anymore.
+ * Instead, we clear the search query on navigation.
+ */
 watch(
   () => view.value.fs.cwd,
-  (cwd) => {
-    pathInput.value = cwd
+  () => {
+    pathInput.value = ''
     fsBusy.value = false
     selectedNames.value = []
     dragSelection.value = []
@@ -1043,7 +1024,7 @@ watch(
   { immediate: true }
 )
 
-// Clear busy state and selection when entries list changes (e.g., delete/move completes)
+// Clear busy state and selection when entries list changes (e.g., delete/move/search completes)
 watch(
   () => view.value.fs.entries.length,
   () => {
@@ -1067,6 +1048,46 @@ watch(
     if (phase === 'idle' && !view.value.currentOp) {
       stickyOverlay.value = false
     }
+  }
+)
+
+/**
+ * Search behavior:
+ * - With < 2 characters, we treat it as "no search" and ask backend to clear search.
+ * - With >= 2 characters, we request a recursive search from the current cwd.
+ * - We debounce to avoid spamming the backend while typing.
+ */
+const SEARCH_MIN_CHARS = 2
+const SEARCH_DEBOUNCE_MS = 220
+let searchTimeout: number | null = null
+
+watch(
+  pathInput,
+  (raw) => {
+    if (searchTimeout !== null) {
+      window.clearTimeout(searchTimeout)
+      searchTimeout = null
+    }
+
+    const query = (raw ?? '').trim()
+    const cwd = view.value.fs.cwd || '.'
+
+    searchTimeout = window.setTimeout(() => {
+      // If device isn't present or we're disconnected, don't bother sending.
+      if (view.value.phase === 'disconnected' || !view.value.device) {
+        return
+      }
+
+      // Mark FS as busy while we wait for search results.
+      fsBusy.value = true
+
+      if (query.length < SEARCH_MIN_CHARS) {
+        // Convention: empty query = clear search / return normal directory listing.
+        sendCfImagerCommand('search', { cwd, query: '' })
+      } else {
+        sendCfImagerCommand('search', { cwd, query })
+      }
+    }, SEARCH_DEBOUNCE_MS) as unknown as number
   }
 )
 
@@ -1357,6 +1378,7 @@ type CfImagerCommandKind =
   | 'readImage'
   | 'writeImage'
   | 'move'
+  | 'search'
 
 type CfImagerCommandPayload = Record<string, unknown>
 
@@ -1436,6 +1458,12 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleModalKey)
+
+  // Clean up any pending search timeout
+  if (searchTimeout !== null) {
+    window.clearTimeout(searchTimeout)
+    searchTimeout = null
+  }
 })
 
 /* -------------------------------------------------------------------------- */
@@ -1461,7 +1489,7 @@ function formatSize(bytes: number): string {
 function formatDate(iso: string): string {
   try {
     const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
+  if (Number.isNaN(d.getTime())) return iso
     const yyyy = d.getFullYear()
     const mm = String(d.getMonth() + 1).padStart(2, '0')
     const dd = String(d.getDate()).padStart(2, '0')
@@ -1979,6 +2007,19 @@ function formatEta(totalSeconds: number): string {
   font-size: 0.72rem;
   opacity: 0.75;
   align-self: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.fs-meta-path-label {
+  opacity: 0.8;
+  margin-right: 2px;
+}
+
+.fs-meta-sep {
+  opacity: 0.65;
 }
 
 .fs-actions {
@@ -2233,10 +2274,12 @@ function formatEta(totalSeconds: number): string {
 /*  Drag preview (multi-item ghost)                                           */
 /* -------------------------------------------------------------------------- */
 
+/* Note: currently unused – we rely on the browser's default drag ghost.
+   Left in place in case we want to reintroduce a custom preview later. */
 .fs-drag-preview {
   position: fixed;
-  top: -9999px;
-  left: -9999px;
+  top: 0;
+  left: 0;
   z-index: 9999;
   pointer-events: none;
   padding: 6px 8px;
