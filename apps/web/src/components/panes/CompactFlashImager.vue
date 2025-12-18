@@ -729,50 +729,14 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
 }
 
 /**
- * Drag-and-drop selection:
+ * Drag-and-drop selection (simplified):
  * - dragSelection: the set of names currently being dragged.
  * - dropTargetName: folder name currently highlighted as a drop target.
- * - dragPreviewEl: DOM element used as the composite drag ghost.
+ * - dragActive: simple boolean flag to gate dragover/drop handling.
  */
 const dragSelection = ref<string[]>([])
 const dropTargetName = ref<string | null>(null)
-const dragPreviewEl = ref<HTMLElement | null>(null)
-const dragActive = computed(() => dragSelection.value.length > 0)
-
-function buildDragPreview(names: string[]): HTMLElement {
-  const el = document.createElement('div')
-  el.className = 'fs-drag-preview'
-
-  const header = document.createElement('div')
-  header.className = 'fs-drag-preview-header'
-
-  const label =
-    names.length === 1 ? (names[0] ?? '') : `${names.length} items`
-
-  header.textContent = label
-
-  el.appendChild(header)
-
-  const list = document.createElement('div')
-  list.className = 'fs-drag-preview-list'
-  const toShow = names.slice(0, 3)
-  toShow.forEach(name => {
-    const row = document.createElement('div')
-    row.className = 'fs-drag-preview-row'
-    row.textContent = name
-    list.appendChild(row)
-  })
-  if (names.length > 3) {
-    const more = document.createElement('div')
-    more.className = 'fs-drag-preview-more'
-    more.textContent = `+ ${names.length - 3} more`
-    list.appendChild(more)
-  }
-  el.appendChild(list)
-
-  document.body.appendChild(el)
-  return el
-}
+const dragActive = ref(false)
 
 function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
   const name = entry.name
@@ -788,49 +752,31 @@ function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
   }
 
   dragSelection.value = names
+  dragActive.value = true
 
   const dt = ev.dataTransfer
-  if (!dt) {
-    // No DataTransfer available; nothing more we can do,
-    // but the row is still draggable so the browser will handle the ghost.
-    return
-  }
+  if (!dt) return
 
   try {
-    dt.setData('text/plain', names.join(','))
+    dt.setData('application/x-cf-imager-names', JSON.stringify({ names }))
     dt.effectAllowed = 'move'
-
-    if (typeof dt.setDragImage === 'function') {
-      // Build a composite drag preview so the user sees that multiple items
-      // are moving together.
-      const preview = buildDragPreview(names)
-      dragPreviewEl.value = preview
-      // Slight offset so the cursor isn't exactly on the top-left corner
-      dt.setDragImage(preview, 10, 10)
-    }
   } catch {
-    // Swallow any drag-image issues; at worst we fall back to the default ghost.
+    // Ignore; browser will still show a basic drag ghost.
   }
 }
 
 function onEntryDragEnd(_ev: DragEvent) {
   dragSelection.value = []
+  dragActive.value = false
   dropTargetName.value = null
-
-  // Clean up custom drag preview element
-  const preview = dragPreviewEl.value
-  if (preview && preview.parentNode) {
-    preview.parentNode.removeChild(preview)
-  }
-  dragPreviewEl.value = null
 }
 
 function onEntryDragOver(ev: DragEvent, entry: CfImagerFsEntry) {
+  // Only allow dropping on directories, not on files.
   if (!dragActive.value) return
   if (entry.kind !== 'dir') return
   if (dragSelection.value.includes(entry.name)) return
 
-  // Allow drop on valid folder targets.
   ev.preventDefault()
   if (ev.dataTransfer) {
     ev.dataTransfer.dropEffect = 'move'
@@ -856,14 +802,41 @@ function onEntryDrop(ev: DragEvent, entry: CfImagerFsEntry) {
   if (!dragActive.value) return
   if (entry.kind !== 'dir') return
 
-  const names = dragSelection.value.slice()
-  if (names.length === 0) return
-  // Don't attempt to move a folder into itself
-  if (names.includes(entry.name)) return
-
   ev.preventDefault()
 
+  dragActive.value = false
   dropTargetName.value = null
+
+  let names = dragSelection.value.slice()
+
+  // Prefer names from the DataTransfer payload if available.
+  const dt = ev.dataTransfer
+  if (dt) {
+    const raw = dt.getData('application/x-cf-imager-names')
+    if (raw) {
+      try {
+        const parsed: any = JSON.parse(raw)
+        if (parsed && Array.isArray(parsed.names) && parsed.names.length > 0) {
+          names = parsed.names
+        }
+      } catch {
+        // fall back to dragSelection
+      }
+    }
+  }
+
+  // Nothing to move
+  if (!names || names.length === 0) {
+    dragSelection.value = []
+    return
+  }
+
+  // Don't attempt to move a folder into itself
+  if (names.includes(entry.name)) {
+    dragSelection.value = []
+    return
+  }
+
   dragSelection.value = []
 
   // Show shim while backend processes the move and refreshes this directory.
@@ -871,7 +844,7 @@ function onEntryDrop(ev: DragEvent, entry: CfImagerFsEntry) {
 
   sendCfImagerCommand('move', {
     names,
-    targetDirName: entry.name
+    targetDir: entry.name
   })
 }
 
@@ -908,6 +881,7 @@ watch(
     fsBusy.value = false
     selectedNames.value = []
     dragSelection.value = []
+    dragActive.value = false
     dropTargetName.value = null
   },
   { immediate: true }
@@ -920,6 +894,7 @@ watch(
     fsBusy.value = false
     selectedNames.value = []
     dragSelection.value = []
+    dragActive.value = false
     dropTargetName.value = null
   }
 )
@@ -2096,46 +2071,5 @@ function formatEta(totalSeconds: number): string {
     max-width: none;
     margin: 0 8px;
   }
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Drag preview (multi-item ghost)                                           */
-/* -------------------------------------------------------------------------- */
-
-.fs-drag-preview {
-  position: fixed;
-  top: -9999px;
-  left: -9999px;
-  z-index: 9999;
-  pointer-events: none;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: rgba(15, 23, 42, 0.96);
-  border: 1px solid #4b5563;
-  box-shadow:
-    0 10px 30px rgba(0, 0, 0, 0.75),
-    0 0 0 1px rgba(15, 23, 42, 0.9);
-  color: #e5e7eb;
-  font-size: 0.76rem;
-}
-
-.fs-drag-preview-header {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-
-.fs-drag-preview-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.fs-drag-preview-row {
-  opacity: 0.9;
-}
-
-.fs-drag-preview-more {
-  opacity: 0.7;
-  font-style: italic;
 }
 </style>
