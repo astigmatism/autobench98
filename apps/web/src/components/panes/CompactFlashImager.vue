@@ -732,10 +732,44 @@ function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
  * Drag-and-drop selection:
  * - dragSelection: the set of names currently being dragged.
  * - dropTargetName: folder name currently highlighted as a drop target.
+ * - dragPreviewEl: DOM element used as the composite drag ghost.
  */
 const dragSelection = ref<string[]>([])
 const dropTargetName = ref<string | null>(null)
+const dragPreviewEl = ref<HTMLElement | null>(null)
 const dragActive = computed(() => dragSelection.value.length > 0)
+
+function buildDragPreview(names: string[]): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'fs-drag-preview'
+
+  const header = document.createElement('div')
+  header.className = 'fs-drag-preview-header'
+  header.textContent =
+    names.length === 1 ? names[0] : `${names.length} items`
+
+  el.appendChild(header)
+
+  const list = document.createElement('div')
+  list.className = 'fs-drag-preview-list'
+  const toShow = names.slice(0, 3)
+  toShow.forEach(name => {
+    const row = document.createElement('div')
+    row.className = 'fs-drag-preview-row'
+    row.textContent = name
+    list.appendChild(row)
+  })
+  if (names.length > 3) {
+    const more = document.createElement('div')
+    more.className = 'fs-drag-preview-more'
+    more.textContent = `+ ${names.length - 3} more`
+    list.appendChild(more)
+  }
+  el.appendChild(list)
+
+  document.body.appendChild(el)
+  return el
+}
 
 function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
   const name = entry.name
@@ -756,6 +790,13 @@ function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
     try {
       ev.dataTransfer.setData('text/plain', names.join(','))
       ev.dataTransfer.effectAllowed = 'move'
+
+      // Build a composite drag preview so the user sees that multiple items
+      // are moving together.
+      const preview = buildDragPreview(names)
+      dragPreviewEl.value = preview
+      // Slight offset so the cursor isn't exactly on the top-left corner
+      ev.dataTransfer.setDragImage(preview, 10, 10)
     } catch {
       // ignore
     }
@@ -765,6 +806,13 @@ function onEntryDragStart(ev: DragEvent, entry: CfImagerFsEntry) {
 function onEntryDragEnd(_ev: DragEvent) {
   dragSelection.value = []
   dropTargetName.value = null
+
+  // Clean up custom drag preview element
+  const preview = dragPreviewEl.value
+  if (preview && preview.parentNode) {
+    preview.parentNode.removeChild(preview)
+  }
+  dragPreviewEl.value = null
 }
 
 function onEntryDragOver(ev: DragEvent, entry: CfImagerFsEntry) {
@@ -2038,5 +2086,46 @@ function formatEta(totalSeconds: number): string {
     max-width: none;
     margin: 0 8px;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Drag preview (multi-item ghost)                                           */
+/* -------------------------------------------------------------------------- */
+
+.fs-drag-preview {
+  position: fixed;
+  top: -9999px;
+  left: -9999px;
+  z-index: 9999;
+  pointer-events: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid #4b5563;
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.75),
+    0 0 0 1px rgba(15, 23, 42, 0.9);
+  color: #e5e7eb;
+  font-size: 0.76rem;
+}
+
+.fs-drag-preview-header {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.fs-drag-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fs-drag-preview-row {
+  opacity: 0.9;
+}
+
+.fs-drag-preview-more {
+  opacity: 0.7;
+  font-style: italic;
 }
 </style>
