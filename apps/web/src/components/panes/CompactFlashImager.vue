@@ -172,15 +172,15 @@
               :data-kind="entry.kind"
               :data-selected="isSelected(entry) ? 'true' : 'false'"
               :data-drop-target="dropTargetName === entry.name ? 'true' : 'false'"
-              :draggable="entry.kind === 'file' || entry.kind === 'dir'"
-              @click.stop.prevent="onEntryClick($event, entry)"
+              draggable="true"
+              @click.stop="onEntryClick($event, entry)"
               @dblclick.stop.prevent="onEntryDblClick(entry)"
-              @dragstart="onEntryDragStart($event, entry)"
-              @dragend="onEntryDragEnd($event)"
-              @dragover="onEntryDragOver($event, entry)"
-              @dragenter="onEntryDragEnter($event, entry)"
-              @dragleave="onEntryDragLeave($event, entry)"
-              @drop="onEntryDrop($event, entry)"
+              @dragstart.stop="onEntryDragStart($event, entry)"
+              @dragend.stop="onEntryDragEnd($event)"
+              @dragover.stop="onEntryDragOver($event, entry)"
+              @dragenter.stop="onEntryDragEnter($event, entry)"
+              @dragleave.stop="onEntryDragLeave($event, entry)"
+              @drop.stop="onEntryDrop($event, entry)"
             >
               <span class="name">
                 <span class="icon">{{ entry.kind === 'dir' ? '📁' : '📄' }}</span>
@@ -710,7 +710,7 @@ function isSelected(entry: CfImagerFsEntry): boolean {
 }
 
 function onEntryClick(ev: MouseEvent, entry: CfImagerFsEntry) {
-  const meta = ev.metaKey
+  const meta = ev.metaKey || ev.ctrlKey
   const name = entry.name
 
   if (meta) {
@@ -1957,7 +1957,7 @@ function formatEta(totalSeconds: number): string {
 .cf-modal-progress-meta {
   display: flex;
   justify-content: space-between;
-  font-size: 0.8rem;      /* was 0.72rem */
+  font-size: 0.8rem;
   opacity: 0.9;
   margin-top: 2px;
 }
