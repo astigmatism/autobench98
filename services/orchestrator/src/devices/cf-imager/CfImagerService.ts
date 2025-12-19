@@ -291,10 +291,17 @@ export class CfImagerService {
 
             const rootDir = this.config.rootDir
             const maxResults = this.config.maxEntriesPerDir ?? 256
-            const visibleExts = (this.config.visibleExtensions ?? []).map(e =>
-                e.toLowerCase()
+
+            // 🔧 Normalize visibleExtensions so that both "img" and ".img" work.
+            const visibleExtsConfig = this.config.visibleExtensions ?? []
+            const visibleExtsSet = new Set(
+                visibleExtsConfig
+                    .map(e => e.trim().toLowerCase())
+                    .filter(Boolean)
+                    .map(e => (e.startsWith('.') ? e : `.${e}`))
             )
-            const hasVisibleFilter = visibleExts.length > 0
+            const hasVisibleFilter = visibleExtsSet.size > 0
+            const visibleExtensionsLog = hasVisibleFilter ? Array.from(visibleExtsSet) : 'ALL'
 
             this.deps.log?.info('[cf-imager] search-start', {
                 cwdRel,
@@ -303,7 +310,7 @@ export class CfImagerService {
                 rootDir,
                 rawQuery,
                 maxResults,
-                visibleExtensions: hasVisibleFilter ? visibleExts : 'ALL',
+                visibleExtensions: visibleExtensionsLog,
             })
 
             const prefixMatches: CfImagerFsState['entries'] = []
@@ -315,10 +322,11 @@ export class CfImagerService {
             let dirsScanned = 0
             let filesScanned = 0
 
-            const shouldIncludeFile = (fileName: string, fileAbs: string): boolean => {
+            const shouldIncludeFile = (_fileName: string, fileAbs: string): boolean => {
                 if (!hasVisibleFilter) return true
                 const ext = extname(fileAbs).toLowerCase()
-                return visibleExts.includes(ext)
+                if (!ext) return false
+                return visibleExtsSet.has(ext)
             }
 
             while (
