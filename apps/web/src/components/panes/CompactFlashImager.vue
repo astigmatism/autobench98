@@ -127,13 +127,25 @@
 
             <label class="fs-path">
               <span class="label">Search:</span>
-              <input
-                class="fs-path-input"
-                type="text"
-                v-model="pathInput"
-                spellcheck="false"
-                placeholder=""
-              />
+              <div class="fs-path-input-wrap">
+                <input
+                  class="fs-path-input"
+                  type="text"
+                  v-model="pathInput"
+                  spellcheck="false"
+                  placeholder=""
+                />
+                <button
+                  v-if="pathInput"
+                  class="fs-path-clear"
+                  type="button"
+                  @click="onClearSearchClick"
+                  aria-label="Clear search"
+                  title="Clear search"
+                >
+                  ×
+                </button>
+              </div>
             </label>
 
             <button
@@ -1163,6 +1175,36 @@ watch(
   }
 )
 
+/**
+ * Explicit clear handler for the little "×" inside the search input.
+ * This:
+ *  - clears the input and local search state immediately
+ *  - cancels any pending debounce
+ *  - sends a "clear search" command to the backend
+ */
+function onClearSearchClick() {
+  // Local state clear
+  pathInput.value = ''
+  searchResults.value = null
+  searchInFlight.value = false
+  fsBusy.value = false
+
+  // Cancel any pending debounced search
+  if (searchTimeout !== null) {
+    window.clearTimeout(searchTimeout)
+    searchTimeout = null
+  }
+
+  const cwd = view.value.fs.cwd || '.'
+
+  // If device isn't present or we're disconnected, just clear locally
+  if (view.value.phase === 'disconnected' || !view.value.device) {
+    return
+  }
+
+  sendCfImagerCommand('search', { cwd, query: '' })
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Media-ready + file selection                                              */
 /* -------------------------------------------------------------------------- */
@@ -1918,6 +1960,13 @@ function formatEta(totalSeconds: number): string {
   opacity: 0.7;
 }
 
+/* Wrap for input + clear icon */
+.fs-path-input-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
 .fs-path-input {
   --control-h: 28px;
 
@@ -1925,13 +1974,39 @@ function formatEta(totalSeconds: number): string {
   color: var(--panel-fg);
   border: 1px solid #374151;
   border-radius: 6px;
-  padding: 0 8px;
+  padding: 0 20px 0 8px; /* extra right padding for clear button */
   min-width: 120px;
   font-size: 0.76rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     'Courier New', monospace;
   height: var(--control-h);
   line-height: var(--control-h);
+}
+
+/* Tiny "×" clear control inside the input */
+.fs-path-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fs-path-clear:hover {
+  background: rgba(148, 163, 184, 0.18);
+  color: #e5e7eb;
 }
 
 .spinner {
