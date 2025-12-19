@@ -81,16 +81,19 @@ export class CfImagerService {
             // diskFreeBytes will be populated on the first emitFsUpdated()
         }
 
-        this.deps.log?.debug('[cf-imager] service constructed', {
-            rootDir: this.config.rootDir,
-            maxEntriesPerDir: this.config.maxEntriesPerDir,
-            readScriptPath: this.config.readScriptPath,
-            writeScriptPath: this.config.writeScriptPath,
-            visibleExtensions: this.config.visibleExtensions,
-            fsPollIntervalMs: this.config.fsPollIntervalMs ?? 0,
-            initialCwdAbs: this.cwdAbs,
-            initialFsCwd: fs.cwd,
-        })
+        const visible = (this.config.visibleExtensions ?? []).join(',') || 'ALL'
+        const pollMs = this.config.fsPollIntervalMs ?? 0
+
+        this.deps.log?.debug(
+            `[cf-imager] service-constructed rootDir=${this.config.rootDir}` +
+            ` maxEntriesPerDir=${this.config.maxEntriesPerDir}` +
+            ` readScriptPath=${this.config.readScriptPath ?? 'none'}` +
+            ` writeScriptPath=${this.config.writeScriptPath ?? 'none'}` +
+            ` visibleExtensions=${visible}` +
+            ` fsPollIntervalMs=${pollMs}` +
+            ` initialCwdAbs=${this.cwdAbs}` +
+            ` initialFsCwd=${fs.cwd}`
+        )
     }
 
     /* ---------------------------------------------------------------------- */
@@ -250,12 +253,9 @@ export class CfImagerService {
         const rawQuery = (query ?? '').trim().toLowerCase()
         const cwdLabel = cwdRel || '.'
 
-        this.deps.log?.debug('[cf-imager] search-request', {
-            cwdRel,
-            cwdLabel,
-            rawQuery,
-            originalQuery: query,
-        })
+        this.deps.log?.debug(
+            `[cf-imager] search-request cwdRel=${cwdLabel} rawQuery="${rawQuery}"`
+        )
 
         // Clear-search behavior for short queries: just show the normal listing
         // rooted at the requested cwd.
@@ -264,21 +264,17 @@ export class CfImagerService {
                 const abs = resolveUnderRoot(this.config.rootDir, cwdRel || '.')
                 this.cwdAbs = abs
 
-                this.deps.log?.info('[cf-imager] search-clear', {
-                    cwdRel,
-                    cwdLabel,
-                    resolvedCwdAbs: this.cwdAbs,
-                })
+                this.deps.log?.info(
+                    `[cf-imager] search-clear cwdRel=${cwdLabel} cwdAbs=${this.cwdAbs}`
+                )
 
                 await this.emitFsUpdated()
             } catch (err) {
                 const msg = `search (clear) failed for cwd=${cwdLabel} query="${rawQuery}": ${(err as Error).message}`
-                this.deps.log?.error('[cf-imager] search-clear error', {
-                    cwdRel,
-                    cwdLabel,
-                    rawQuery,
-                    err: (err as Error).message,
-                })
+                const errMsg = (err as Error).message
+                this.deps.log?.error(
+                    `[cf-imager] search-clear-error cwdRel=${cwdLabel} query="${rawQuery}" err="${errMsg}"`
+                )
                 this.emitError(msg)
             }
             return
@@ -301,17 +297,16 @@ export class CfImagerService {
                     .map(e => (e.startsWith('.') ? e : `.${e}`))
             )
             const hasVisibleFilter = visibleExtsSet.size > 0
-            const visibleExtensionsLog = hasVisibleFilter ? Array.from(visibleExtsSet) : 'ALL'
+            const visibleExtensionsLog = hasVisibleFilter ? Array.from(visibleExtsSet).join(',') : 'ALL'
 
-            this.deps.log?.info('[cf-imager] search-start', {
-                cwdRel,
-                cwdLabel,
-                originAbs,
-                rootDir,
-                rawQuery,
-                maxResults,
-                visibleExtensions: visibleExtensionsLog,
-            })
+            this.deps.log?.info(
+                `[cf-imager] search-start cwdRel=${cwdLabel}` +
+                ` originAbs=${originAbs}` +
+                ` rootDir=${rootDir}` +
+                ` rawQuery="${rawQuery}"` +
+                ` maxResults=${maxResults}` +
+                ` visibleExts=${visibleExtensionsLog}`
+            )
 
             const prefixMatches: CfImagerFsState['entries'] = []
             const partialMatches: CfImagerFsState['entries'] = []
@@ -340,10 +335,10 @@ export class CfImagerService {
                 try {
                     dirEntries = await fsp.readdir(absDir, { withFileTypes: true })
                 } catch (e) {
-                    this.deps.log?.debug('[cf-imager] search-skip-dir', {
-                        absDir,
-                        err: (e as Error).message,
-                    })
+                    const errMsg = (e as Error).message
+                    this.deps.log?.debug(
+                        `[cf-imager] search-skip-dir dir="${absDir}" err="${errMsg}"`
+                    )
                     // If a directory becomes unavailable mid-scan, just skip it.
                     continue
                 }
@@ -398,10 +393,10 @@ export class CfImagerService {
                     try {
                         stat = await fsp.stat(entryAbs)
                     } catch (e) {
-                        this.deps.log?.debug('[cf-imager] search-skip-file', {
-                            entryAbs,
-                            err: (e as Error).message,
-                        })
+                        const errMsg = (e as Error).message
+                        this.deps.log?.debug(
+                            `[cf-imager] search-skip-file path="${entryAbs}" err="${errMsg}"`
+                        )
                         // If the file disappears between readdir and stat, skip it.
                         continue
                     }
@@ -447,21 +442,19 @@ export class CfImagerService {
             const diskFreeBytes = await this.getDiskFreeBytes()
             this.state.diskFreeBytes = diskFreeBytes
 
-            const sampleNames = entries.slice(0, 25).map(e => `${e.kind}:${e.name}`)
+            const resultCount = entries.length
 
-            this.deps.log?.info('[cf-imager] search-complete', {
-                cwdRel,
-                cwdLabel,
-                originAbs,
-                rawQuery,
-                dirsScanned,
-                filesScanned,
-                resultCount: entries.length,
-                prefixMatches: prefixMatches.length,
-                partialMatches: partialMatches.length,
-                sample: sampleNames,
-                diskFreeBytes,
-            })
+            this.deps.log?.info(
+                `[cf-imager] search-complete cwdRel=${cwdLabel}` +
+                ` originAbs=${originAbs}` +
+                ` rawQuery="${rawQuery}"` +
+                ` dirsScanned=${dirsScanned}` +
+                ` filesScanned=${filesScanned}` +
+                ` resultCount=${resultCount}` +
+                ` prefixMatches=${prefixMatches.length}` +
+                ` partialMatches=${partialMatches.length}` +
+                ` diskFreeBytes=${diskFreeBytes ?? 'unknown'}`
+            )
 
             this.deps.events.publish({
                 kind: 'cf-fs-updated',
@@ -471,12 +464,10 @@ export class CfImagerService {
             })
         } catch (err) {
             const msg = `search failed for cwd=${cwdLabel} query="${rawQuery}": ${(err as Error).message}`
-            this.deps.log?.error('[cf-imager] search-error', {
-                cwdRel,
-                cwdLabel,
-                rawQuery,
-                err: (err as Error).message,
-            })
+            const errMsg = (err as Error).message
+            this.deps.log?.error(
+                `[cf-imager] search-error cwdRel=${cwdLabel} query="${rawQuery}" err="${errMsg}"`
+            )
             this.emitError(msg)
         }
     }
@@ -1528,19 +1519,20 @@ export class CfImagerService {
 
             if (next === 'present') {
                 logMsg =
-                    `[cf-imager] media status -> present sizeBytes=${sizeBytes} devicePath=${devPath}`
+                    `[cf-imager] media-status media=present sizeBytes=${sizeBytes} devicePath=${devPath}`
                 uiMsg = 'CF card detected'
             } else if (prev === 'present' && next === 'none') {
-                logMsg = '[cf-imager] media status -> none (media removed)'
+                logMsg = '[cf-imager] media-status media=none reason=media-removed'
                 uiMsg = 'CF card removed from reader'
             } else {
-                logMsg = `[cf-imager] media status -> ${next}`
+                logMsg = `[cf-imager] media-status media=${next}`
                 uiMsg = next === 'none'
                     ? 'No CF card detected in reader'
                     : 'CF media status changed'
             }
 
             // console.log(logMsg)
+            this.deps.log?.info(logMsg)
 
             this.deps.events.publish({
                 kind: 'cf-media-updated',
@@ -1770,13 +1762,13 @@ df -k "${root}" | awk 'NR==2 { print $4 }'
         const diskFreeBytes = await this.getDiskFreeBytes()
         this.state.diskFreeBytes = diskFreeBytes
 
-        this.deps.log?.debug('[cf-imager] emitFsUpdated', {
-            cwdAbs: this.cwdAbs,
-            fsCwd: fs.cwd,
-            rootPath: fs.rootPath,
-            entryCount: fs.entries.length,
-            diskFreeBytes,
-        })
+        this.deps.log?.debug(
+            `[cf-imager] fs-updated cwdAbs=${this.cwdAbs}` +
+            ` fsCwd=${fs.cwd}` +
+            ` rootPath=${fs.rootPath}` +
+            ` entryCount=${fs.entries.length}` +
+            ` diskFreeBytes=${diskFreeBytes ?? 'unknown'}`
+        )
 
         this.deps.events.publish({
             kind: 'cf-fs-updated',
@@ -1889,16 +1881,11 @@ df -k "${root}" | awk 'NR==2 { print $4 }'
             } catch (err) {
                 const e = err as NodeJS.ErrnoException
                 if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) {
-                    /*
                     console.warn(
-                        '[cf-imager] pollFsOnce: cwd no longer exists on disk, resetting to rootDir',
-                        {
-                            cwdAbs: this.cwdAbs,
-                            rootDir: this.config.rootDir,
-                            err: e.message,
-                        }
+                        `[cf-imager] pollFsOnce cwd-missing cwdAbs=${this.cwdAbs}` +
+                        ` rootDir=${this.config.rootDir}` +
+                        ` err="${e.message}"`
                     )
-                    */
 
                     // Hard reset to rootDir and emit a fresh snapshot.
                     this.cwdAbs = this.config.rootDir
@@ -1908,8 +1895,8 @@ df -k "${root}" | awk 'NR==2 { print $4 }'
 
                 // Other stat errors: log and bail out of this poll cycle.
                 console.warn(
-                    '[cf-imager] pollFsOnce: stat failed for cwd',
-                    { cwdAbs: this.cwdAbs, err: e?.message ?? String(err) }
+                    `[cf-imager] pollFsOnce stat-failed cwdAbs=${this.cwdAbs}` +
+                    ` err="${e?.message ?? String(err)}"`
                 )
                 return
             }
@@ -1940,8 +1927,7 @@ df -k "${root}" | awk 'NR==2 { print $4 }'
             const e = err as NodeJS.ErrnoException
 
             console.warn(
-                '[cf-imager] pollFsOnce: failed to refresh directory state',
-                { err: e?.message ?? String(err) }
+                `[cf-imager] pollFsOnce refresh-failed err="${e?.message ?? String(err)}"`
             )
         }
     }

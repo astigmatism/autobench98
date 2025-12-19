@@ -133,8 +133,8 @@
                   type="text"
                   v-model="pathInput"
                   spellcheck="false"
-                  placeholder=""
                 />
+                <!-- Larger clear button -->
                 <button
                   v-if="pathInput"
                   class="fs-path-clear"
@@ -143,10 +143,11 @@
                   aria-label="Clear search"
                   title="Clear search"
                 >
-                  ×
+                  ✕
                 </button>
               </div>
             </label>
+
 
             <button
               class="btn"
@@ -1975,7 +1976,8 @@ function formatEta(totalSeconds: number): string {
   border: 1px solid #374151;
   border-radius: 6px;
   padding: 0 20px 0 8px; /* extra right padding for clear button */
-  min-width: 120px;
+  min-width: 40px;
+  max-width: 100px;
   font-size: 0.76rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     'Courier New', monospace;
@@ -1986,7 +1988,7 @@ function formatEta(totalSeconds: number): string {
 /* Tiny "×" clear control inside the input */
 .fs-path-clear {
   position: absolute;
-  right: 4px;
+  right: 10px;
   top: 50%;
   transform: translateY(-50%);
   width: 16px;
