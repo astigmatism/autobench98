@@ -942,13 +942,57 @@ function renderLeaf(
             hud
         ])
 
+    // Persisted pane-level config lives in leaf.props
+    const rawProps = (leaf?.props ?? {}) as Record<string, unknown>
+
+    // Normalize paneConfig so panes see just their config object, even if
+    // we stored it wrapped as { paneConfig: { ... } } in the layout.
+    let paneConfig: Record<string, unknown> | undefined
+    if (rawProps && typeof rawProps === 'object' && 'paneConfig' in rawProps) {
+        const inner = (rawProps as any).paneConfig
+        if (inner && typeof inner === 'object') {
+            paneConfig = inner as Record<string, unknown>
+        } else {
+            paneConfig = undefined
+        }
+    } else {
+        // Back-compat: allow panes that treat the entire props object as config
+        paneConfig = rawProps
+    }
+
+    const componentVNode = Comp
+        ? h(Comp as any, {
+              // Back-compat: still spread as real props in case any pane already reads them
+              ...rawProps,
+              // Standard context
+              pane: paneInfo,
+              // Explicit config blob for panes that opt in
+              paneConfig,
+              // Allow panes to emit either name; both persist into leaf.props
+              onPaneConfigChange: (
+                  nextConfig: Record<string, unknown> | null | undefined
+              ) => {
+                  const safeConfig =
+                      nextConfig && typeof nextConfig === 'object'
+                          ? { ...nextConfig }
+                          : {}
+                  ;(leaf as LeafNode).props = { paneConfig: safeConfig }
+              },
+              onPanePropsChange: (
+                  nextProps: Record<string, unknown> | null | undefined
+              ) => {
+                  const safe =
+                      nextProps && typeof nextProps === 'object' ? { ...nextProps } : {}
+                  ;(leaf as LeafNode).props = safe
+              }
+          })
+        : h('div', { class: 'empty', style: { color: textColor } }, 'Empty pane')
+
     const content = h('div', { style, class: 'studio-leaf' }, [
         menuHotspot,
         // SR-only live text
         h('span', { class: 'sr-only', 'aria-live': 'polite' }, ariaText),
-        Comp
-            ? h(Comp as any, { pane: paneInfo, ...(leaf?.props ?? {}) })
-            : h('div', { class: 'empty', style: { color: textColor } }, 'Empty pane')
+        componentVNode
     ])
 
     const isRootConstrained =

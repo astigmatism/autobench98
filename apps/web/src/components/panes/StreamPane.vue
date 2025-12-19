@@ -196,8 +196,25 @@ type PaneInfo = {
     }
 }
 
+/** Per-pane persisted configuration for the stream pane. */
+type StreamPaneConfig = {
+    enabled?: boolean
+    scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
+    bgMode?: 'black' | 'pane'
+}
+
 const props = defineProps<{
     pane?: PaneInfo
+    /** Optional persisted per-pane configuration (from layout). */
+    paneConfig?: StreamPaneConfig
+}>()
+
+const emit = defineEmits<{
+    /**
+     * Emitted whenever the pane's configuration changes.
+     * Parent stores this under LeafNode.props for layout persistence.
+     */
+    (e: 'panePropsChange', next: { paneConfig: StreamPaneConfig }): void
 }>()
 
 /**
@@ -286,6 +303,7 @@ const panelFg = '#e6e6e6'
 
 /* ------------- local UI state ------------- */
 
+/** Advanced controls visibility (non-persisted, purely UI). */
 const showControls = ref(false)
 
 /** Whether the stream is actively rendered. */
@@ -299,6 +317,48 @@ const bgMode = ref<'black' | 'pane'>('black')
 
 /** Reload key forces <img> to re-request the stream (by remounting it). */
 const reloadKey = ref(0)
+
+/** Apply config from parent (if any) to local state. */
+function applyConfig(cfg?: StreamPaneConfig | null) {
+    const merged: Required<StreamPaneConfig> = {
+        enabled: true,
+        scaleMode: 'fit',
+        bgMode: 'black',
+        ...(cfg ?? {})
+    }
+    enabled.value = merged.enabled
+    scaleMode.value = merged.scaleMode
+    bgMode.value = merged.bgMode
+}
+
+/** Emit current config snapshot to parent. */
+function emitConfig() {
+    const next: StreamPaneConfig = {
+        enabled: enabled.value,
+        scaleMode: scaleMode.value,
+        bgMode: bgMode.value
+    }
+    emit('panePropsChange', { paneConfig: next })
+}
+
+/** Initialize local state from incoming paneConfig. */
+applyConfig(props.paneConfig)
+emitConfig()
+
+/** When parent updates paneConfig (e.g., loading a layout), sync local state. */
+watch(
+    () => props.paneConfig,
+    (cfg) => {
+        applyConfig(cfg)
+        emitConfig()
+    },
+    { deep: true }
+)
+
+/** Whenever local config-affecting fields change, push an update to parent. */
+watch([enabled, scaleMode, bgMode], () => {
+    emitConfig()
+})
 
 /* ------------- health state ------------- */
 
@@ -332,7 +392,7 @@ async function loadHealth() {
         const res = await fetch(HEALTH_ENDPOINT, {
             method: 'GET',
             headers: {
-                'Accept': 'application/json'
+                Accept: 'application/json'
             }
         })
 
