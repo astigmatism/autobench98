@@ -15,11 +15,7 @@
 
         <!-- Settings panel (hidden by default) -->
         <transition name="slide-fade">
-            <div
-                v-show="showControls"
-                id="stream-controls-panel"
-                class="controls-panel"
-            >
+            <div v-show="showControls" id="stream-controls-panel" class="controls-panel">
                 <div class="toolbar">
                     <div class="left">
                         <div class="controls">
@@ -71,10 +67,7 @@
                             >
                                 Loading…
                             </span>
-                            <span
-                                v-else-if="health"
-                                class="health-pill health-pill--ok"
-                            >
+                            <span v-else-if="health" class="health-pill health-pill--ok">
                                 {{ health.status === 'ok' ? 'OK' : health.status }}
                             </span>
                             <span
@@ -86,9 +79,7 @@
                         </span>
                     </div>
 
-                    <div v-if="healthError" class="health-error">
-                        ⚠️ {{ healthError }}
-                    </div>
+                    <div v-if="healthError" class="health-error">⚠️ {{ healthError }}</div>
 
                     <div v-else-if="health" class="health-grid">
                         <div class="health-row">
@@ -111,7 +102,8 @@
                                 <span v-if="health.capture?.restartCount != null">
                                     · {{ health.capture.restartCount }} restart<span
                                         v-if="health.capture.restartCount !== 1"
-                                    >s</span>
+                                        >s</span
+                                    >
                                 </span>
                             </span>
                         </div>
@@ -138,18 +130,13 @@
                         </div>
                     </div>
 
-                    <div v-else class="health-empty">
-                        No health data yet.
-                    </div>
+                    <div v-else class="health-empty">No health data yet.</div>
                 </div>
             </div>
         </transition>
 
         <!-- Main viewport (panel-styled) -->
-        <div
-            class="viewport"
-            :data-bg="bgMode"
-        >
+        <div class="viewport" :data-bg="bgMode">
             <div v-if="enabled" class="viewport-inner">
                 <img
                     :key="reloadKey"
@@ -167,7 +154,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 
 /** Accept pane context (optional). */
 type Direction = 'row' | 'col'
@@ -196,8 +183,28 @@ type PaneInfo = {
     }
 }
 
+/**
+ * Per-pane UI prefs (Stream pane)
+ * - NOT written to any global store
+ * - persisted per pane id in localStorage as a fallback
+ *
+ * NOTE: App.vue may inject these via leaf.props.__streamPaneUi when saving/loading profiles.
+ */
+type StreamPanePrefs = {
+    enabled?: boolean
+    scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
+    bgMode?: 'black' | 'pane'
+}
+
+function isObject(x: any): x is Record<string, unknown> {
+    return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+
 const props = defineProps<{
     pane?: PaneInfo
+    __streamPaneUi?: StreamPanePrefs
+    /** Monotonic "profile load" revision stamped by App.vue to force rehydrate on load. */
+    __streamPaneProfileRev?: number
 }>()
 
 /**
@@ -300,6 +307,134 @@ const bgMode = ref<'black' | 'pane'>('black')
 /** Reload key forces <img> to re-request the stream (by remounting it). */
 const reloadKey = ref(0)
 
+/* -------------------------------------------------------------------------- */
+/*  Per-pane persistence (localStorage + profile round-trip)                   */
+/* -------------------------------------------------------------------------- */
+
+function isValidScaleMode(x: any): x is 'fit' | 'fill' | 'stretch' | 'native' {
+    return x === 'fit' || x === 'fill' || x === 'stretch' || x === 'native'
+}
+function isValidBgMode(x: any): x is 'black' | 'pane' {
+    return x === 'black' || x === 'pane'
+}
+
+const paneId = computed(() => String(props.pane?.id ?? '').trim())
+const STORAGE_PREFIX = 'stream:pane:ui:'
+const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
+
+function readPanePrefs(): StreamPanePrefs | null {
+    const key = storageKey.value
+    if (!key) return null
+    try {
+        const raw = localStorage.getItem(key)
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed === 'object' ? (parsed as StreamPanePrefs) : null
+    } catch {
+        return null
+    }
+}
+
+function writePanePrefs(p: StreamPanePrefs) {
+    const key = storageKey.value
+    if (!key) return
+    try {
+        localStorage.setItem(key, JSON.stringify(p))
+    } catch {
+        // ignore
+    }
+}
+
+function applyPanePrefs(prefs?: StreamPanePrefs | null) {
+    if (!prefs || typeof prefs !== 'object') return
+
+    const nextEnabled = (prefs as any).enabled
+    if (typeof nextEnabled === 'boolean') enabled.value = nextEnabled
+
+    const nextScale = (prefs as any).scaleMode
+    if (isValidScaleMode(nextScale)) scaleMode.value = nextScale
+
+    const nextBg = (prefs as any).bgMode
+    if (isValidBgMode(nextBg)) bgMode.value = nextBg
+}
+
+function exportPanePrefs(): StreamPanePrefs {
+    return {
+        enabled: !!enabled.value,
+        scaleMode: scaleMode.value,
+        bgMode: bgMode.value
+    }
+}
+
+/**
+ * Hydration priority:
+ * 1) profile-embedded prefs (leaf.props.__streamPaneUi) if present
+ * 2) per-pane localStorage
+ * 3) local defaults (refs above)
+ *
+ * Important: profile load must override "recent modifications", even if pane id is unchanged.
+ * App.vue stamps a monotonic __streamPaneProfileRev on leaves to force this rehydrate.
+ */
+const lastHydratedSig = ref<string>('')
+
+function hydrateForPane() {
+    const key = storageKey.value
+    const rev = typeof props.__streamPaneProfileRev === 'number' ? props.__streamPaneProfileRev : 0
+    const hasEmbed = isObject(props.__streamPaneUi)
+
+    // If we can’t key this pane yet (no id), we can still apply embedded prefs on change.
+    if (!key) {
+        const sig = `nokey|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+        if (lastHydratedSig.value === sig) return
+        lastHydratedSig.value = sig
+
+        if (hasEmbed) applyPanePrefs(props.__streamPaneUi as StreamPanePrefs)
+        return
+    }
+
+    // Rehydrate whenever:
+    // - pane id changes
+    // - profile rev changes
+    // - embedded presence changes
+    const sig = `${key}|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+    if (lastHydratedSig.value === sig) return
+    lastHydratedSig.value = sig
+
+    // 1) Embedded prefs from profile/layout snapshot (authoritative on profile load)
+    if (hasEmbed) {
+        applyPanePrefs(props.__streamPaneUi as StreamPanePrefs)
+        // Mirror into localStorage so it becomes the persistent per-pane baseline.
+        writePanePrefs(exportPanePrefs())
+        return
+    }
+
+    // 2) localStorage
+    const stored = readPanePrefs()
+    if (stored) {
+        applyPanePrefs(stored)
+        return
+    }
+
+    // 3) defaults already set by refs
+}
+
+onMounted(() => {
+    hydrateForPane()
+})
+
+// Rehydrate on pane id change OR when profile injects new prefs/rev (profile load)
+watch([paneId, () => props.__streamPaneUi, () => props.__streamPaneProfileRev], () =>
+    hydrateForPane()
+)
+
+// Persist per-pane prefs whenever these change (if pane id exists)
+watch(
+    [() => enabled.value, () => scaleMode.value, () => bgMode.value],
+    () => {
+        writePanePrefs(exportPanePrefs())
+    }
+)
+
 /* ------------- health state ------------- */
 
 const health = ref<SidecarHealth | null>(null)
@@ -332,7 +467,7 @@ async function loadHealth() {
         const res = await fetch(HEALTH_ENDPOINT, {
             method: 'GET',
             headers: {
-                'Accept': 'application/json'
+                Accept: 'application/json'
             }
         })
 
@@ -422,10 +557,7 @@ function reloadStream() {
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transition:
-        opacity 120ms ease,
-        background 120ms ease,
-        border-color 120ms ease,
+    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease,
         transform 60ms ease;
     z-index: 31;
 }

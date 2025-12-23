@@ -2,6 +2,7 @@
 import { WSClient } from '@/lib/wsClient'
 import { useMirror } from '@/stores/mirror'
 import { useLogs } from '@/stores/logs'
+import { useWsStatus } from '@/stores/wsStatus'
 
 let wsInstance: WSClient | null = null
 let listenerDisposers: Array<() => void> = []
@@ -14,7 +15,9 @@ export function startRealtime(wsUrl: string): WSClient {
 
     const mirror = useMirror()
     const logs = useLogs()
+    const wsStatus = useWsStatus()
 
+    // --- connection lifecycle ---
     listenerDisposers.push(
         ws.on('open', () => {
             ws.send({ type: 'hello', payload: { capabilities: ['json-patch'] } })
@@ -22,6 +25,15 @@ export function startRealtime(wsUrl: string): WSClient {
         })
     )
 
+    listenerDisposers.push(
+        ws.on('status', (payload: any) => {
+            // Forward status exactly as emitted by WSClient
+            // Expected shape: { state: 'connected' | 'reconnecting' | 'disconnected', ... }
+            wsStatus.setStatus(payload)
+        })
+    )
+
+    // --- server messages ---
     listenerDisposers.push(
         ws.on('message', (m: any) => {
             // --- adopt server-driven config, if present ---
@@ -39,7 +51,11 @@ export function startRealtime(wsUrl: string): WSClient {
                 const from = m.fromVersion ?? m.payload?.fromVersion
                 const to = m.toVersion ?? m.payload?.toVersion
                 const patch = m.patch ?? m.payload?.patch
-                if (typeof from === 'number' && typeof to === 'number' && Array.isArray(patch)) {
+                if (
+                    typeof from === 'number' &&
+                    typeof to === 'number' &&
+                    Array.isArray(patch)
+                ) {
                     mirror.applyPatch(from, to, patch)
                 }
                 return
@@ -50,6 +66,7 @@ export function startRealtime(wsUrl: string): WSClient {
                 logs.replaceHistory(m.entries)
                 return
             }
+
             if (m?.type === 'logs.append' && Array.isArray(m.entries) && m.entries.length > 0) {
                 for (const e of m.entries) logs.append(e)
                 return
@@ -57,6 +74,7 @@ export function startRealtime(wsUrl: string): WSClient {
         })
     )
 
+    // --- close / error ---
     listenerDisposers.push(ws.on('close', () => { /* no-op */ }))
     listenerDisposers.push(ws.on('error', () => { /* no-op */ }))
 
@@ -69,6 +87,7 @@ export function stopRealtime(): void {
         try { off() } catch {}
     }
     listenerDisposers = []
+    wsInstance = null
 }
 
 // NEW: Allow panes to access the existing WS client.

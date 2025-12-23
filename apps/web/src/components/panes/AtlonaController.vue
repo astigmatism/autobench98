@@ -95,6 +95,13 @@ type PaneInfo = {
 
 const props = defineProps<{ pane?: PaneInfo }>()
 
+/**
+ * NOTE: This pane currently has no user-adjustable UI settings worth persisting.
+ * When that changes (toggles, selected device, etc.), add a sibling module:
+ *   `components/panes/**AtlonaController.panePrefs.ts`
+ * exporting 'panePrefsSpec', and wire the persisted values like Logs/Stream do.
+ */
+
 /* -------------------------------------------------------------------------- */
 /*  Contrast-aware pane foreground                                            */
 /* -------------------------------------------------------------------------- */
@@ -197,9 +204,7 @@ const statusLabel = computed(() => {
   }
 })
 
-const canInteract = computed(
-  () => atlona.value.phase === 'ready' && atlona.value.identified
-)
+const canInteract = computed(() => atlona.value.phase === 'ready' && atlona.value.identified)
 
 /* -------------------------------------------------------------------------- */
 /*  Local client-side hold tracking                                           */

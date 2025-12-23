@@ -22,12 +22,16 @@ type WSClientOptions = {
 // Read Vite-provided env (must be prefixed with VITE_)
 const ENV = import.meta.env as any
 const V_HEARTBEAT_INTERVAL = Number(ENV.VITE_WS_HEARTBEAT_INTERVAL_MS ?? 10000)
-const V_HEARTBEAT_TIMEOUT  = Number(ENV.VITE_WS_HEARTBEAT_TIMEOUT_MS  ?? 5000)
-const V_RC_ENABLED         = String(ENV.VITE_WS_RECONNECT_ENABLED ?? 'true').toLowerCase() === 'true'
-const V_RC_MIN             = Number(ENV.VITE_WS_RECONNECT_MIN_MS ?? 1000)
-const V_RC_MAX             = Number(ENV.VITE_WS_RECONNECT_MAX_MS ?? 15000)
-const V_RC_FACTOR          = Number(ENV.VITE_WS_RECONNECT_FACTOR ?? 1.8)
-const V_RC_JITTER          = Number(ENV.VITE_WS_RECONNECT_JITTER ?? 0.2)
+const V_HEARTBEAT_TIMEOUT = Number(ENV.VITE_WS_HEARTBEAT_TIMEOUT_MS ?? 5000)
+const V_RC_ENABLED =
+    String(ENV.VITE_WS_RECONNECT_ENABLED ?? 'true').toLowerCase() === 'true'
+const V_RC_MIN = Number(ENV.VITE_WS_RECONNECT_MIN_MS ?? 1000)
+const V_RC_MAX = Number(ENV.VITE_WS_RECONNECT_MAX_MS ?? 15000)
+const V_RC_FACTOR = Number(ENV.VITE_WS_RECONNECT_FACTOR ?? 1.8)
+const V_RC_JITTER = Number(ENV.VITE_WS_RECONNECT_JITTER ?? 0.2)
+
+type WSStatusState = 'connected' | 'reconnecting' | 'disconnected'
+type CloseIntent = 'none' | 'reopen' | 'shutdown'
 
 export class WSClient {
     private ws?: WebSocket
@@ -50,22 +54,26 @@ export class WSClient {
     private attempts = 0
     private shouldReconnect = true
 
+    // internal close intent guard (prevents reconnect/status flicker on intentional close)
+    private closeIntent: CloseIntent = 'none'
+
     constructor(opts: WSClientOptions = {}) {
         const hb = opts.heartbeat ?? {}
         const rc = opts.reconnect ?? {}
 
-        this.hbIntervalMs    = hb.intervalMs ?? V_HEARTBEAT_INTERVAL
-        this.hbTimeoutMs     = hb.timeoutMs  ?? V_HEARTBEAT_TIMEOUT
+        this.hbIntervalMs = hb.intervalMs ?? V_HEARTBEAT_INTERVAL
+        this.hbTimeoutMs = hb.timeoutMs ?? V_HEARTBEAT_TIMEOUT
 
-        this.reconnectEnabled = rc.enabled   ?? V_RC_ENABLED
-        this.backoffMin       = rc.minDelayMs ?? V_RC_MIN
-        this.backoffMax       = rc.maxDelayMs ?? V_RC_MAX
-        this.backoffFactor    = rc.factor     ?? V_RC_FACTOR
-        this.backoffJitter    = rc.jitter     ?? V_RC_JITTER
+        this.reconnectEnabled = rc.enabled ?? V_RC_ENABLED
+        this.backoffMin = rc.minDelayMs ?? V_RC_MIN
+        this.backoffMax = rc.maxDelayMs ?? V_RC_MAX
+        this.backoffFactor = rc.factor ?? V_RC_FACTOR
+        this.backoffJitter = rc.jitter ?? V_RC_JITTER
     }
 
     connect(url: string) {
         this.url = url
+        this.shouldReconnect = true
         this.openSocket()
     }
 
@@ -76,37 +84,66 @@ export class WSClient {
     }
 
     on(type: string, fn: Handler) {
-        (this.handlers[type] ||= []).push(fn)
-        return () => (this.handlers[type] = (this.handlers[type] || []).filter(f => f !== fn))
+        ;(this.handlers[type] ||= []).push(fn)
+        return () =>
+            (this.handlers[type] = (this.handlers[type] || []).filter(
+                (f) => f !== fn
+            ))
     }
 
     /** Stop heartbeats and auto-reconnect; closes the socket. */
     shutdown() {
         this.shouldReconnect = false
+        this.closeIntent = 'shutdown'
         this.clearHeartbeat()
         this.clearReconnectTimer()
-        try { this.ws?.close() } catch {}
+        try {
+            this.ws?.close()
+        } catch {
+            // ignore
+        }
+        this.emitStatus('disconnected')
     }
 
     // ---- internals ---------------------------------------------------------
 
     private openSocket() {
         if (!this.url) return
-        try { this.ws?.close() } catch {}
+
+        // If we're replacing an existing socket (new connect or reconnect attempt),
+        // close it intentionally so onclose doesn't schedule another reconnect.
+        if (this.ws) {
+            this.closeIntent = 'reopen'
+            try {
+                this.ws.close()
+            } catch {
+                // ignore
+            }
+        }
+
         this.ws = new WebSocket(this.url)
 
         this.ws.onopen = () => {
+            // If we reached onopen, we are connected; clear any pending reconnect timer.
+            this.clearReconnectTimer()
+
             this.emit('open', {})
             this.emitStatus('connected')
+
             // reset backoff
             this.attempts = 0
+
             // start heartbeat
             this.scheduleHeartbeat()
         }
 
         this.ws.onmessage = (e) => {
             let msg: any
-            try { msg = JSON.parse(e.data as string) } catch { return }
+            try {
+                msg = JSON.parse(e.data as string)
+            } catch {
+                return
+            }
 
             // respond to server ping (if any)
             if (msg?.type === 'ping') {
@@ -125,9 +162,17 @@ export class WSClient {
 
         this.ws.onclose = () => {
             this.emit('close', {})
-            this.emitStatus('disconnected')
+
+            // If we intentionally closed to reopen, don't spam "disconnected" or reconnect logic.
+            const intent = this.closeIntent
+            this.closeIntent = 'none'
+
             this.clearHeartbeat()
-            this.maybeScheduleReconnect()
+
+            if (intent !== 'reopen') {
+                this.emitStatus('disconnected')
+                this.maybeScheduleReconnect()
+            }
         }
 
         this.ws.onerror = (err) => {
@@ -138,22 +183,34 @@ export class WSClient {
 
     private scheduleHeartbeat() {
         this.clearHeartbeat()
-        this.hbTimer = window.setTimeout(() => this.doHeartbeat(), Math.min(1000, this.hbIntervalMs)) as unknown as number
+        this.hbTimer = window.setTimeout(
+            () => this.doHeartbeat(),
+            Math.min(1000, this.hbIntervalMs)
+        ) as unknown as number
     }
 
     private doHeartbeat() {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+
         // send ping
         this.safeSend({ type: 'ping', ts: Date.now() })
+
         // wait for pong
         this.clearPongTimeout()
         this.pongTimer = window.setTimeout(() => {
             // server did not respond in time -> force close, trigger reconnect
-            try { this.ws?.close() } catch {}
+            try {
+                this.ws?.close()
+            } catch {
+                // ignore
+            }
         }, this.hbTimeoutMs) as unknown as number
 
         // schedule next ping
-        this.hbTimer = window.setTimeout(() => this.doHeartbeat(), this.hbIntervalMs) as unknown as number
+        this.hbTimer = window.setTimeout(
+            () => this.doHeartbeat(),
+            this.hbIntervalMs
+        ) as unknown as number
     }
 
     private clearHeartbeat() {
@@ -173,10 +230,18 @@ export class WSClient {
 
     private maybeScheduleReconnect() {
         if (!this.reconnectEnabled || !this.shouldReconnect || !this.url) return
+
         this.clearReconnectTimer()
+
         const delay = this.nextBackoffDelay()
-        this.emitStatus('reconnecting', { delayMs: delay, attempts: this.attempts + 1 })
+        this.emitStatus('reconnecting', {
+            delayMs: delay,
+            attempts: this.attempts + 1
+        })
+
         this.reconnectTimer = window.setTimeout(() => {
+            // IMPORTANT: clear timer id before attempting to open
+            this.reconnectTimer = null
             this.attempts += 1
             this.openSocket()
         }, delay) as unknown as number
@@ -191,10 +256,16 @@ export class WSClient {
 
     private nextBackoffDelay(): number {
         const pow = Math.max(0, this.attempts)
-        const base = Math.min(this.backoffMax, this.backoffMin * Math.pow(this.backoffFactor, pow))
+        const base = Math.min(
+            this.backoffMax,
+            this.backoffMin * Math.pow(this.backoffFactor, pow)
+        )
         const jitterRange = base * this.backoffJitter
         const jitter = (Math.random() * 2 - 1) * jitterRange // [-j, +j]
-        const val = Math.max(this.backoffMin, Math.min(this.backoffMax, Math.round(base + jitter)))
+        const val = Math.max(
+            this.backoffMin,
+            Math.min(this.backoffMax, Math.round(base + jitter))
+        )
         return val
     }
 
@@ -212,7 +283,7 @@ export class WSClient {
         for (const fn of this.handlers[type] || []) fn(payload)
     }
 
-    private emitStatus(state: 'connected' | 'reconnecting' | 'disconnected', extra: any = {}) {
+    private emitStatus(state: WSStatusState, extra: any = {}) {
         this.emit('status', { state, ...extra })
     }
 }

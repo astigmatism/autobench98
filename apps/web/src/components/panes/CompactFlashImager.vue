@@ -449,7 +449,24 @@ type PaneInfo = {
   }
 }
 
-const props = defineProps<{ pane?: PaneInfo }>()
+/**
+ * Per-pane UI prefs (CF Imager pane)
+ */
+type CfPanePrefs = {
+  showAdvanced?: boolean
+  searchQuery?: string
+}
+
+function isObject(x: any): x is Record<string, unknown> {
+  return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+
+const props = defineProps<{
+  pane?: PaneInfo
+  __cfPaneUi?: CfPanePrefs
+  /** Monotonic "profile load" revision stamped by App.vue to force rehydrate on load. */
+  __cfPaneProfileRev?: number
+}>()
 
 /* -------------------------------------------------------------------------- */
 /*  Contrast-aware pane foreground                                            */
@@ -602,6 +619,101 @@ const cfImager = computed<CfImagerSnapshot>(() => {
 })
 
 const view = computed(() => cfImager.value)
+
+/* -------------------------------------------------------------------------- */
+/*  Per-pane UI persistence (localStorage + profile round-trip)               */
+/* -------------------------------------------------------------------------- */
+
+const showAdvanced = ref(false)
+const pathInput = ref('') // used as a search query, not the literal cwd
+
+const paneId = computed(() => String(props.pane?.id ?? '').trim())
+const STORAGE_PREFIX = 'cf:pane:ui:'
+const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
+
+function readPanePrefs(): CfPanePrefs | null {
+  const key = storageKey.value
+  if (!key) return null
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? (parsed as CfPanePrefs) : null
+  } catch {
+    return null
+  }
+}
+
+function writePanePrefs(p: CfPanePrefs) {
+  const key = storageKey.value
+  if (!key) return
+  try {
+    localStorage.setItem(key, JSON.stringify(p))
+  } catch {
+    // ignore
+  }
+}
+
+function exportPanePrefs(): CfPanePrefs {
+  return {
+    showAdvanced: !!showAdvanced.value,
+    searchQuery: (pathInput.value ?? '').trim()
+  }
+}
+
+function applyPanePrefs(prefs?: CfPanePrefs | null) {
+  if (!prefs || typeof prefs !== 'object') return
+
+  const adv = (prefs as any).showAdvanced
+  if (typeof adv === 'boolean') showAdvanced.value = adv
+
+  const q = (prefs as any).searchQuery
+  if (typeof q === 'string') pathInput.value = q
+}
+
+const lastHydratedSig = ref<string>('')
+
+function hydrateForPane() {
+  const key = storageKey.value
+  const rev = typeof props.__cfPaneProfileRev === 'number' ? props.__cfPaneProfileRev : 0
+  const hasEmbed = isObject(props.__cfPaneUi)
+
+  if (!key) {
+    const sig = `nokey|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+    if (lastHydratedSig.value === sig) return
+    lastHydratedSig.value = sig
+
+    if (hasEmbed) applyPanePrefs(props.__cfPaneUi as CfPanePrefs)
+    return
+  }
+
+  const sig = `${key}|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+  if (lastHydratedSig.value === sig) return
+  lastHydratedSig.value = sig
+
+  // 1) Embedded prefs from profile snapshot win on load
+  if (hasEmbed) {
+    applyPanePrefs(props.__cfPaneUi as CfPanePrefs)
+    writePanePrefs(exportPanePrefs())
+    return
+  }
+
+  // 2) localStorage
+  const stored = readPanePrefs()
+  if (stored) {
+    applyPanePrefs(stored)
+    return
+  }
+  // 3) defaults already in refs
+}
+
+watch([paneId, () => props.__cfPaneUi, () => props.__cfPaneProfileRev], () => hydrateForPane(), {
+  immediate: true,
+})
+
+watch([() => showAdvanced.value, () => pathInput.value], () => {
+  writePanePrefs(exportPanePrefs())
+})
 
 /* -------------------------------------------------------------------------- */
 /*  Derived view model                                                        */
@@ -1020,7 +1132,6 @@ function onParentRowDrop(ev: DragEvent) {
 /*  Search input + FS busy + overlay glue                                     */
 /* -------------------------------------------------------------------------- */
 
-const pathInput = ref('') // used as a search query, not the literal cwd
 const fsBusy = ref(false)
 
 /**
@@ -1473,12 +1584,6 @@ function handleModalKey(ev: KeyboardEvent) {
     confirmModal()
   }
 }
-
-/* -------------------------------------------------------------------------- */
-/*  Advanced toggle                                                           */
-/* -------------------------------------------------------------------------- */
-
-const showAdvanced = ref(false)
 
 /* -------------------------------------------------------------------------- */
 /*  WS wiring for CF commands                                                 */

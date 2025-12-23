@@ -229,11 +229,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { useMirror } from '@/stores/mirror'
 
 /* Chart.js / vue-chartjs setup */
-import 'chartjs-adapter-luxon'
 import { Line } from 'vue-chartjs'
 import {
     Chart as ChartJS,
@@ -278,7 +277,42 @@ type PaneInfo = {
     }
 }
 
-const props = defineProps<{ pane?: PaneInfo }>()
+/**
+ * Per-pane UI prefs (Power Meter pane)
+ * - NOT written to any global store
+ * - persisted per pane id in localStorage as a fallback
+ *
+ * NOTE: App.vue may inject these via leaf.props.__pmPaneUi when saving/loading profiles.
+ */
+type PmPanePrefs = {
+    showAdvanced?: boolean
+    histogramWindowSec?: number
+    histogramMaxPoints?: number
+}
+
+function isObject(x: any): x is Record<string, unknown> {
+    return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+
+const props = defineProps<{
+    pane?: PaneInfo
+    __pmPaneUi?: PmPanePrefs
+    /** Monotonic "profile load" revision stamped by App.vue to force rehydrate on load. */
+    __pmPaneProfileRev?: number
+}>()
+
+/* -------------------------------------------------------------------------- */
+/*  Local UI state (must exist before persistence watches)                     */
+/* -------------------------------------------------------------------------- */
+
+/* Advanced view toggle */
+const showAdvanced = ref(false)
+
+// User-adjustable x-axis window (seconds). Default: 300s.
+const histogramWindowSec = ref(300)
+
+// User-adjustable max # of points for the line (downsampling)
+const histogramMaxPoints = ref(80)
 
 /* -------------------------------------------------------------------------- */
 /*  Contrast-aware pane foreground                                            */
@@ -304,7 +338,7 @@ function relLuminance(hex: string): number {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 function contrastRatio(l1: number, l2: number): number {
-    const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, 1]
+    const [L1, L2] = l1 >= l2 ? [l1, l2] : [l2, l1]
     return (L1 + 0.05) / (L2 + 0.05)
 }
 
@@ -318,6 +352,129 @@ const paneFg = computed(() => {
 
 /** Fixed readable text for panel areas (dark backgrounds) */
 const panelFg = '#e6e6e6'
+
+/* -------------------------------------------------------------------------- */
+/*  Per-pane persistence (localStorage + profile round-trip)                   */
+/* -------------------------------------------------------------------------- */
+
+function isValidWindowSec(x: any): x is number {
+    return typeof x === 'number' && Number.isFinite(x) && x > 0
+}
+function isValidMaxPoints(x: any): x is number {
+    return typeof x === 'number' && Number.isFinite(x) && x > 0
+}
+
+const paneId = computed(() => String(props.pane?.id ?? '').trim())
+const STORAGE_PREFIX = 'pm:pane:ui:'
+const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
+
+function readPanePrefs(): PmPanePrefs | null {
+    const key = storageKey.value
+    if (!key) return null
+    try {
+        const raw = localStorage.getItem(key)
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed === 'object' ? (parsed as PmPanePrefs) : null
+    } catch {
+        return null
+    }
+}
+
+function writePanePrefs(p: PmPanePrefs) {
+    const key = storageKey.value
+    if (!key) return
+    try {
+        localStorage.setItem(key, JSON.stringify(p))
+    } catch {
+        // ignore
+    }
+}
+
+function applyPanePrefs(prefs?: PmPanePrefs | null) {
+    if (!prefs || typeof prefs !== 'object') return
+
+    const nextShow = (prefs as any).showAdvanced
+    if (typeof nextShow === 'boolean') showAdvanced.value = nextShow
+
+    const nextWindow = (prefs as any).histogramWindowSec
+    if (isValidWindowSec(nextWindow)) histogramWindowSec.value = nextWindow
+
+    const nextMax = (prefs as any).histogramMaxPoints
+    if (isValidMaxPoints(nextMax)) histogramMaxPoints.value = nextMax
+}
+
+function exportPanePrefs(): PmPanePrefs {
+    return {
+        showAdvanced: !!showAdvanced.value,
+        histogramWindowSec: histogramWindowSec.value,
+        histogramMaxPoints: histogramMaxPoints.value
+    }
+}
+
+/**
+ * Hydration priority:
+ * 1) profile-embedded prefs (leaf.props.__pmPaneUi) if present
+ * 2) per-pane localStorage
+ * 3) local defaults (refs above)
+ *
+ * Important: profile load must override "recent modifications", even if pane id is unchanged.
+ * App.vue stamps a monotonic __pmPaneProfileRev on leaves to force this rehydrate.
+ */
+const lastHydratedSig = ref<string>('')
+
+function hydrateForPane() {
+    const key = storageKey.value
+    const rev = typeof props.__pmPaneProfileRev === 'number' ? props.__pmPaneProfileRev : 0
+    const hasEmbed = isObject(props.__pmPaneUi)
+
+    // If we can’t key this pane yet (no id), we can still apply embedded prefs on change.
+    if (!key) {
+        const sig = `nokey|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+        if (lastHydratedSig.value === sig) return
+        lastHydratedSig.value = sig
+
+        if (hasEmbed) applyPanePrefs(props.__pmPaneUi as PmPanePrefs)
+        return
+    }
+
+    // Rehydrate whenever:
+    // - pane id changes
+    // - profile rev changes
+    // - embedded presence changes
+    const sig = `${key}|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+    if (lastHydratedSig.value === sig) return
+    lastHydratedSig.value = sig
+
+    // 1) Embedded prefs from profile/layout snapshot (authoritative on profile load)
+    if (hasEmbed) {
+        applyPanePrefs(props.__pmPaneUi as PmPanePrefs)
+        // Mirror into localStorage so it becomes the persistent per-pane baseline.
+        writePanePrefs(exportPanePrefs())
+        return
+    }
+
+    // 2) localStorage
+    const stored = readPanePrefs()
+    if (stored) {
+        applyPanePrefs(stored)
+        return
+    }
+
+    // 3) defaults already set by refs
+}
+
+onMounted(() => {
+    hydrateForPane()
+})
+
+// Rehydrate on pane id change OR when profile injects new prefs/rev (profile load)
+watch([paneId, () => props.__pmPaneUi, () => props.__pmPaneProfileRev], () => hydrateForPane())
+
+// Persist per-pane prefs whenever these change (if pane id exists)
+watch([() => showAdvanced.value, () => histogramWindowSec.value, () => histogramMaxPoints.value], () => {
+    writePanePrefs(exportPanePrefs())
+})
 
 /* -------------------------------------------------------------------------- */
 /*  Power meter state via WS mirror                                           */
@@ -531,12 +688,6 @@ type WattsHistorySample = {
 const HIST_MAX_WINDOW_SEC = 15 * 60 // 15 minutes
 
 const wattsHistory = ref<WattsHistorySample[]>([])
-
-// User-adjustable x-axis window (seconds). Default: 300s.
-const histogramWindowSec = ref(300)
-
-// User-adjustable max # of points for the line (downsampling)
-const histogramMaxPoints = ref(80)
 
 // Helper: push latest watts sample into history, pruning old entries.
 function addSampleToHistory(sample: PowerSample) {
@@ -775,12 +926,6 @@ watch(
         addSampleToRecorder(val)
     }
 )
-
-/* -------------------------------------------------------------------------- */
-/*  Advanced view toggle                                                      */
-/* -------------------------------------------------------------------------- */
-
-const showAdvanced = ref(false)
 </script>
 
 <style scoped>

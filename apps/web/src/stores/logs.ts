@@ -1,3 +1,4 @@
+// apps/web/src/stores/logs.ts
 import { defineStore } from 'pinia'
 
 export type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal'
@@ -60,10 +61,17 @@ const LEVEL_ORDER: Record<ClientLogLevel, number> = {
     fatal: 50
 }
 
-// Local storage key for persisting UI preferences
+// Local storage key for persisting UI preferences (fallback only)
+// NOTE: legacy global key. We keep it for backward-compat + migration.
 const STORAGE_KEY = 'logs:ui'
 
-type UiStatePersisted = {
+// Per-pane storage key prefix (new)
+const STORAGE_KEY_PANE_PREFIX = 'logs:ui:pane:'
+
+// Default pane id used when callers do not provide one (back-compat)
+const DEFAULT_PANE_ID = 'default'
+
+export type UiStatePersisted = {
     selectedChannels?: LogChannel[]
     minLevel?: ClientLogLevel
     autoscroll?: boolean
@@ -73,29 +81,95 @@ type UiStatePersisted = {
     sortDir?: 'asc' | 'desc'
 }
 
+type ApplyPrefsOptions = {
+    /**
+     * When true, writes the resulting state to localStorage.
+     * Default is false so that applying profile-driven prefs does not
+     * accidentally overwrite the local fallback store.
+     */
+    persist?: boolean
+    /**
+     * When true, capacity changes are applied to the store (and log array is capped).
+     * Default true.
+     */
+    applyCapacity?: boolean
+}
+
+function isValidLevel(x: any): x is ClientLogLevel {
+    return typeof x === 'string' && x in LEVEL_ORDER
+}
+function isValidSortDir(x: any): x is 'asc' | 'desc' {
+    return x === 'asc' || x === 'desc'
+}
+function asFinitePositiveInt(x: any): number | null {
+    const n = typeof x === 'number' ? x : typeof x === 'string' ? Number(x) : NaN
+    if (!Number.isFinite(n)) return null
+    const v = Math.floor(n)
+    return v > 0 ? v : null
+}
+function dedupChannels(x: any): LogChannel[] | null {
+    if (!Array.isArray(x)) return null
+    const cleaned = x
+        .map((c) => (typeof c === 'string' ? (c as LogChannel) : null))
+        .filter(Boolean) as LogChannel[]
+    if (cleaned.length === 0) return []
+    return Array.from(new Set(cleaned)) as LogChannel[]
+}
+
+function normalizePaneId(paneId?: string | null): string {
+    const id = String(paneId ?? '').trim()
+    return id || DEFAULT_PANE_ID
+}
+
+type PaneUiState = {
+    // Channel filtering is OFF by default. When off: show all channels regardless of selections.
+    useChannelFilter: boolean
+    // Selected channels to include when filtering is ON.
+    selectedChannels: LogChannel[]
+    minLevel: ClientLogLevel
+    autoscroll: boolean
+    // keyword filter (client-side)
+    searchText: string
+    // sorting: newest first by default
+    sortDir: 'asc' | 'desc'
+    // internal: one-time hydration guard (per-pane)
+    _hydrated: boolean
+}
+
+function makeDefaultPaneUiState(): PaneUiState {
+    return {
+        useChannelFilter: false,
+        selectedChannels: [],
+        minLevel: 'debug',
+        autoscroll: true,
+        searchText: '',
+        sortDir: 'desc',
+        _hydrated: false
+    }
+}
+
 export const useLogs = defineStore('logs', {
     state: () => ({
-        // Initial default remains 500; will be overridden by serverConfig if provided
+        // Logs ingestion state is global (shared). UI prefs can be per-pane.
         capacity: Number(import.meta.env.VITE_CLIENT_LOGS_CAPACITY ?? 500) as number,
         items: [] as ClientLog[],
 
-        // --- UI / filter state ---
-        // Channel filtering is OFF by default. When off: show all channels regardless of selections.
+        // --- LEGACY UI / filter state (DEFAULT pane mirror) ---
+        // These remain so existing panes/components keep working until they’re updated
+        // to pass a paneId and use the per-pane APIs below.
         useChannelFilter: false as boolean,
-        // Selected channels to include when filtering is ON.
         selectedChannels: [] as LogChannel[],
         minLevel: 'debug' as ClientLogLevel,
         autoscroll: true as boolean,
         paused: false as boolean,
-
-        // keyword filter (client-side)
         searchText: '' as string,
-
-        // sorting: newest first by default
         sortDir: 'desc' as 'asc' | 'desc',
 
-        // internal: one-time hydration guard
-        _hydrated: false as boolean
+        // internal: one-time hydration guard (legacy)
+        _hydrated: false as boolean,
+
+        // --- NEW: per-pane UI state ---
+        panes: {} as Record<string, PaneUiState>
     }),
     getters: {
         size: (s) => s.items.length,
@@ -123,13 +197,8 @@ export const useLogs = defineStore('logs', {
         },
 
         /**
-         * Items after applying:
-         *  - channel filter (ONLY when useChannelFilter === true)
-         *  - min level filter
-         *  - keyword search (message, channel, emoji)
-         *  - sort order (asc/desc by ts)
-         *
-         * Pause freezes only scroll/UI, not ingestion.
+         * LEGACY: filtered items using the DEFAULT pane’s UI state.
+         * Kept for compatibility with existing components.
          */
         filteredItems: (s): ClientLog[] => {
             const source = s.items
@@ -147,7 +216,8 @@ export const useLogs = defineStore('logs', {
                 return out
             }
 
-            const allowed = channelFilterOn && hasSelected ? new Set<LogChannel>(s.selectedChannels) : null
+            const allowed =
+                channelFilterOn && hasSelected ? new Set<LogChannel>(s.selectedChannels) : null
 
             const filtered = source.filter((e) => {
                 // Channel include-only (when ON). If ON and none selected -> show nothing.
@@ -169,7 +239,8 @@ export const useLogs = defineStore('logs', {
                         hay1.indexOf(q) === -1 &&
                         hay2.indexOf(q) === -1 &&
                         hay3.indexOf(q) === -1
-                    ) return false
+                    )
+                        return false
                 }
                 return true
             })
@@ -178,9 +249,129 @@ export const useLogs = defineStore('logs', {
             else filtered.sort((a, b) => a.ts - b.ts)
 
             return filtered
-        }
+        },
+
+        /**
+         * NEW: filtered items by pane id (per-pane prefs).
+         * Usage: logs.filteredItemsFor(paneId)
+         */
+        filteredItemsFor:
+            (s) =>
+            (paneId?: string | null): ClientLog[] => {
+                const id = normalizePaneId(paneId)
+                const ui: PaneUiState = s.panes[id] ?? makeDefaultPaneUiState()
+
+                const source = s.items
+                const channelFilterOn = !!ui.useChannelFilter
+                const hasSelected = ui.selectedChannels.length > 0
+                const minOrder = LEVEL_ORDER[ui.minLevel] ?? LEVEL_ORDER.debug
+                const q = (ui.searchText || '').trim().toLowerCase()
+                const doSearch = q.length > 0
+
+                // If literally no filters and default level, just sort.
+                if (!channelFilterOn && minOrder === LEVEL_ORDER.debug && !doSearch) {
+                    const out = source.slice()
+                    if (ui.sortDir === 'desc') out.sort((a, b) => b.ts - a.ts)
+                    else out.sort((a, b) => a.ts - b.ts)
+                    return out
+                }
+
+                const allowed =
+                    channelFilterOn && hasSelected ? new Set<LogChannel>(ui.selectedChannels) : null
+
+                const filtered = source.filter((e) => {
+                    // Channel include-only (when ON). If ON and none selected -> show nothing.
+                    if (channelFilterOn) {
+                        if (!allowed) return false
+                        if (!allowed.has(e.channel)) return false
+                    }
+
+                    // Level
+                    const lvl = LEVEL_ORDER[e.level] ?? LEVEL_ORDER.debug
+                    if (lvl < minOrder) return false
+
+                    // Search
+                    if (doSearch) {
+                        const hay1 = e.message?.toLowerCase() ?? ''
+                        const hay2 = String(e.channel ?? '').toLowerCase()
+                        const hay3 = String(e.emoji ?? '').toLowerCase()
+                        if (
+                            hay1.indexOf(q) === -1 &&
+                            hay2.indexOf(q) === -1 &&
+                            hay3.indexOf(q) === -1
+                        )
+                            return false
+                    }
+                    return true
+                })
+
+                if (ui.sortDir === 'desc') filtered.sort((a, b) => b.ts - a.ts)
+                else filtered.sort((a, b) => a.ts - b.ts)
+
+                return filtered
+            },
+
+        /**
+         * NEW: get the effective UI state for a pane (copy, not reactive).
+         * Usage: logs.getPaneUi(paneId)
+         */
+        getPaneUi:
+            (s) =>
+            (paneId?: string | null): PaneUiState => {
+                const id = normalizePaneId(paneId)
+                const ui = s.panes[id]
+                return ui
+                    ? { ...ui, selectedChannels: ui.selectedChannels.slice() }
+                    : makeDefaultPaneUiState()
+            }
     },
     actions: {
+        /* -----------------------
+           Internal helpers
+        ------------------------ */
+        _paneStorageKey(paneId?: string | null): string {
+            const id = normalizePaneId(paneId)
+            return `${STORAGE_KEY_PANE_PREFIX}${id}`
+        },
+
+        _ensurePane(paneId?: string | null): PaneUiState {
+            const id = normalizePaneId(paneId)
+            if (!this.panes[id]) {
+                this.panes[id] = makeDefaultPaneUiState()
+                // If this is the default pane, mirror legacy fields on creation.
+                if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            }
+            return this.panes[id]
+        },
+
+        _syncLegacyFromPane(paneId?: string | null) {
+            const id = normalizePaneId(paneId)
+            if (id !== DEFAULT_PANE_ID) return
+            const ui = this._ensurePane(DEFAULT_PANE_ID)
+            this.useChannelFilter = !!ui.useChannelFilter
+            this.selectedChannels = ui.selectedChannels.slice()
+            this.minLevel = ui.minLevel
+            this.autoscroll = !!ui.autoscroll
+            this.searchText = ui.searchText ?? ''
+            this.sortDir = ui.sortDir
+        },
+
+        _syncPaneFromLegacy(paneId?: string | null) {
+            const id = normalizePaneId(paneId)
+            if (id !== DEFAULT_PANE_ID) return
+            const ui = this._ensurePane(DEFAULT_PANE_ID)
+            ui.useChannelFilter = !!this.useChannelFilter
+            ui.selectedChannels = this.selectedChannels.slice()
+            ui.minLevel = this.minLevel
+            ui.autoscroll = !!this.autoscroll
+            ui.searchText = this.searchText ?? ''
+            ui.sortDir = this.sortDir
+        },
+
+        /* -----------------------
+           Log ingestion (global)
+        ------------------------ */
+
         /** Replace current list with newest N logs from history (already bounded server-side). */
         replaceHistory(entries: ClientLog[]) {
             if (!Array.isArray(entries) || entries.length === 0) return
@@ -201,7 +392,9 @@ export const useLogs = defineStore('logs', {
             this.capacity = cap
             const over = this.items.length - cap
             if (over > 0) this.items.splice(0, over)
-            this._saveUi()
+
+            // Persist capacity to legacy/global localStorage for backward-compat
+            this._saveUiLegacy()
         },
 
         /** Clear all logs (client-side only). */
@@ -209,9 +402,110 @@ export const useLogs = defineStore('logs', {
             this.items = []
         },
 
-        // ----- Persistence helpers -----
-        _saveUi() {
+        /* -------------------------------------------------
+           NEW: Export / Import prefs (per-pane capable)
+        -------------------------------------------------- */
+
+        /**
+         * LEGACY: Export DEFAULT pane prefs in a serializable format.
+         * Kept so existing profile wiring continues to work until updated.
+         */
+        exportPrefs(): UiStatePersisted {
+            // Ensure default pane exists, and prefer pane state if present.
+            const ui = this._ensurePane(DEFAULT_PANE_ID)
+            return {
+                selectedChannels: ui.selectedChannels.slice(),
+                minLevel: ui.minLevel,
+                autoscroll: ui.autoscroll,
+                searchText: ui.searchText,
+                capacity: this.capacity,
+                useChannelFilter: ui.useChannelFilter,
+                sortDir: ui.sortDir
+            }
+        },
+
+        /**
+         * NEW: Export prefs for a specific pane id.
+         * This is what layout profiles should store when panes are independent.
+         */
+        exportPrefsFor(paneId?: string | null): UiStatePersisted {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            return {
+                selectedChannels: ui.selectedChannels.slice(),
+                minLevel: ui.minLevel,
+                autoscroll: ui.autoscroll,
+                searchText: ui.searchText,
+                capacity: this.capacity,
+                useChannelFilter: ui.useChannelFilter,
+                sortDir: ui.sortDir
+            }
+        },
+
+        /**
+         * LEGACY: Apply prefs to DEFAULT pane with validation/coercion.
+         * By default, does NOT persist to localStorage.
+         */
+        applyPrefs(prefs?: UiStatePersisted | null, opts: ApplyPrefsOptions = {}) {
+            this.applyPrefsFor(DEFAULT_PANE_ID, prefs, opts)
+        },
+
+        /**
+         * NEW: Apply prefs to a specific pane.
+         * By default, does NOT persist to localStorage (local is a fallback store).
+         */
+        applyPrefsFor(paneId: string | null | undefined, prefs?: UiStatePersisted | null, opts: ApplyPrefsOptions = {}) {
+            if (!prefs || typeof prefs !== 'object') return
+
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+
+            const applyCapacity = opts.applyCapacity !== false
+
+            const nextSelected = dedupChannels((prefs as any).selectedChannels)
+            if (nextSelected !== null) ui.selectedChannels = nextSelected
+
+            const nextMinLevel = (prefs as any).minLevel
+            if (isValidLevel(nextMinLevel)) ui.minLevel = nextMinLevel
+
+            const nextAutoscroll = (prefs as any).autoscroll
+            if (typeof nextAutoscroll === 'boolean') ui.autoscroll = nextAutoscroll
+
+            const nextSearchText = (prefs as any).searchText
+            if (typeof nextSearchText === 'string') ui.searchText = nextSearchText
+
+            const nextUseChannelFilter = (prefs as any).useChannelFilter
+            if (typeof nextUseChannelFilter === 'boolean') ui.useChannelFilter = nextUseChannelFilter
+
+            const nextSortDir = (prefs as any).sortDir
+            if (isValidSortDir(nextSortDir)) ui.sortDir = nextSortDir
+
+            if (applyCapacity) {
+                const nextCap = asFinitePositiveInt((prefs as any).capacity)
+                if (nextCap != null && nextCap !== this.capacity) {
+                    this.capacity = nextCap
+                    const over = this.items.length - this.capacity
+                    if (over > 0) this.items.splice(0, over)
+                }
+            }
+
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        /* -------------------------------------------------
+           Persistence helpers (localStorage fallback)
+        -------------------------------------------------- */
+
+        /**
+         * LEGACY: save DEFAULT pane to legacy key.
+         * Kept so old code paths don’t break.
+         */
+        _saveUiLegacy() {
             try {
+                // Make sure legacy fields reflect the default pane before saving legacy.
+                this._syncLegacyFromPane(DEFAULT_PANE_ID)
                 const payload: UiStatePersisted = {
                     selectedChannels: this.selectedChannels,
                     minLevel: this.minLevel,
@@ -226,43 +520,71 @@ export const useLogs = defineStore('logs', {
                 // ignore storage failures
             }
         },
-        hydrate() {
-            if (this._hydrated) return
-            this._hydrated = true
+
+        /**
+         * NEW: save a specific pane to its own localStorage key.
+         */
+        _saveUiFor(paneId?: string | null) {
+            const id = normalizePaneId(paneId)
             try {
-                const raw = localStorage.getItem(STORAGE_KEY)
-                if (!raw) return
-                const parsed = JSON.parse(raw) as UiStatePersisted
-                if (Array.isArray(parsed.selectedChannels)) {
-                    // drop any duplicates; tolerate unknown channels
-                    this.selectedChannels = Array.from(new Set(parsed.selectedChannels)) as LogChannel[]
+                const payload = this.exportPrefsFor(id)
+                localStorage.setItem(this._paneStorageKey(id), JSON.stringify(payload))
+            } catch {
+                // ignore storage failures
+            }
+        },
+
+        /**
+         * LEGACY: Hydrate DEFAULT pane from localStorage (fallback only).
+         * This should be called on startup, but profile-driven prefs can override it later.
+         */
+        hydrate() {
+            this.hydrateFor(DEFAULT_PANE_ID)
+        },
+
+        /**
+         * NEW: Hydrate a specific pane from localStorage (fallback only).
+         *
+         * Migration behavior:
+         * - If pane-specific key exists, use it.
+         * - Else, if paneId === default and legacy key exists, use legacy (and optionally write to pane key later via persist).
+         */
+        hydrateFor(paneId?: string | null) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            if (ui._hydrated) return
+            ui._hydrated = true
+
+            try {
+                const paneKey = this._paneStorageKey(id)
+                const rawPane = localStorage.getItem(paneKey)
+
+                if (rawPane) {
+                    const parsed = JSON.parse(rawPane) as UiStatePersisted
+                    // Do not re-persist during hydration; local is the source here.
+                    this.applyPrefsFor(id, parsed, { persist: false, applyCapacity: true })
+                    return
                 }
-                if (parsed.minLevel && parsed.minLevel in LEVEL_ORDER) {
-                    this.minLevel = parsed.minLevel
-                }
-                if (typeof parsed.autoscroll === 'boolean') {
-                    this.autoscroll = parsed.autoscroll
-                }
-                if (typeof parsed.searchText === 'string') {
-                    this.searchText = parsed.searchText
-                }
-                if (typeof parsed.capacity === 'number' && parsed.capacity > 0) {
-                    this.capacity = Math.floor(parsed.capacity)
-                    const over = this.items.length - this.capacity
-                    if (over > 0) this.items.splice(0, over)
-                }
-                if (typeof parsed.useChannelFilter === 'boolean') {
-                    this.useChannelFilter = parsed.useChannelFilter
-                }
-                if (parsed.sortDir === 'asc' || parsed.sortDir === 'desc') {
-                    this.sortDir = parsed.sortDir
+
+                // Default pane can fall back to legacy key
+                if (id === DEFAULT_PANE_ID) {
+                    const rawLegacy = localStorage.getItem(STORAGE_KEY)
+                    if (!rawLegacy) return
+                    const parsedLegacy = JSON.parse(rawLegacy) as UiStatePersisted
+                    this.applyPrefsFor(DEFAULT_PANE_ID, parsedLegacy, {
+                        persist: false,
+                        applyCapacity: true
+                    })
+                    return
                 }
             } catch {
                 // ignore corrupt storage
             }
         },
 
-        // ----- Adopt server-driven config -----
+        /* ----------------------------
+           Adopt server-driven config
+        ----------------------------- */
         adoptServerConfig(cfg?: ServerConfig) {
             if (!cfg?.logs) return
             const { capacity, minLevel, allowedChannels } = cfg.logs
@@ -270,74 +592,144 @@ export const useLogs = defineStore('logs', {
             if (typeof capacity === 'number' && capacity > 0 && capacity !== this.capacity) {
                 this.setCapacity(Math.floor(capacity))
             }
-            if (minLevel && minLevel in LEVEL_ORDER && minLevel !== this.minLevel) {
-                this.minLevel = minLevel
+            if (minLevel && minLevel in LEVEL_ORDER) {
+                // Apply server minLevel to DEFAULT pane only (legacy behavior)
+                const ui = this._ensurePane(DEFAULT_PANE_ID)
+                if (minLevel !== ui.minLevel) ui.minLevel = minLevel
+                this._syncLegacyFromPane(DEFAULT_PANE_ID)
             }
-            // If the server advertises an allowlist, default-select those at startup
-            if (Array.isArray(allowedChannels) && allowedChannels.length > 0 && this.selectedChannels.length === 0) {
-                const normalized = Array.from(new Set(allowedChannels)) as LogChannel[]
-                this.selectedChannels = normalized
-                // do NOT auto-enable filtering here; user controls it implicitly via UI
+            // If the server advertises an allowlist, default-select those at startup (DEFAULT pane only)
+            if (Array.isArray(allowedChannels) && allowedChannels.length > 0) {
+                const ui = this._ensurePane(DEFAULT_PANE_ID)
+                if (ui.selectedChannels.length === 0) {
+                    const normalized = Array.from(new Set(allowedChannels)) as LogChannel[]
+                    ui.selectedChannels = normalized
+                    // do NOT auto-enable filtering here; user controls it implicitly via UI
+                    this._syncLegacyFromPane(DEFAULT_PANE_ID)
+                }
             }
 
-            this._saveUi()
+            // Keep legacy key updated for now (back-compat)
+            this._saveUiLegacy()
         },
 
-        // ----- Filters / controls -----
+        /* ----------------------------
+           Filters / controls (LEGACY)
+        ----------------------------- */
+
         setChannels(channels: LogChannel[]) {
-            const dedup = Array.from(new Set(channels))
-            this.selectedChannels = dedup as LogChannel[]
-            this._saveUi()
+            this.setChannelsFor(DEFAULT_PANE_ID, channels)
         },
         toggleChannel(channel: LogChannel) {
-            const idx = this.selectedChannels.indexOf(channel)
-            if (idx >= 0) {
-                const next = this.selectedChannels.slice()
-                next.splice(idx, 1)
-                this.selectedChannels = next
-            } else {
-                this.selectedChannels = [...this.selectedChannels, channel]
-            }
-            this._saveUi()
+            this.toggleChannelFor(DEFAULT_PANE_ID, channel)
         },
         clearChannels() {
-            this.selectedChannels = []
-            this._saveUi()
+            this.clearChannelsFor(DEFAULT_PANE_ID)
         },
-
         setUseChannelFilter(v: boolean) {
-            this.useChannelFilter = !!v
-            this._saveUi()
+            this.setUseChannelFilterFor(DEFAULT_PANE_ID, v)
         },
-
         setMinLevel(level: ClientLogLevel) {
-            this.minLevel = level
-            this._saveUi()
+            this.setMinLevelFor(DEFAULT_PANE_ID, level)
         },
-
         setAutoscroll(v: boolean) {
-            this.autoscroll = !!v
-            this._saveUi()
+            this.setAutoscrollFor(DEFAULT_PANE_ID, v)
+        },
+        setSearchText(v: string) {
+            this.setSearchTextFor(DEFAULT_PANE_ID, v)
+        },
+        setSortDir(dir: 'asc' | 'desc') {
+            this.setSortDirFor(DEFAULT_PANE_ID, dir)
+        },
+        toggleSortDir() {
+            this.setSortDirFor(DEFAULT_PANE_ID, this.sortDir === 'asc' ? 'desc' : 'asc')
         },
 
-        setSearchText(v: string) {
-            this.searchText = v
-            this._saveUi()
+        /* ----------------------------
+           Filters / controls (PER-PANE)
+        ----------------------------- */
+
+        setChannelsFor(paneId: string | null | undefined, channels: LogChannel[], opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            const dedup = Array.from(new Set(channels))
+            ui.selectedChannels = dedup as LogChannel[]
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
         },
+
+        toggleChannelFor(paneId: string | null | undefined, channel: LogChannel, opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            const idx = ui.selectedChannels.indexOf(channel)
+            if (idx >= 0) {
+                const next = ui.selectedChannels.slice()
+                next.splice(idx, 1)
+                ui.selectedChannels = next
+            } else {
+                ui.selectedChannels = [...ui.selectedChannels, channel]
+            }
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        clearChannelsFor(paneId: string | null | undefined, opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            ui.selectedChannels = []
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        setUseChannelFilterFor(paneId: string | null | undefined, v: boolean, opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            ui.useChannelFilter = !!v
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        setMinLevelFor(paneId: string | null | undefined, level: ClientLogLevel, opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            ui.minLevel = level
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        setAutoscrollFor(paneId: string | null | undefined, v: boolean, opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            ui.autoscroll = !!v
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        setSearchTextFor(paneId: string | null | undefined, v: string, opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            ui.searchText = typeof v === 'string' ? v : String(v ?? '')
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        setSortDirFor(paneId: string | null | undefined, dir: 'asc' | 'desc', opts: { persist?: boolean } = {}) {
+            const id = normalizePaneId(paneId)
+            const ui = this._ensurePane(id)
+            ui.sortDir = dir
+            if (id === DEFAULT_PANE_ID) this._syncLegacyFromPane(DEFAULT_PANE_ID)
+            if (opts.persist) this._saveUiFor(id)
+        },
+
+        /* ----------------------------
+        Pause is still global
+        ----------------------------- */
 
         togglePause() {
             this.paused = !this.paused
         },
         setPaused(v: boolean) {
             this.paused = !!v
-        },
-
-        setSortDir(dir: 'asc' | 'desc') {
-            this.sortDir = dir
-            this._saveUi()
-        },
-        toggleSortDir() {
-            this.setSortDir(this.sortDir === 'asc' ? 'desc' : 'asc')
         }
     }
 })

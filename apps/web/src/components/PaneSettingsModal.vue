@@ -144,18 +144,10 @@
                             />
                         </label>
 
-                        <button
-                            class="btn"
-                            :disabled="!canEdit"
-                            @click="emitSplitRow"
-                        >
+                        <button class="btn" :disabled="!canEdit" @click="emitSplitRow">
                             Split into Columns (side-by-side)
                         </button>
-                        <button
-                            class="btn"
-                            :disabled="!canEdit"
-                            @click="emitSplitCol"
-                        >
+                        <button class="btn" :disabled="!canEdit" @click="emitSplitCol">
                             Split into Rows (stacked)
                         </button>
                     </div>
@@ -545,26 +537,53 @@ function triggerImport() {
     importFile.value?.click()
 }
 
-// Normalize possible import payloads into { name, layout }
-function normalizeImportPayload(raw: any, fileName?: string): { name: string; layout: any } {
+function isObject(x: any): x is Record<string, any> {
+    return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+function looksLikeLayoutRoot(x: any): boolean {
+    if (!isObject(x)) return false
+    // minimal heuristic: layout nodes have kind leaf/split
+    if (typeof x.kind === 'string' && (x.kind === 'leaf' || x.kind === 'split')) return true
+    // tolerate older exports that might just be the root node shape
+    if ('children' in x || 'component' in x) return true
+    return false
+}
+function looksLikeProfile(x: any): boolean {
+    return (
+        isObject(x) &&
+        typeof x.id === 'string' &&
+        typeof x.name === 'string' &&
+        typeof x.createdAt === 'string' &&
+        typeof x.updatedAt === 'string' &&
+        isObject(x.layout)
+    )
+}
+function looksLikeStoreShape(x: any): boolean {
+    return isObject(x) && isObject(x.items)
+}
+
+// Normalize possible import payloads into something the server import endpoint accepts,
+// WITHOUT stripping extra fields (e.g. logsUiPrefs).
+function normalizeImportPayloadAny(raw: any, fileName?: string): any {
     const now = new Date().toISOString()
     const baseName =
         (typeof raw?.name === 'string' && raw.name.trim()) ||
         (fileName ? fileName.replace(/\.[^/.]+$/, '') : '') ||
         `Imported ${now}`
 
-    // Accept full profile or just the layout object or a wrapper { layout }
-    let layout = null
-    if (raw && typeof raw === 'object') {
-        if (raw.layout && typeof raw.layout === 'object') {
-            layout = raw.layout
-        } else if ('kind' in raw || 'children' in raw || 'component' in raw) {
-            // looks like a layout root node
-            layout = raw
-        }
-    }
-    if (!layout) throw new Error('Invalid JSON: missing layout')
-    return { name: baseName, layout }
+    // If user imported a full store export ({ items, defaultId? }), pass through unchanged.
+    if (looksLikeStoreShape(raw)) return raw
+
+    // If user imported a full profile export ({ id, name, createdAt, updatedAt, layout, logsUiPrefs? }), pass through unchanged.
+    if (looksLikeProfile(raw)) return raw
+
+    // If user imported a profile-like wrapper ({ name?, layout, logsUiPrefs? }), pass through unchanged.
+    if (isObject(raw) && isObject(raw.layout)) return raw
+
+    // If user imported a bare layout root node, wrap it.
+    if (looksLikeLayoutRoot(raw)) return { name: baseName, layout: raw }
+
+    throw new Error('Invalid JSON: unsupported payload shape')
 }
 
 // Handle file selection → POST /api/layouts/import
@@ -578,7 +597,7 @@ async function onPickImport(ev: Event) {
     try {
         const text = await file.text()
         const json = JSON.parse(text)
-        const payload = normalizeImportPayload(json, file.name)
+        const payload = normalizeImportPayloadAny(json, file.name)
 
         const res = await fetch('/api/layouts/import', {
             method: 'POST',
@@ -621,7 +640,7 @@ async function onPickImport(ev: Event) {
     } catch (err: any) {
         console.error('Import failed:', err)
         importHint.value =
-            'Import failed — the JSON should be a profile {name, layout} or a layout object.'
+            'Import failed — JSON must be: a profile export, a full store export, a {name, layout} wrapper (optionally with logsUiPrefs), or a bare layout root.'
     }
 }
 </script>

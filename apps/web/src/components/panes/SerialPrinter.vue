@@ -241,7 +241,35 @@ type PaneInfo = {
     }
 }
 
-const props = defineProps<{ pane?: PaneInfo }>()
+/**
+ * Per-pane UI prefs (Serial Printer pane)
+ */
+type SpPanePrefs = {
+    showOptions?: boolean
+    currentIntervalMs?: number
+    currentCharsPerTick?: number
+    backlogSpeedFactor?: number
+    tapeMaxChars?: number
+    fastForwardToLatest?: boolean
+}
+
+function isObject(x: any): x is Record<string, unknown> {
+    return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+function isFiniteNumber(x: any): x is number {
+    return typeof x === 'number' && Number.isFinite(x)
+}
+function clampNumber(n: number, min: number, max: number): number {
+    if (!Number.isFinite(n)) return min
+    return Math.min(max, Math.max(min, n))
+}
+
+const props = defineProps<{
+    pane?: PaneInfo
+    __spPaneUi?: SpPanePrefs
+    /** Monotonic "profile load" revision stamped by App.vue to force rehydrate on load. */
+    __spPaneProfileRev?: number
+}>()
 
 /* -------------------------------------------------------------------------- */
 /*  Contrast-aware pane foreground                                            */
@@ -445,7 +473,6 @@ const envTapeMaxChars = (() => {
     if (!Number.isFinite(n) || n <= 0) return DEFAULT_TAPE_MAX_CHARS
     return Math.floor(n)
 })()
-const tapeMaxChars = ref(envTapeMaxChars)
 
 /* Backlog speed multiplier (env-driven, default 10 here) */
 const DEFAULT_BACKLOG_SPEED_FACTOR = 10
@@ -468,10 +495,134 @@ const envFastForwardToLatest = (() => {
     return DEFAULT_FAST_FORWARD_TO_LATEST
 })()
 
+/* -------------------------------------------------------------------------- */
+/*  Per-pane UI persistence (localStorage + profile round-trip)               */
+/* -------------------------------------------------------------------------- */
+
+const showOptions = ref(false)
 const currentIntervalMs = ref(envTypingInterval)
 const currentCharsPerTick = ref(envCharsPerTick)
 const backlogSpeedFactor = ref(envBacklogFactor)
+const tapeMaxChars = ref(envTapeMaxChars)
 const fastForwardToLatest = ref(envFastForwardToLatest)
+
+const paneId = computed(() => String(props.pane?.id ?? '').trim())
+const STORAGE_PREFIX = 'sp:pane:ui:'
+const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
+
+function readPanePrefs(): SpPanePrefs | null {
+    const key = storageKey.value
+    if (!key) return null
+    try {
+        const raw = localStorage.getItem(key)
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed === 'object' ? (parsed as SpPanePrefs) : null
+    } catch {
+        return null
+    }
+}
+
+function writePanePrefs(p: SpPanePrefs) {
+    const key = storageKey.value
+    if (!key) return
+    try {
+        localStorage.setItem(key, JSON.stringify(p))
+    } catch {
+        // ignore
+    }
+}
+
+function exportPanePrefs(): SpPanePrefs {
+    return {
+        showOptions: !!showOptions.value,
+        currentIntervalMs: currentIntervalMs.value,
+        currentCharsPerTick: currentCharsPerTick.value,
+        backlogSpeedFactor: backlogSpeedFactor.value,
+        tapeMaxChars: tapeMaxChars.value,
+        fastForwardToLatest: !!fastForwardToLatest.value,
+    }
+}
+
+function applyPanePrefs(prefs?: SpPanePrefs | null) {
+    if (!prefs || typeof prefs !== 'object') return
+
+    const nextShow = (prefs as any).showOptions
+    if (typeof nextShow === 'boolean') showOptions.value = nextShow
+
+    const nextInterval = (prefs as any).currentIntervalMs
+    if (isFiniteNumber(nextInterval)) currentIntervalMs.value = clampNumber(nextInterval, 1, 5000)
+
+    const nextChars = (prefs as any).currentCharsPerTick
+    if (isFiniteNumber(nextChars)) currentCharsPerTick.value = clampNumber(Math.floor(nextChars), 1, 50)
+
+    const nextBacklog = (prefs as any).backlogSpeedFactor
+    if (isFiniteNumber(nextBacklog)) backlogSpeedFactor.value = clampNumber(nextBacklog, 1, 1000)
+
+    const nextMax = (prefs as any).tapeMaxChars
+    if (isFiniteNumber(nextMax)) tapeMaxChars.value = clampNumber(Math.floor(nextMax), 100, 5_000_000)
+
+    const nextFast = (prefs as any).fastForwardToLatest
+    if (typeof nextFast === 'boolean') fastForwardToLatest.value = nextFast
+}
+
+const lastHydratedSig = ref<string>('')
+
+function hydrateForPane() {
+    const key = storageKey.value
+    const rev = typeof props.__spPaneProfileRev === 'number' ? props.__spPaneProfileRev : 0
+    const hasEmbed = isObject(props.__spPaneUi)
+
+    // If pane id is missing, we can still apply embedded prefs.
+    if (!key) {
+        const sig = `nokey|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+        if (lastHydratedSig.value === sig) return
+        lastHydratedSig.value = sig
+
+        if (hasEmbed) applyPanePrefs(props.__spPaneUi as SpPanePrefs)
+        return
+    }
+
+    const sig = `${key}|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+    if (lastHydratedSig.value === sig) return
+    lastHydratedSig.value = sig
+
+    // 1) Embedded prefs from profile snapshot win on load
+    if (hasEmbed) {
+        applyPanePrefs(props.__spPaneUi as SpPanePrefs)
+        writePanePrefs(exportPanePrefs())
+        return
+    }
+
+    // 2) localStorage
+    const stored = readPanePrefs()
+    if (stored) {
+        applyPanePrefs(stored)
+        return
+    }
+
+    // 3) defaults already in refs
+}
+
+// Rehydrate on pane id change OR when profile injects new prefs/rev (profile load)
+watch([paneId, () => props.__spPaneUi, () => props.__spPaneProfileRev], () => hydrateForPane(), {
+    immediate: true,
+})
+
+// Persist per-pane prefs when these change (if pane id exists)
+watch(
+    [
+        () => showOptions.value,
+        () => currentIntervalMs.value,
+        () => currentCharsPerTick.value,
+        () => backlogSpeedFactor.value,
+        () => tapeMaxChars.value,
+        () => fastForwardToLatest.value,
+    ],
+    () => {
+        writePanePrefs(exportPanePrefs())
+    }
+)
 
 let typingTimer: number | null = null
 
@@ -939,8 +1090,6 @@ onBeforeUnmount(() => {
 /*  Options panel toggle + reset                                              */
 /* -------------------------------------------------------------------------- */
 
-const showOptions = ref(false)
-
 function resetSpeed() {
     currentIntervalMs.value = envTypingInterval
     currentCharsPerTick.value = envCharsPerTick
@@ -951,6 +1100,7 @@ function resetSpeed() {
 </script>
 
 <style scoped>
+/* (UNCHANGED CSS) */
 .sp-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;

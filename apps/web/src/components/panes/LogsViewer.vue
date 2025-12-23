@@ -54,7 +54,7 @@
                                 </select>
                             </label>
 
-                            <!-- Autoscroll (NOW panel-styled like the selects) -->
+                            <!-- Autoscroll (panel-styled like the selects) -->
                             <label class="checkbox panel panel-text">
                                 <input
                                     type="checkbox"
@@ -64,7 +64,7 @@
                                 <span>Auto-scroll</span>
                             </label>
 
-                            <!-- Pause -->
+                            <!-- Pause (per-pane view freeze) -->
                             <button class="btn" :data-active="paused" @click="togglePause">
                                 {{ paused ? 'Resume' : 'Pause' }}
                             </button>
@@ -74,7 +74,7 @@
                                 <button class="btn mini" @click="exportJson">Export .json</button>
                             </div>
 
-                            <!-- Clear -->
+                            <!-- Clear (global logs) -->
                             <button class="btn" @click="clear()">Clear</button>
                         </div>
                     </div>
@@ -106,7 +106,7 @@
 
         <!-- Paused hint (panel-styled) -->
         <div class="paused-banner" v-if="paused">
-            <span>⏸️ Paused — new entries are being buffered</span>
+            <span>⏸️ Paused — this pane is not auto-scrolling</span>
         </div>
 
         <!-- Log list (panel-styled) -->
@@ -124,7 +124,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
-import { useLogs, type ClientLogLevel, type LogChannel } from '@/stores/logs'
+import { useLogs, type ClientLog, type ClientLogLevel, type LogChannel } from '@/stores/logs'
 
 /** Accept pane context (optional). */
 type Direction = 'row' | 'col'
@@ -152,7 +152,33 @@ type PaneInfo = {
         direction: Direction | null
     }
 }
-const props = defineProps<{ pane?: PaneInfo }>()
+
+/**
+ * Per-pane UI prefs
+ * - These are NOT written to the global logs store.
+ * - They are persisted per pane id in localStorage as a fallback.
+ *
+ * NOTE: App.vue may inject these via leaf.props.__logsPaneUi when saving/loading profiles.
+ */
+type LogsPanePrefs = {
+    selectedChannels?: LogChannel[]
+    useChannelFilter?: boolean
+    minLevel?: ClientLogLevel
+    autoscroll?: boolean
+    searchText?: string
+    sortDir?: 'asc' | 'desc'
+}
+
+function isObject(x: any): x is Record<string, unknown> {
+    return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+
+const props = defineProps<{
+    pane?: PaneInfo
+    __logsPaneUi?: LogsPanePrefs
+    /** Monotonic "profile load" revision stamped by App.vue to force rehydrate on load. */
+    __logsPaneProfileRev?: number
+}>()
 
 /** Contrast-aware plain-text color from pane background (for non-panel text) */
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
@@ -189,28 +215,207 @@ const paneFg = computed(() => {
 /** Fixed readable text for panel-wrapped areas (dark backgrounds) */
 const panelFg = '#e6e6e6'
 
-/* ------------ store + behavior (unchanged) ------------ */
+/* ------------ data source (global ingestion) ------------ */
 const logs = useLogs()
 
-onMounted(() => {
-    logs.hydrate()
-})
+const LEVEL_ORDER: Record<ClientLogLevel, number> = {
+    debug: 10,
+    info: 20,
+    warn: 30,
+    error: 40,
+    fatal: 50
+}
 
+function isValidLevel(x: any): x is ClientLogLevel {
+    return typeof x === 'string' && x in LEVEL_ORDER
+}
+function isValidSortDir(x: any): x is 'asc' | 'desc' {
+    return x === 'asc' || x === 'desc'
+}
+function dedupChannels(x: any): LogChannel[] | null {
+    if (!Array.isArray(x)) return null
+    const cleaned = x
+        .map((c) => (typeof c === 'string' ? (c as LogChannel) : null))
+        .filter(Boolean) as LogChannel[]
+    if (cleaned.length === 0) return []
+    return Array.from(new Set(cleaned)) as LogChannel[]
+}
+
+const paneId = computed(() => String(props.pane?.id ?? '').trim())
+const STORAGE_PREFIX = 'logs:pane:ui:'
+const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
+
+function readPanePrefs(): LogsPanePrefs | null {
+    const key = storageKey.value
+    if (!key) return null
+    try {
+        const raw = localStorage.getItem(key)
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed === 'object' ? (parsed as LogsPanePrefs) : null
+    } catch {
+        return null
+    }
+}
+function writePanePrefs(p: LogsPanePrefs) {
+    const key = storageKey.value
+    if (!key) return
+    try {
+        localStorage.setItem(key, JSON.stringify(p))
+    } catch {
+        // ignore
+    }
+}
+
+function applyPanePrefs(prefs?: LogsPanePrefs | null) {
+    if (!prefs || typeof prefs !== 'object') return
+
+    const nextSelected = dedupChannels((prefs as any).selectedChannels)
+    if (nextSelected !== null) selectedChannels.value = nextSelected
+
+    const nextUse = (prefs as any).useChannelFilter
+    if (typeof nextUse === 'boolean') useChannelFilter.value = nextUse
+
+    const nextLevel = (prefs as any).minLevel
+    if (isValidLevel(nextLevel)) minLevel.value = nextLevel
+
+    const nextAuto = (prefs as any).autoscroll
+    if (typeof nextAuto === 'boolean') autoscroll.value = nextAuto
+
+    const nextSearch = (prefs as any).searchText
+    if (typeof nextSearch === 'string') search.value = nextSearch
+
+    const nextSort = (prefs as any).sortDir
+    if (isValidSortDir(nextSort)) sortDir.value = nextSort
+}
+
+function exportPanePrefs(): LogsPanePrefs {
+    return {
+        selectedChannels: selectedChannels.value.slice(),
+        useChannelFilter: !!useChannelFilter.value,
+        minLevel: minLevel.value,
+        autoscroll: !!autoscroll.value,
+        searchText: search.value ?? '',
+        sortDir: sortDir.value
+    }
+}
+
+/* ------------ UI state (per pane) ------------ */
 const showControls = ref(false)
 
-const items = computed(() => logs.filteredItems)
-const size = computed(() => logs.size)
+// Filters (per pane)
+const useChannelFilter = ref<boolean>(false)
+const selectedChannels = ref<LogChannel[]>([])
+const minLevel = ref<ClientLogLevel>('debug')
+const paused = ref<boolean>(false)
+const autoscroll = ref<boolean>(true)
+const search = ref<string>('')
+const sortDir = ref<'asc' | 'desc'>('desc')
+
+/**
+ * Hydration priority:
+ * 1) profile-embedded prefs (leaf.props.__logsPaneUi) if present
+ * 2) per-pane localStorage
+ * 3) global store prefs as a fallback default
+ *
+ * Important: profile load must override "recent modifications", even if pane id is unchanged.
+ * App.vue stamps a monotonic __logsPaneProfileRev on leaves to force this rehydrate.
+ */
+const lastHydratedSig = ref<string>('')
+
+function hydrateForPane() {
+    const key = storageKey.value
+    const rev = typeof props.__logsPaneProfileRev === 'number' ? props.__logsPaneProfileRev : 0
+    const hasEmbed = isObject(props.__logsPaneUi)
+
+    // If we can’t key this pane yet (no id), we can still apply embedded prefs on change.
+    if (!key) {
+        const sig = `nokey|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+        if (lastHydratedSig.value === sig) return
+        lastHydratedSig.value = sig
+
+        if (hasEmbed) {
+            applyPanePrefs(props.__logsPaneUi as LogsPanePrefs)
+        }
+        return
+    }
+
+    // Rehydrate whenever:
+    // - pane id changes
+    // - profile rev changes
+    // - embedded presence changes
+    const sig = `${key}|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
+    if (lastHydratedSig.value === sig) return
+    lastHydratedSig.value = sig
+
+    // Reset non-persisted state on pane switch / profile load
+    paused.value = false
+
+    // 1) Embedded prefs from profile/layout snapshot (authoritative on profile load)
+    if (hasEmbed) {
+        applyPanePrefs(props.__logsPaneUi as LogsPanePrefs)
+        // Mirror into localStorage so it becomes the persistent per-pane baseline.
+        writePanePrefs(exportPanePrefs())
+        return
+    }
+
+    // 2) localStorage
+    const stored = readPanePrefs()
+    if (stored) {
+        applyPanePrefs(stored)
+        return
+    }
+
+    // 3) fallback from global store (does NOT write to pane storage)
+    const fallback = logs.exportPrefs?.() as any
+    if (fallback && typeof fallback === 'object') {
+        applyPanePrefs({
+            selectedChannels: fallback.selectedChannels,
+            useChannelFilter: fallback.useChannelFilter,
+            minLevel: fallback.minLevel,
+            autoscroll: fallback.autoscroll,
+            searchText: fallback.searchText,
+            sortDir: fallback.sortDir
+        })
+    }
+}
+
+onMounted(() => {
+    hydrateForPane()
+})
+
+// Rehydrate on pane id change OR when profile injects new prefs/rev (profile load)
+watch([paneId, () => props.__logsPaneUi, () => props.__logsPaneProfileRev], () => hydrateForPane())
+
+// Persist per-pane prefs whenever these change (if pane id exists)
+watch(
+  [
+    () => selectedChannels.value,
+    () => useChannelFilter.value,
+    () => minLevel.value,
+    () => autoscroll.value,
+    () => search.value,
+    () => sortDir.value
+  ],
+  () => {
+    writePanePrefs(exportPanePrefs())
+  },
+  { deep: true }
+)
+
+/* ------------ computed from global logs data ------------ */
+const itemsSource = computed<ClientLog[]>(() => logs.items)
+const size = computed(() => items.value.length)
 const capacity = computed(() => logs.capacity)
 
-const channels = computed<LogChannel[]>(() => logs.availableChannels)
-const selected = computed<Set<LogChannel>>(() => new Set(logs.selectedChannels))
-const minLevel = ref<ClientLogLevel>(logs.minLevel)
-const paused = computed(() => logs.paused)
-const autoscroll = ref<boolean>(logs.autoscroll)
-const search = ref<string>(logs.searchText ?? '')
-const sortDir = ref<'asc' | 'desc'>(logs.sortDir)
+const channels = computed<LogChannel[]>(() => {
+    // use store getter for stable ordering
+    return logs.availableChannels as LogChannel[]
+})
+const selected = computed<Set<LogChannel>>(() => new Set(selectedChannels.value))
 
 const colorMap = computed<Record<string, string>>(() => logs.channelColors)
+
 function colorFor(ch: string): string {
     const c = colorMap.value?.[ch as string]
     switch (c) {
@@ -235,37 +440,85 @@ function colorFor(ch: string): string {
     }
 }
 
+const items = computed<ClientLog[]>(() => {
+    const source = itemsSource.value || []
+    const channelFilterOn = !!useChannelFilter.value
+    const hasSelected = selectedChannels.value.length > 0
+    const minOrder = LEVEL_ORDER[minLevel.value] ?? LEVEL_ORDER.debug
+    const q = (search.value || '').trim().toLowerCase()
+    const doSearch = q.length > 0
+
+    const allowed =
+        channelFilterOn && hasSelected ? new Set<LogChannel>(selectedChannels.value) : null
+
+    const filtered = source.filter((e) => {
+        if (channelFilterOn) {
+            // If ON and none selected -> show nothing.
+            if (!allowed) return false
+            if (!allowed.has(e.channel)) return false
+        }
+
+        const lvl = LEVEL_ORDER[e.level] ?? LEVEL_ORDER.debug
+        if (lvl < minOrder) return false
+
+        if (doSearch) {
+            const hay1 = e.message?.toLowerCase() ?? ''
+            const hay2 = String(e.channel ?? '').toLowerCase()
+            const hay3 = String(e.emoji ?? '').toLowerCase()
+            if (hay1.indexOf(q) === -1 && hay2.indexOf(q) === -1 && hay3.indexOf(q) === -1)
+                return false
+        }
+
+        return true
+    })
+
+    if (sortDir.value === 'desc') filtered.sort((a, b) => b.ts - a.ts)
+    else filtered.sort((a, b) => a.ts - b.ts)
+
+    return filtered
+})
+
+/* ------------ handlers ------------ */
 function clear() {
     logs.clear()
 }
+
 function onChipClick(ch: LogChannel) {
-    logs.toggleChannel(ch)
-    logs.setUseChannelFilter(true)
+    const idx = selectedChannels.value.indexOf(ch)
+    if (idx >= 0) {
+        const next = selectedChannels.value.slice()
+        next.splice(idx, 1)
+        selectedChannels.value = next
+    } else {
+        selectedChannels.value = [...selectedChannels.value, ch]
+    }
+    useChannelFilter.value = true
 }
 function selectAll() {
-    logs.setChannels(channels.value.slice())
-    logs.setUseChannelFilter(true)
+    selectedChannels.value = channels.value.slice()
+    useChannelFilter.value = true
 }
 function selectNone() {
-    logs.clearChannels()
-    logs.setUseChannelFilter(true)
+    selectedChannels.value = []
+    useChannelFilter.value = true
 }
 function onLevelChange() {
-    logs.setMinLevel(minLevel.value)
+    // v-model already updated
 }
 function onAutoscrollChange() {
-    logs.setAutoscroll(!!autoscroll.value)
+    autoscroll.value = !!autoscroll.value
 }
 function togglePause() {
-    logs.togglePause()
+    paused.value = !paused.value
 }
 function onSearchChange() {
-    logs.setSearchText(search.value)
+    // v-model already updated
 }
 function onSortChange() {
-    logs.setSortDir(sortDir.value)
+    // v-model already updated
 }
 
+/* ------------ export ------------ */
 function downloadBlob(blob: Blob, filename: string) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -285,6 +538,7 @@ function exportJson() {
     downloadBlob(blob, `autobench98-logs-${ts}.json`)
 }
 
+/* ------------ rendering helpers ------------ */
 function fmtTs(ts: number): string {
     try {
         const d = new Date(ts)
@@ -298,6 +552,7 @@ function fmtTs(ts: number): string {
     }
 }
 
+/* ------------ scrolling (per pane) ------------ */
 const scroller = ref<HTMLDivElement | null>(null)
 function scrollSmoothToEnd() {
     const el = scroller.value
@@ -312,30 +567,15 @@ watch(items, () => {
     if (!autoscroll.value || paused.value || !scroller.value) return
     queueMicrotask(scrollSmoothToEnd)
 })
-watch(
-    () => logs.autoscroll,
-    (v) => {
-        autoscroll.value = v
-    }
-)
-watch(
-    () => logs.minLevel,
-    (v) => {
-        if (minLevel.value !== v) minLevel.value = v
-    }
-)
-watch(
-    () => logs.searchText,
-    (v) => {
-        if (search.value !== v) search.value = v
-    }
-)
-watch(
-    () => logs.sortDir,
-    (v) => {
-        if (sortDir.value !== v) sortDir.value = v
-    }
-)
+watch(autoscroll, (v) => {
+    if (!v) return
+    if (paused.value) return
+    queueMicrotask(scrollSmoothToEnd)
+})
+watch(sortDir, () => {
+    if (!autoscroll.value || paused.value) return
+    queueMicrotask(scrollSmoothToEnd)
+})
 </script>
 
 <style scoped>
@@ -488,7 +728,7 @@ watch(
     line-height: var(--control-h);
 }
 
-/* Checkbox — upgraded to panel style to match selects */
+/* Checkbox — panel style to match selects */
 .checkbox.panel {
     display: inline-flex;
     align-items: center;

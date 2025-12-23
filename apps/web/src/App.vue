@@ -2,8 +2,9 @@
 <script setup lang="ts">
 import { onMounted, ref, reactive, computed, watch } from 'vue'
 import { startRealtime } from './bootstrap'
-import { listPanes, hasPane } from './panes/registry'
+import { listPanes, hasPane, listPanePrefsSpecs } from './panes/registry'
 import PaneSettingsModal from './components/PaneSettingsModal.vue'
+import { useLogs } from '@/stores/logs'
 
 /** Types */
 type Direction = 'row' | 'col'
@@ -38,6 +39,7 @@ type SplitNode = {
     constraints?: Constraints
 }
 type LayoutNode = LeafNode | SplitNode
+
 type Profile = {
     id: string
     name: string
@@ -71,6 +73,9 @@ const canEdit = computed<boolean>(() => true)
 /** Pane options */
 const paneOptions = computed(() => [{ id: 'none', label: '— none —' }, ...listPanes()])
 
+/** Logs store (ingestion + fallback UI persistence) */
+const logs = useLogs()
+
 /** Server layouts (profiles) */
 const layoutList = ref<Profile[]>([])
 const selectedProfileId = ref<string>('')
@@ -103,17 +108,145 @@ async function refreshLayouts() {
         selectedProfileId.value = ''
     }
 }
+
+/* -----------------------------------------
+   Per-pane UI prefs (profile persistence)
+   Data-driven via panes/registry:
+   - Each spec defines:
+     - storagePrefix: localStorage key prefix
+     - propsKey:     where prefs are embedded into leaf.props
+     - profileRevKey: monotonic stamp key so panes can detect profile loads
+------------------------------------------ */
+
+function isObject(x: any): x is Record<string, unknown> {
+    return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+
+function walkLeaves(node: LayoutNode, fn: (leaf: LeafNode) => void) {
+    if (!node || typeof node !== 'object') return
+    if ((node as any).kind === 'leaf') {
+        fn(node as LeafNode)
+        return
+    }
+    if ((node as any).kind === 'split' && Array.isArray((node as any).children)) {
+        for (const child of (node as any).children as LayoutNode[]) walkLeaves(child, fn)
+    }
+}
+
+/**
+ * Embed per-pane prefs (from localStorage) into leaf.props so it round-trips with profiles.
+ * We do this at save time to avoid constantly mutating the live layout tree.
+ */
+function embedPanePrefsIntoLayout(layout: LayoutNode): LayoutNode {
+    const cloned = deepClone(layout)
+    const specs = listPanePrefsSpecs()
+
+    walkLeaves(cloned, (leaf) => {
+        const id = String(leaf?.id ?? '').trim()
+        if (!id) return
+
+        for (const spec of specs) {
+            const key = `${spec.storagePrefix}${id}`
+            let parsed: any = null
+
+            try {
+                const raw = localStorage.getItem(key)
+                if (!raw) continue
+                parsed = JSON.parse(raw)
+            } catch {
+                continue
+            }
+
+            if (!isObject(parsed)) continue
+
+            if (!isObject(leaf.props)) leaf.props = {}
+            ;(leaf.props as any)[spec.propsKey] = parsed
+        }
+    })
+
+    return cloned
+}
+
+/**
+ * After loading a profile, make the profile authoritative for per-pane prefs:
+ * For each known prefs spec:
+ * - If a leaf has embedded prefs for that spec, write them to localStorage
+ * - If a leaf does NOT have embedded prefs for that spec, remove any existing localStorage entry
+ *   so "recent modifications" don't leak into the loaded profile.
+ */
+function restorePanePrefsFromLayout(layout: LayoutNode) {
+    const specs = listPanePrefsSpecs()
+
+    walkLeaves(layout, (leaf) => {
+        const id = String(leaf?.id ?? '').trim()
+        if (!id) return
+
+        for (const spec of specs) {
+            const key = `${spec.storagePrefix}${id}`
+            const prefs = (leaf as any)?.props?.[spec.propsKey]
+
+            try {
+                if (isObject(prefs)) {
+                    localStorage.setItem(key, JSON.stringify(prefs))
+                } else {
+                    localStorage.removeItem(key)
+                }
+            } catch {
+                // ignore storage failures
+            }
+        }
+    })
+}
+
+/**
+ * Stamp a monotonic "profile revision" on all leaves so panes can detect
+ * that a profile was (re)loaded and re-apply profile-driven prefs.
+ *
+ * Each pane type keys off its own spec.profileRevKey.
+ */
+function stampProfileRevsOnLayout(layout: LayoutNode, rev: number) {
+    const specs = listPanePrefsSpecs()
+
+    walkLeaves(layout, (leaf) => {
+        if (!isObject(leaf.props)) leaf.props = {}
+        for (const spec of specs) {
+            ;(leaf.props as any)[spec.profileRevKey] = rev
+        }
+    })
+}
+
+let panePrefsProfileRev = 0
+
 async function loadProfile(id: string) {
     if (!id) return
     const data = await apiJSON<{ ok: boolean; profile: Profile }>(`/api/layouts/${id}`)
+
+    // Apply layout
     const loaded = data.profile?.layout
-    if (!loaded || typeof loaded !== 'object') return
-    Object.keys(root as any).forEach((k) => delete (root as any)[k])
-    Object.assign(root as any, deepClone(loaded))
+    if (loaded && typeof loaded === 'object') {
+        // Work with a plain cloned layout first (so we can safely walk + mutate it)
+        const cloned = deepClone(loaded)
+
+        // 1) Make profile authoritative for per-pane prefs via localStorage
+        restorePanePrefsFromLayout(cloned)
+
+        // 2) Bump profile revision and stamp onto leaf.props for ALL registered specs
+        panePrefsProfileRev += 1
+        stampProfileRevsOnLayout(cloned, panePrefsProfileRev)
+
+        // 3) Replace reactive root with the cloned layout
+        Object.keys(root as any).forEach((k) => delete (root as any)[k])
+        Object.assign(root as any, cloned)
+    }
 }
+
 async function saveCurrentAs(name: string) {
     if (!canEdit.value) return
-    const body = { name: String(name || '').trim(), layout: deepClone(root) }
+    const body = {
+        name: String(name || '').trim(),
+        // Embed per-pane prefs into the layout snapshot we save
+        layout: embedPanePrefsIntoLayout(root)
+    }
     const data = await apiJSON<{ ok: boolean; profile: Profile }>('/api/layouts', {
         method: 'POST',
         body: JSON.stringify(body)
@@ -121,17 +254,22 @@ async function saveCurrentAs(name: string) {
     await refreshLayouts()
     selectedProfileId.value = data.profile.id
 }
+
 async function overwriteSelected() {
     if (!canEdit.value) return
     const id = selectedProfileId.value
     if (!id) return
-    const body = { layout: deepClone(root) }
+    const body = {
+        // Embed per-pane prefs into the layout snapshot we save
+        layout: embedPanePrefsIntoLayout(root)
+    }
     await apiJSON<{ ok: boolean; profile: Profile }>(`/api/layouts/${id}`, {
         method: 'PUT',
         body: JSON.stringify(body)
     })
     await refreshLayouts()
 }
+
 async function deleteSelected() {
     if (!canEdit.value) return
     const id = selectedProfileId.value
@@ -648,6 +786,9 @@ watch(
 )
 
 onMounted(async () => {
+    // Local fallback hydration (profile-driven pane prefs override via localStorage when a profile is loaded)
+    logs.hydrate()
+
     startRealtime('/ws')
     await refreshLayouts()
 })
@@ -1084,12 +1225,12 @@ body,
 
 /* Hotspot area for the pane menu (top-left).
    Only hovering this region will reveal the gear + HUD.
-   z-index ensures it floats over any pane component content. */
+   z-index ensures it sits above any pane component content. */
 .pane-menu-hotspot {
     position: absolute;
     top: 0;
     left: 0;
-    width: 3.2rem;  /* hit area width for the gear */
+    width: 3.2rem; /* hit area width for the gear */
     height: 2.2rem; /* hit area height */
     pointer-events: auto;
     z-index: 30;
@@ -1141,8 +1282,8 @@ body,
     visibility: hidden;
     pointer-events: none;
     transition: opacity 0.15s ease;
-    z-index: 29;           /* beneath the gear, above pane content */
-    white-space: nowrap;   /* keep name + dimensions on a single line */
+    z-index: 29; /* beneath the gear, above pane content */
+    white-space: nowrap; /* keep name + dimensions on a single line */
 }
 
 /* Show HUD only when hotspot hovered or gear focused */
