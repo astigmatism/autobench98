@@ -335,26 +335,55 @@ const canCapture = computed(() => deviceReady.value)
 /*  WS sender detection + send helpers                                        */
 /* -------------------------------------------------------------------------- */
 
-function getWsSender(): any | null {
+const wsSender = ref<any | null>(null)
+
+function detectWsSender(): any | null {
     const m = mirror as any
+
+    // If your mirror store exposes a client, grab it.
     if (m?.wsClient) return m.wsClient
     if (m?.ws) return m.ws
+
+    // Dev convenience fallback
     const w = window as any
     if (w?.__wsClient) return w.__wsClient
+
     return null
 }
 
-const wsAvailable = computed(() => !!getWsSender())
+const wsAvailable = computed(() => !!wsSender.value)
+
+function refreshWsSender() {
+    wsSender.value = detectWsSender()
+}
+
+onMounted(() => {
+    // Try immediately, then keep trying briefly (covers “attached after mount”).
+    refreshWsSender()
+
+    const t = window.setInterval(() => {
+        if (wsSender.value) {
+            window.clearInterval(t)
+            return
+        }
+        refreshWsSender()
+    }, 250)
+
+    // Safety stop after a few seconds
+    window.setTimeout(() => window.clearInterval(t), 5000)
+})
 
 function trySend(obj: any) {
-    const sender = getWsSender()
+    const sender = wsSender.value
     if (!sender) return false
 
+    // Prefer your typed helper
     if (typeof sender.sendPs2KeyboardCommand === 'function') {
         sender.sendPs2KeyboardCommand(obj.payload)
         return true
     }
 
+    // Otherwise generic send
     if (typeof sender.send === 'function') {
         sender.send(obj)
         return true
