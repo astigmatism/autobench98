@@ -175,6 +175,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useMirror } from '@/stores/mirror'
+import { getRealtimeClient } from '@/bootstrap'
 
 type Direction = 'row' | 'col'
 type Constraints = {
@@ -332,60 +333,50 @@ const statusLabel = computed(() => {
 const canCapture = computed(() => deviceReady.value)
 
 /* -------------------------------------------------------------------------- */
-/*  WS sender detection + send helpers                                        */
+/*  WS access + send helpers (match Atlona pattern)                            */
 /* -------------------------------------------------------------------------- */
 
-const wsSender = ref<any | null>(null)
+/**
+ * Important: other panes (e.g. Atlona) do NOT discover WS via mirror.
+ * They pull the singleton WS client from bootstrap.
+ *
+ * getRealtimeClient() is not reactive, so we keep a small local ref and
+ * retry briefly after mount in case realtime connects slightly later.
+ */
+const wsClientRef = ref<any | null>(null)
 
-function detectWsSender(): any | null {
-    const m = mirror as any
+const wsAvailable = computed(() => !!wsClientRef.value)
 
-    // If your mirror store exposes a client, grab it.
-    if (m?.wsClient) return m.wsClient
-    if (m?.ws) return m.ws
-
-    // Dev convenience fallback
-    const w = window as any
-    if (w?.__wsClient) return w.__wsClient
-
-    return null
-}
-
-const wsAvailable = computed(() => !!wsSender.value)
-
-function refreshWsSender() {
-    wsSender.value = detectWsSender()
+function refreshWsClient() {
+    wsClientRef.value = getRealtimeClient()
 }
 
 onMounted(() => {
-    // Try immediately, then keep trying briefly (covers “attached after mount”).
-    refreshWsSender()
+    refreshWsClient()
 
+    // Best-effort: retry briefly for late connection setup.
     const t = window.setInterval(() => {
-        if (wsSender.value) {
+        if (wsClientRef.value) {
             window.clearInterval(t)
             return
         }
-        refreshWsSender()
+        refreshWsClient()
     }, 250)
 
-    // Safety stop after a few seconds
     window.setTimeout(() => window.clearInterval(t), 5000)
 })
 
 function trySend(obj: any) {
-    const sender = wsSender.value
-    if (!sender) return false
+    const ws = wsClientRef.value
+    if (!ws) return false
 
-    // Prefer your typed helper
-    if (typeof sender.sendPs2KeyboardCommand === 'function') {
-        sender.sendPs2KeyboardCommand(obj.payload)
+    if (typeof ws.sendPs2KeyboardCommand === 'function') {
+        ws.sendPs2KeyboardCommand(obj.payload)
         return true
     }
 
-    // Otherwise generic send
-    if (typeof sender.send === 'function') {
-        sender.send(obj)
+    if (typeof ws.send === 'function') {
+        ws.send(obj)
         return true
     }
 
@@ -445,7 +436,6 @@ const lastKeyDisplay = ref('—')
 const armOnNextFocus = ref(false)
 
 function focusCaptureBox() {
-    // Focusing can sometimes happen async; keep intent until focus fires.
     captureRef.value?.focus()
 }
 
@@ -468,8 +458,6 @@ function toggleCapture() {
 function releaseCapture() {
     isCapturing.value = false
     armOnNextFocus.value = false
-
-    // Blur the capture box specifically (blurring document.activeElement can be the button).
     try {
         captureRef.value?.blur?.()
     } catch {
@@ -479,17 +467,13 @@ function releaseCapture() {
 
 function onFocusCapture() {
     if (!canCapture.value) return
-
-    // Only start capturing if user explicitly armed.
     if (armOnNextFocus.value) {
         isCapturing.value = true
-        // Keep capture active while focused, but we don't need to keep "arm" sticky forever.
         armOnNextFocus.value = false
     }
 }
 
 function onBlurCapture() {
-    // Losing focus should drop capture (so keys don’t “leak” unexpectedly).
     isCapturing.value = false
     armOnNextFocus.value = false
 }
@@ -519,7 +503,6 @@ function maybeBlockBrowser(e: KeyboardEvent) {
 function onKeyDown(e: KeyboardEvent) {
     if (!isCapturing.value) return
 
-    // release control combo
     if (isReleaseCombo(e)) {
         maybeBlockBrowser(e)
         pushLog('release', e)
