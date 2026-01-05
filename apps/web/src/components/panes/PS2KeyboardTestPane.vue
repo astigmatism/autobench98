@@ -763,8 +763,15 @@ onBeforeUnmount(() => {
 .status-badge[data-status='ready'] { border-color: #22c55e; background: #022c22; }
 .status-badge[data-status='ready'] .dot { background: #22c55e; }
 
-.status-badge[data-status='capturing'] { border-color: #38bdf8; background: #0b1f2a; }
-.status-badge[data-status='capturing'] .dot { background: #38bdf8; animation: pulse-dot 900ms ease-in-out infinite; }
+/* CAPTURING → green (like ready) but keep pulsing */
+.status-badge[data-status='capturing'] {
+    border-color: #22c55e;
+    background: #022c22;
+}
+.status-badge[data-status='capturing'] .dot {
+    background: #22c55e;
+    animation: pulse-dot 900ms ease-in-out infinite;
+}
 
 @keyframes pulse-dot {
     0% { transform: scale(1); opacity: 1; }
