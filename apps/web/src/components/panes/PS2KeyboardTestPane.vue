@@ -7,7 +7,7 @@
                 <div class="panel-title-group">
                     <span class="panel-title">PS/2 Keyboard Test</span>
                     <span class="panel-subtitle">
-                        Click the capture box to arm input · Exit with <b>Esc</b> or <b>Ctrl+Esc</b>
+                        Click the capture box to arm input · Exit with <b>Ctrl+Esc</b>
                     </span>
                 </div>
 
@@ -49,7 +49,11 @@
                             {{ isCapturing ? 'CAPTURING' : 'INACTIVE' }}
                         </span>
                         <span class="hint">
-                            {{ isCapturing ? 'Keys will be sent to the PS/2 simulator.' : 'Click inside to start capturing.' }}
+                            {{
+                                isCapturing
+                                    ? 'Keys will be sent to the PS/2 simulator.'
+                                    : 'Click inside to start capturing.'
+                            }}
                         </span>
                     </div>
 
@@ -161,7 +165,7 @@
             </div>
 
             <div class="foot">
-                Release capture with <b>Esc</b> or <b>Ctrl+Esc</b>.
+                Release capture with <b>Ctrl+Esc</b>.
                 While capturing, the pane can optionally block browser shortcuts.
             </div>
         </div>
@@ -172,9 +176,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useMirror } from '@/stores/mirror'
 
-/**
- * Pane context types (same pattern as other panes; keep minimal + resilient).
- */
 type Direction = 'row' | 'col'
 type Constraints = {
     widthPx?: number | null
@@ -201,9 +202,6 @@ type PaneInfo = {
     }
 }
 
-/**
- * Per-pane UI prefs (Keyboard Test pane)
- */
 type KbPanePrefs = {
     sendMode?: 'press' | 'holdRelease'
     allowRepeat?: boolean
@@ -293,10 +291,6 @@ const deviceName = computed(() => {
     return '—'
 })
 
-/**
- * "Ready" heuristic:
- * We don’t know your exact adapter state machine, so be tolerant.
- */
 const deviceReady = computed(() => {
     const p = kbPhase.value.toLowerCase()
     return p === 'ready' || p === 'connected' || p === 'identifying'
@@ -341,21 +335,12 @@ const canCapture = computed(() => deviceReady.value)
 /*  WS sender detection + send helpers                                        */
 /* -------------------------------------------------------------------------- */
 
-/**
- * This project has used a few different patterns for WS access over time.
- * We’ll try a couple of common ones without hard-coupling:
- *   - mirror.wsClient.sendPs2KeyboardCommand(...)
- *   - mirror.ws.send(...)
- *   - window.__wsClient (dev convenience)
- */
 function getWsSender(): any | null {
     const m = mirror as any
-
     if (m?.wsClient) return m.wsClient
     if (m?.ws) return m.ws
     const w = window as any
     if (w?.__wsClient) return w.__wsClient
-
     return null
 }
 
@@ -365,13 +350,11 @@ function trySend(obj: any) {
     const sender = getWsSender()
     if (!sender) return false
 
-    // Prefer your typed helper (if the app is using the updated wsClient.ts)
     if (typeof sender.sendPs2KeyboardCommand === 'function') {
         sender.sendPs2KeyboardCommand(obj.payload)
         return true
     }
 
-    // Otherwise try generic send
     if (typeof sender.send === 'function') {
         sender.send(obj)
         return true
@@ -380,8 +363,13 @@ function trySend(obj: any) {
     return false
 }
 
-function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: string, mods: string[] = [], repeat = false) {
-    // matches orchestrator ws.ts (you already have handlePs2KeyboardCommand wired for this)
+function sendKey(
+    action: 'press' | 'hold' | 'release',
+    code: string,
+    key?: string,
+    mods: string[] = [],
+    repeat = false
+) {
     trySend({
         type: 'ps2-keyboard.command',
         payload: {
@@ -420,11 +408,22 @@ const preventBrowserShortcuts = ref(true)
 
 const lastKeyDisplay = ref('—')
 
+/**
+ * IMPORTANT: Focus is NOT the same as capturing.
+ * We only enter capture mode when user explicitly arms it (mouse click / button).
+ * This prevents "Release" from instantly re-arming due to focus churn.
+ */
+const armOnNextFocus = ref(false)
+
+function focusCaptureBox() {
+    // Focusing can sometimes happen async; keep intent until focus fires.
+    captureRef.value?.focus()
+}
+
 function armCaptureFromMouse() {
     if (!canCapture.value) return
-    // focus the capture box so it receives key events
-    captureRef.value?.focus()
-    isCapturing.value = true
+    armOnNextFocus.value = true
+    focusCaptureBox()
 }
 
 function toggleCapture() {
@@ -432,16 +431,18 @@ function toggleCapture() {
     if (isCapturing.value) {
         releaseCapture()
     } else {
-        captureRef.value?.focus()
-        isCapturing.value = true
+        armOnNextFocus.value = true
+        focusCaptureBox()
     }
 }
 
 function releaseCapture() {
     isCapturing.value = false
-    // blur defensively
+    armOnNextFocus.value = false
+
+    // Blur the capture box specifically (blurring document.activeElement can be the button).
     try {
-        ;(document.activeElement as any)?.blur?.()
+        captureRef.value?.blur?.()
     } catch {
         // ignore
     }
@@ -449,16 +450,24 @@ function releaseCapture() {
 
 function onFocusCapture() {
     if (!canCapture.value) return
-    isCapturing.value = true
+
+    // Only start capturing if user explicitly armed.
+    if (armOnNextFocus.value) {
+        isCapturing.value = true
+        // Keep capture active while focused, but we don't need to keep "arm" sticky forever.
+        armOnNextFocus.value = false
+    }
 }
 
 function onBlurCapture() {
+    // Losing focus should drop capture (so keys don’t “leak” unexpectedly).
     isCapturing.value = false
+    armOnNextFocus.value = false
 }
 
 function isReleaseCombo(e: KeyboardEvent): boolean {
-    // Release capture ONLY on Ctrl + Escape
-    // Plain Escape must pass through to the PS/2 keyboard (Win98 uses it heavily)
+    // Release capture ONLY on Ctrl + Escape.
+    // Plain Escape must pass through to the PS/2 keyboard (Win98 uses it heavily).
     return e.code === 'Escape' && e.ctrlKey
 }
 
@@ -485,13 +494,12 @@ function onKeyDown(e: KeyboardEvent) {
     if (isReleaseCombo(e)) {
         maybeBlockBrowser(e)
         pushLog('release', e)
-        lastKeyDisplay.value = 'Escape (release capture)'
+        lastKeyDisplay.value = 'Ctrl+Escape (release capture)'
         releaseCapture()
         return
     }
 
     if (!allowRepeat.value && e.repeat) {
-        // still log (optional), but do not send
         pushLog('keydown', e, true)
         lastKeyDisplay.value = `${e.code} (repeat ignored)`
         maybeBlockBrowser(e)
@@ -499,7 +507,6 @@ function onKeyDown(e: KeyboardEvent) {
     }
 
     pushLog('keydown', e)
-
     lastKeyDisplay.value = `${e.code}${e.key ? ` · key="${e.key}"` : ''}`
 
     if (!wsAvailable.value) {
@@ -507,7 +514,6 @@ function onKeyDown(e: KeyboardEvent) {
         return
     }
 
-    // Send
     const code = e.code || ''
     if (!code) {
         maybeBlockBrowser(e)
@@ -632,11 +638,11 @@ function applyPrefs(p: KbPanePrefs | null | undefined) {
     if (!p) return
     if (p.sendMode === 'press' || p.sendMode === 'holdRelease') sendMode.value = p.sendMode
     if (typeof p.allowRepeat === 'boolean') allowRepeat.value = p.allowRepeat
-    if (typeof p.preventBrowserShortcuts === 'boolean') preventBrowserShortcuts.value = p.preventBrowserShortcuts
+    if (typeof p.preventBrowserShortcuts === 'boolean')
+        preventBrowserShortcuts.value = p.preventBrowserShortcuts
 }
 
 watch([paneId, () => props.__kbPaneUi, () => props.__kbPaneProfileRev], () => {
-    // embedded profile prefs win
     if (isObject(props.__kbPaneUi)) {
         applyPrefs(props.__kbPaneUi as KbPanePrefs)
         writePrefs()
@@ -653,7 +659,6 @@ watch([sendMode, allowRepeat, preventBrowserShortcuts], () => writePrefs())
 /* -------------------------------------------------------------------------- */
 
 onMounted(() => {
-    // If device becomes not-ready, drop capture automatically.
     watch(
         () => deviceReady.value,
         (ready) => {
@@ -671,6 +676,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* (CSS unchanged from your provided file) */
 .kb-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
