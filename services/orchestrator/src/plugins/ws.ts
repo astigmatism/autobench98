@@ -17,6 +17,7 @@ import {
 } from '../adapters/logs.adapter.js'
 import type { AtlonaControllerService } from '../devices/atlona-controller/AtlonaControllerService.js'
 import type { CfImagerService } from '../devices/cf-imager/CfImagerService.js'
+import type { ClientKeyboardEvent } from '../devices/ps2-keyboard/types.js'
 
 // ---------------------------
 // Log filtering configuration
@@ -217,9 +218,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const state = cfImager.getState()
                 const cwd = state.fs?.cwd ?? '.'
 
-                // Build a relative path from the current cwd plus the entry name.
-                // Example: cwd="images", name="foo" -> "images/foo"
-                //          cwd="." , name="foo"     -> "foo"
                 const base = cwd === '.' ? '' : cwd.replace(/\/+$/, '')
                 const relPath = base ? `${base}/${name}` : name
 
@@ -238,17 +236,11 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const state = cfImager.getState()
                 const cwd = state.fs?.cwd ?? '.'
 
-                // Root guard: cwd is relative and POSIX-style.
-                // Treat ".", "/", and "" as root; no-op in that case.
                 if (cwd === '.' || cwd === '/' || cwd === '') {
                     logWs.debug('cf-imager.command changeDirUp: already at root', { cwd })
                     return
                 }
 
-                // Compute parent:
-                //  - "foo/bar" -> "foo"
-                //  - "foo"     -> "."
-                //  - defensive trim of trailing slashes.
                 const trimmed = cwd.replace(/\/+$/, '')
                 const idx = trimmed.lastIndexOf('/')
                 const parent = idx <= 0 ? '.' : trimmed.slice(0, idx)
@@ -298,7 +290,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }
 
             if (oldName === newName) {
-                // No-op rename; UI already checks, but guard defensively.
                 logWs.debug('cf-imager.command rename: names identical, no-op', {
                     name: oldName
                 })
@@ -357,12 +348,10 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
                 let destDirRel: string
 
-                // Preferred: targetDir (what the pane sends on drag/drop).
                 if (typeof targetDirRaw === 'string' && targetDirRaw.trim()) {
                     const targetDir = targetDirRaw.trim()
 
                     if (targetDir === '..') {
-                        // Parent of current cwd
                         if (!cwdBase) {
                             destDirRel = '.'
                         } else {
@@ -370,20 +359,16 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                             destDirRel = idx <= 0 ? '.' : cwdBase.slice(0, idx)
                         }
                     } else if (targetDir === '.') {
-                        // Explicit "here"
                         destDirRel = cwdBase || '.'
                     } else {
-                        // Child directory under current cwd
                         destDirRel = cwdBase ? `${cwdBase}/${targetDir}` : targetDir
                     }
                 } else if (
                     typeof destCwdRaw === 'string' &&
                     destCwdRaw.trim()
                 ) {
-                    // Legacy contract: caller already computed the destination cwd.
                     destDirRel = destCwdRaw.trim()
                 } else {
-                    // Fallback: current cwd.
                     destDirRel = cwdBase || '.'
                 }
 
@@ -495,9 +480,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const currentCwd = state.fs?.cwd ?? '.'
                 const base = currentCwd === '.' ? '' : currentCwd.replace(/\/+$/, '')
 
-                // We want a path relative to CF_IMAGER_ROOT that may include
-                // directories. The service will interpret this and append ".img"
-                // if necessary.
                 const rel = base ? `${base}/${fileName}` : fileName
 
                 await cfImager.writeImageToDevice(rel)
@@ -526,7 +508,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     : ''
 
             try {
-                // Empty query is allowed and can mean "clear search / show normal listing".
                 await cfImager.search(cwd, query)
             } catch (e) {
                 logWs.warn('cf-imager.command search failed', {
@@ -539,8 +520,95 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             return
         }
 
-        // Unknown / unsupported command kind
         logWs.warn('cf-imager.command: unknown kind', { kind })
+    }
+
+    // Helper: handle PS2 keyboard commands from a WS message (WS-only ingress)
+    async function handlePs2KeyboardCommand(msg: any) {
+        const kb = (app as any)?.ps2Keyboard as any
+        if (!kb) {
+            logWs.warn('received ps2-keyboard.command but ps2Keyboard service is not attached')
+            return
+        }
+
+        const payload = msg?.payload ?? {}
+        const kind = typeof payload.kind === 'string' ? payload.kind.trim() : ''
+
+        if (!kind) {
+            logWs.warn('ps2-keyboard.command: missing kind')
+            return
+        }
+
+        const requestedBy =
+            typeof payload.requestedBy === 'string' && payload.requestedBy.trim()
+                ? payload.requestedBy.trim()
+                : 'ws-client'
+
+        try {
+            // Contract:
+            // - { kind: 'key', action: 'press'|'hold'|'release', code: 'KeyA'|'Enter'|..., requestedBy?, overrides? }
+            // - { kind: 'power', state: 'on'|'off', requestedBy? }
+            // - { kind: 'cancelAll', reason?, requestedBy? }
+            if (kind === 'key') {
+                const action =
+                    typeof payload.action === 'string' ? payload.action.trim() : ''
+                if (action !== 'press' && action !== 'hold' && action !== 'release') {
+                    logWs.warn('ps2-keyboard.command key: invalid action', { action })
+                    return
+                }
+
+                const code =
+                    typeof payload.code === 'string' ? payload.code.trim() : ''
+                const key =
+                    typeof payload.key === 'string' ? payload.key.trim() : undefined
+
+                // The service resolves scan codes primarily via evt.code; allow fallback key if you extend resolveScanCode later.
+                if (!code && !key) {
+                    logWs.warn('ps2-keyboard.command key: missing code/key')
+                    return
+                }
+
+                const evt: ClientKeyboardEvent = {
+                    action: action as any,
+                    code: code || undefined,
+                    key: key || undefined,
+                    requestedBy,
+                    overrides: payload.overrides ?? undefined,
+                } as any
+
+                kb.enqueueKeyEvent(evt)
+                return
+            }
+
+            if (kind === 'power') {
+                const state =
+                    typeof payload.state === 'string' ? payload.state.trim().toLowerCase() : ''
+                if (state !== 'on' && state !== 'off') {
+                    logWs.warn('ps2-keyboard.command power: invalid state', { state })
+                    return
+                }
+
+                if (state === 'on') kb.powerOn(requestedBy)
+                else kb.powerOff(requestedBy)
+                return
+            }
+
+            if (kind === 'cancelAll') {
+                const reason =
+                    typeof payload.reason === 'string' && payload.reason.trim()
+                        ? payload.reason.trim()
+                        : 'cancelled'
+                kb.cancelAll(reason)
+                return
+            }
+
+            logWs.warn('ps2-keyboard.command: unknown kind', { kind })
+        } catch (e) {
+            logWs.warn('ps2-keyboard.command failed', {
+                kind,
+                err: (e as Error).message
+            })
+        }
     }
 
     // Handler signature: (socket, request)
@@ -696,6 +764,12 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     void handleCfImagerCommand(msg)
                     return
                 }
+
+                // --- PS2 keyboard front-end commands --------------------------
+                if (msg?.type === 'ps2-keyboard.command') {
+                    void handlePs2KeyboardCommand(msg)
+                    return
+                }
             } catch {
                 // ignore malformed payloads
             }
@@ -710,7 +784,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
     // --- Broadcast state changes ---
 
-    // Full snapshots (still kept for future callers that may rely on this)
     const onSnapshot = (snap: any) => {
         const payload = JSON.stringify({
             type: 'state.snapshot',
@@ -728,9 +801,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
         }
     }
 
-    // Incremental patches
     const onPatch = (evt: { from: number; to: number; patch: unknown[] }) => {
-        // Simple debug: does this patch touch powerMeter at all?
         const hasPowerMeter = Array.isArray(evt.patch)
             ? (evt.patch as any[]).some(
                   (op: any) => typeof op?.path === 'string' && op.path.startsWith('/powerMeter')

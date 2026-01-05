@@ -1,4 +1,3 @@
-// apps/web/src/lib/wsClient.ts
 type Handler = (msg: any) => void
 
 type ReconnectOptions = {
@@ -18,6 +17,47 @@ type WSClientOptions = {
     heartbeat?: HeartbeatOptions
     reconnect?: ReconnectOptions
 }
+
+// ----------------------------
+// PS/2 Keyboard WS message types
+// ----------------------------
+
+// Matches orchestrator ws.ts contract:
+// msg.type === 'ps2-keyboard.command'
+// payload.kind === 'key' | 'power' | 'cancelAll'
+export type PS2KeyboardKeyAction = 'press' | 'hold' | 'release'
+
+export type PS2KeyboardCommandPayload =
+    | {
+          kind: 'key'
+          action: PS2KeyboardKeyAction
+          /**
+           * Prefer KeyboardEvent.code (e.g. "KeyA", "Enter", "ArrowLeft").
+           * Service resolves scan codes primarily via `code`.
+           */
+          code?: string
+          /** Optional fallback (not guaranteed to work unless service supports it). */
+          key?: string
+          requestedBy?: string
+          overrides?: any
+      }
+    | {
+          kind: 'power'
+          state: 'on' | 'off'
+          requestedBy?: string
+      }
+    | {
+          kind: 'cancelAll'
+          reason?: string
+          requestedBy?: string
+      }
+
+export type PS2KeyboardCommandMessage = {
+    type: 'ps2-keyboard.command'
+    payload: PS2KeyboardCommandPayload
+}
+
+// ----------------------------
 
 // Read Vite-provided env (must be prefixed with VITE_)
 const ENV = import.meta.env as any
@@ -82,6 +122,63 @@ export class WSClient {
             this.ws.send(JSON.stringify(obj))
         }
     }
+
+    // ----------------------------
+    // PS/2 keyboard helpers
+    // ----------------------------
+
+    /** Low-level typed sender for PS/2 keyboard commands. */
+    sendPs2KeyboardCommand(payload: PS2KeyboardCommandPayload) {
+        const msg: PS2KeyboardCommandMessage = {
+            type: 'ps2-keyboard.command',
+            payload
+        }
+        this.send(msg)
+    }
+
+    /** Convenience: send a single key action (press/hold/release). Prefer `code` (KeyboardEvent.code). */
+    sendPs2KeyAction(args: {
+        action: PS2KeyboardKeyAction
+        code?: string
+        key?: string
+        requestedBy?: string
+        overrides?: any
+    }) {
+        const code = typeof args.code === 'string' ? args.code.trim() : ''
+        const key = typeof args.key === 'string' ? args.key.trim() : ''
+
+        // Service resolves primarily via `code`; allow `key` for forward compatibility.
+        if (!code && !key) return
+
+        this.sendPs2KeyboardCommand({
+            kind: 'key',
+            action: args.action,
+            code: code || undefined,
+            key: key || undefined,
+            requestedBy: args.requestedBy,
+            overrides: args.overrides
+        })
+    }
+
+    /** Convenience: power control. */
+    sendPs2Power(state: 'on' | 'off', requestedBy?: string) {
+        this.sendPs2KeyboardCommand({
+            kind: 'power',
+            state,
+            requestedBy
+        })
+    }
+
+    /** Convenience: cancel queued ops (best-effort). */
+    sendPs2CancelAll(reason?: string, requestedBy?: string) {
+        this.sendPs2KeyboardCommand({
+            kind: 'cancelAll',
+            reason,
+            requestedBy
+        })
+    }
+
+    // ----------------------------
 
     on(type: string, fn: Handler) {
         ;(this.handlers[type] ||= []).push(fn)

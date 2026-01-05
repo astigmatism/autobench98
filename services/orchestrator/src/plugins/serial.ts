@@ -442,8 +442,29 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
           )
         }
       }
+
+      // 👉 PS2 keyboard wiring
+      if (kind === 'arduino.ps2.keyboard' && (app as any).ps2Keyboard) {
+        const kb = (app as any).ps2Keyboard as {
+          onDeviceIdentified: (info: {
+            id: string
+            path: string
+            baudRate?: number
+          }) => Promise<void> | void
+        }
+
+        try {
+          await kb.onDeviceIdentified({ id, path, baudRate })
+        } catch (err) {
+          log.warn(
+            `ps2Keyboard.onDeviceIdentified failed id=${id} path=${path} err="${
+              (err as Error).message
+            }"`
+          )
+        }
+      }
     }
-  ) // 👈 this was the missing close in your version
+  )
 
   discovery.on('device:error', ({ id, path, kind /*, error*/ }) => {
     const now = Date.now()
@@ -511,6 +532,23 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
       } catch (err) {
         log.warn(
           `atlonaController.onDeviceLost failed id=${id} err="${
+            (err as Error).message
+          }"`
+        )
+      }
+    }
+
+    // 👉 PS2 keyboard lost wiring
+    if (kind === 'arduino.ps2.keyboard' && (app as any).ps2Keyboard) {
+      const kb = (app as any).ps2Keyboard as {
+        onDeviceLost: (info: { id: string }) => Promise<void> | void
+      }
+
+      try {
+        await kb.onDeviceLost({ id })
+      } catch (err) {
+        log.warn(
+          `ps2Keyboard.onDeviceLost failed id=${id} err="${
             (err as Error).message
           }"`
         )

@@ -5,6 +5,7 @@ import type {
     CfImagerState as CfImagerSnapshot,
     CfImagerMediaStatus,
 } from '../devices/cf-imager/types.js'
+import type { KeyboardStateSlice as PS2KeyboardSnapshot } from '../devices/ps2-keyboard/types.js'
 
 /**
  * Client-consumable server configuration shipped inside the state snapshot.
@@ -124,6 +125,12 @@ export type AtlonaControllerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  PS2 Keyboard snapshot (alias of KeyboardStateSlice)                       */
+/* -------------------------------------------------------------------------- */
+
+// PS2KeyboardSnapshot is imported from ../devices/ps2-keyboard/types.js as KeyboardStateSlice.
+
+/* -------------------------------------------------------------------------- */
 /*  CF Imager snapshot (alias of CfImagerState)                               */
 /* -------------------------------------------------------------------------- */
 
@@ -173,6 +180,7 @@ export type AppState = {
     powerMeter: PowerMeterSnapshot
     serialPrinter: SerialPrinterSnapshot
     atlonaController: AtlonaControllerSnapshot
+    ps2Keyboard: PS2KeyboardSnapshot
     cfImager: CfImagerSnapshot
     sidecar: SidecarSnapshot
 }
@@ -293,6 +301,30 @@ const initialAtlonaController: AtlonaControllerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Initial PS2 keyboard slice                                                */
+/* -------------------------------------------------------------------------- */
+
+const initialPs2Keyboard: PS2KeyboardSnapshot = {
+    phase: 'disconnected',
+    power: 'unknown',
+    identified: false,
+
+    deviceId: null,
+    devicePath: null,
+    baudRate: null,
+
+    busy: false,
+    queueDepth: 0,
+    currentOp: null,
+
+    lastError: null,
+    errorHistory: [],
+    operationHistory: [],
+
+    updatedAt: Date.now(),
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initial CF Imager slice                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -356,6 +388,7 @@ let state: AppState = {
     powerMeter: initialPowerMeter,
     serialPrinter: initialSerialPrinter,
     atlonaController: initialAtlonaController,
+    ps2Keyboard: initialPs2Keyboard,
     cfImager: initialCfImager,
     sidecar: initialSidecar,
 }
@@ -542,6 +575,32 @@ export function updateAtlonaControllerSnapshot(partial: {
     }
 
     set('atlonaController', merged)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  PS2 keyboard update helpers                                               */
+/* -------------------------------------------------------------------------- */
+
+export function setPS2KeyboardSnapshot(next: PS2KeyboardSnapshot) {
+    set('ps2Keyboard', next)
+}
+
+export function updatePS2KeyboardSnapshot(partial: Partial<PS2KeyboardSnapshot>) {
+    const prev = state.ps2Keyboard
+
+    // Shallow merge is sufficient because nested arrays/objects are replaced
+    // as whole snapshots by the adapter.
+    const merged: PS2KeyboardSnapshot = {
+        ...prev,
+        ...clone(partial),
+        // Ensure updatedAt always moves forward if caller didn’t specify it.
+        updatedAt:
+            (partial as any).updatedAt !== undefined
+                ? (partial as any).updatedAt
+                : Date.now(),
+    }
+
+    set('ps2Keyboard', merged)
 }
 
 /* -------------------------------------------------------------------------- */

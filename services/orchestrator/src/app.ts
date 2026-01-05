@@ -1,3 +1,4 @@
+// services/orchestrator/src/app.ts
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
@@ -32,6 +33,7 @@ import serialPrinterPlugin from './plugins/serialPrinter.js'
 import atlonaControllerPlugin from './plugins/atlonaController.js'
 import cfImagerPlugin from './plugins/cfImager.js'
 import streamProxyPlugin from './plugins/streamProxy.js'
+import ps2KeyboardPlugin from './plugins/ps2Keyboard.js'
 
 declare module 'fastify' {
     interface FastifyInstance {
@@ -103,6 +105,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(atlonaControllerPlugin)
     void app.register(powerMeterPlugin)
     void app.register(serialPrinterPlugin)
+    void app.register(ps2KeyboardPlugin)
     void app.register(cfImagerPlugin)
 
     void app.register(streamProxyPlugin)
