@@ -1069,7 +1069,9 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
+
+    /* 🔑 FIX: do NOT clip the capture ring/glow */
+    overflow: visible;
 }
 
 /* Capture layer wraps the stream image so it can receive focus + key events */
@@ -1081,7 +1083,10 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
+
+    /* Keep stream contents clipped */
     overflow: hidden;
+
     outline: none;
     cursor: pointer;
     user-select: none;
@@ -1090,16 +1095,31 @@ onBeforeUnmount(() => {
     border-radius: 6px;
 }
 
-/* Red glow capture outline ONLY on the capture window (not the pane/viewport) */
-.kb-capture-layer[data-capturing='true'] {
+/* Draw the ring + glow as an overlay so it's always visible and consistent */
+.kb-capture-layer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+/* Red glow capture outline ONLY on the capture window */
+.kb-capture-layer[data-capturing='true']::after {
+    opacity: 1;
     box-shadow:
-        0 0 0 2px rgba(239, 68, 68, 0.75),
-        0 0 18px rgba(239, 68, 68, 0.35);
+        inset 0 0 0 2px rgba(239, 68, 68, 0.9),
+        0 0 0 2px rgba(239, 68, 68, 0.8),
+        0 0 22px rgba(239, 68, 68, 0.45),
+        0 0 44px rgba(239, 68, 68, 0.22);
 }
 
 /* Optional: subtle focus ring when armed (doesn't imply capturing) */
-.kb-capture-layer:focus-visible {
-    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35);
+.kb-capture-layer:focus-visible::after {
+    opacity: 1;
+    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.35);
 }
 
 /* MJPEG stream image */
