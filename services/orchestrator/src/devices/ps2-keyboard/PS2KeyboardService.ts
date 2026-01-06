@@ -8,7 +8,7 @@
 /*  - Manage identification + reconnect lifecycle                              */
 /*  - Provide a rich, interruptible operation queue                            */
 /*  - Translate high-level keyboard intents into Arduino commands              */
-/*  - Emit domain events for logging + AppState adapters                        */
+/*  - Emit domain events for logging + AppState adapters                       */
 /*                                                                            */
 /*  Non-responsibilities:                                                     */
 /*  - No AppState mutation                                                     */
@@ -34,12 +34,7 @@ import type {
   KeyIdentity,
 } from './types'
 import { lookupScanCode } from './scancodes'
-import {
-  sleep,
-  now,
-  makeOpId,
-  formatWireScanCode,
-} from './utils'
+import { sleep, now, makeOpId, formatWireScanCode } from './utils'
 
 /* -------------------------------------------------------------------------- */
 /*  Internal operation model                                                   */
@@ -58,6 +53,8 @@ interface QueuedOp {
   resolve: (res: KeyboardOperationResult) => void
   reject: (res: KeyboardOperationResult) => void
 }
+
+type DisconnectReason = 'io-error' | 'explicit-close' | 'unknown' | 'device-lost'
 
 /* -------------------------------------------------------------------------- */
 
@@ -86,8 +83,18 @@ export class PS2KeyboardService {
   // Only track modifier keys as "held" for logging semantics.
   private heldModifiers = new Set<string>()
 
+  // --- Strict lifecycle guards (prevents lock races / unhandled rejections) ---
+  private stopping = false
+  private openInFlight: Promise<void> | null = null
+
+  /**
+   * When we close a port intentionally, serialport will still emit 'close'.
+   * Ignore that close event so we don't double-close or double-reconnect.
+   */
+  private closingPort: SerialPort | null = null
+  // --------------------------------------------------------------------------
+
   // Modifier identification is intentionally explicit and conservative.
-  // If you need more modifier-like keys (e.g., CapsLock), add them here deliberately.
   private static readonly MODIFIER_CODES = new Set<string>([
     'ShiftLeft',
     'ShiftRight',
@@ -99,10 +106,7 @@ export class PS2KeyboardService {
     'MetaRight',
   ])
 
-  constructor(
-    cfg: PS2KeyboardConfig,
-    deps: { events: PS2KeyboardEventSink }
-  ) {
+  constructor(cfg: PS2KeyboardConfig, deps: { events: PS2KeyboardEventSink }) {
     this.cfg = cfg
     this.events = deps.events
   }
@@ -113,11 +117,22 @@ export class PS2KeyboardService {
 
   public async start(): Promise<void> {
     // No-op; lifecycle is discovery-driven
+    this.stopping = false
   }
 
   public async stop(): Promise<void> {
+    this.stopping = true
     this.clearReconnectTimer()
+
+    // If an open attempt is in flight, wait for it to settle before closing.
+    try {
+      await this.openInFlight
+    } catch {
+      /* ignore */
+    }
+
     await this.closePort('explicit-close')
+
     this.queue.length = 0
     this.activeOp = null
     this.phase = 'disconnected'
@@ -147,7 +162,9 @@ export class PS2KeyboardService {
       baudRate: args.baudRate ?? this.cfg.baudRate,
     })
 
-    // If already open and identified, nothing to do
+    if (this.stopping) return
+
+    // If already open and identified, nothing to do.
     if (this.port && this.port.isOpen && this.identified) return
 
     await this.openPort(args.baudRate ?? this.cfg.baudRate)
@@ -158,6 +175,10 @@ export class PS2KeyboardService {
 
     this.clearReconnectTimer()
     await this.closePort('device-lost')
+
+    // Prevent reconnect from firing until discovery re-identifies.
+    this.deviceId = null
+    this.devicePath = null
 
     this.events.publish({
       kind: 'keyboard-device-lost',
@@ -368,7 +389,6 @@ export class PS2KeyboardService {
     } finally {
       this.activeOp = null
       this.cancelled = false
-      // pace before next op
       await sleep(this.cfg.tuning.interCommandDelayMs)
       void this.processQueue()
     }
@@ -379,68 +399,117 @@ export class PS2KeyboardService {
   /* ---------------------------------------------------------------------- */
 
   private async openPort(baudRate: number): Promise<void> {
-    if (!this.devicePath) return
+    const devicePath = this.devicePath
+    if (!devicePath) return
+    if (this.stopping) return
 
-    this.phase = 'connecting'
-    this.identified = false
+    // Ensure only one open attempt runs at a time.
+    if (this.openInFlight) return this.openInFlight
 
-    const port = new SerialPort({
-      path: this.devicePath,
-      baudRate,
-      autoOpen: false,
-      dataBits: 8,
-      parity: 'none',
-      stopBits: 1,
+    // Any explicit open attempt should cancel pending reconnect timers.
+    this.clearReconnectTimer()
+
+    this.openInFlight = (async () => {
+      // If we still have a port object around, close it first to avoid lock races.
+      if (this.port?.isOpen) {
+        await this.closePort('unknown')
+      }
+
+      this.phase = 'connecting'
+      this.identified = false
+
+      const port = new SerialPort({
+        path: devicePath, // ✅ string
+        baudRate,
+        autoOpen: false,
+        dataBits: 8,
+        parity: 'none',
+        stopBits: 1,
+      })
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          port.once('open', resolve)
+          port.once('error', reject)
+          port.open()
+        })
+      } catch (err) {
+        // Open failed (e.g. lock contention). Surface and retry via reconnect.
+        this.phase = 'error'
+        this.events.publish({
+          kind: 'recoverable-error',
+          at: now(),
+          error: this.toErrorWithScope('open', err, true),
+        })
+        this.scheduleReconnect()
+        return
+      }
+
+      if (this.stopping) {
+        // We opened while shutting down; close immediately and do not reconnect.
+        this.closingPort = port
+        await new Promise<void>((resolve) => port.close(() => resolve()))
+        this.closingPort = null
+        return
+      }
+
+      this.port = port
+      this.reconnectAttempts = 0
+      this.readBuffer = ''
+      this.heldModifiers.clear()
+
+      this.events.publish({
+        kind: 'keyboard-device-connected',
+        at: now(),
+        path: devicePath, // ✅ string
+        baudRate,
+      })
+
+      port.on('data', (buf) => this.handleData(buf.toString('utf8')))
+      port.on('error', (err) => this.handlePortError(port, err))
+      port.on('close', () => this.handlePortClose(port))
+
+      // Identify; failures are handled here (no caller crash).
+      try {
+        await this.identify()
+      } catch {
+        await this.closePort('unknown')
+        this.scheduleReconnect()
+      }
+    })().finally(() => {
+      this.openInFlight = null
     })
 
-    await new Promise<void>((resolve, reject) => {
-      port.once('open', resolve)
-      port.once('error', reject)
-      port.open()
-    })
-
-    this.port = port
-    this.reconnectAttempts = 0
-    this.readBuffer = ''
-    this.heldModifiers.clear()
-
-    this.events.publish({
-      kind: 'keyboard-device-connected',
-      at: now(),
-      path: this.devicePath,
-      baudRate,
-    })
-
-    port.on('data', (buf) => this.handleData(buf.toString('utf8')))
-    port.on('error', (err) => this.handlePortError(err))
-    port.on('close', () => this.handlePortClose())
-
-    // Ensure identify failures are surfaced as events (and do not crash callers).
-    try {
-      await this.identify()
-    } catch {
-      await this.closePort('unknown')
-      this.scheduleReconnect()
-    }
+    return this.openInFlight
   }
 
-  private async closePort(reason: 'io-error' | 'explicit-close' | 'unknown' | 'device-lost'): Promise<void> {
+  private async closePort(reason: DisconnectReason): Promise<void> {
     const port = this.port
+    const path = this.devicePath ?? 'unknown'
+
+    // Clear "current" port early so new opens won’t consider it active.
     this.port = null
     this.identified = false
+    this.phase = 'disconnected'
     this.heldModifiers.clear()
     this.readBuffer = ''
 
     if (port && port.isOpen) {
+      // Mark this close as intentional so the 'close' event doesn't double-handle.
+      this.closingPort = port
       await new Promise<void>((resolve) => port.close(() => resolve()))
+      this.closingPort = null
     }
 
-    this.events.publish({
-      kind: 'keyboard-device-disconnected',
-      at: now(),
-      path: this.devicePath ?? 'unknown',
-      reason,
-    })
+    // Publish disconnect (avoid type issue: path is always string)
+    if (this.devicePath || port) {
+      this.events.publish({
+        kind: 'keyboard-device-disconnected',
+        at: now(),
+        path,
+        reason,
+      })
+    }
   }
 
   private async identify(): Promise<void> {
@@ -491,9 +560,8 @@ export class PS2KeyboardService {
     }
 
     await new Promise<void>((resolve, reject) => {
-      this.port!.write(
-        `${line}${this.cfg.identify.writeLineEnding}`,
-        (err) => (err ? reject(err) : resolve())
+      this.port!.write(`${line}${this.cfg.identify.writeLineEnding}`, (err) =>
+        err ? reject(err) : resolve()
       )
     })
   }
@@ -509,8 +577,10 @@ export class PS2KeyboardService {
       }
 
       const port = this.port
+      let finished = false
 
       const onData = (data: Buffer) => {
+        if (finished) return
         buf += data.toString('utf8')
         const lines = buf.split(/\r?\n/)
         buf = lines.pop() ?? ''
@@ -519,6 +589,7 @@ export class PS2KeyboardService {
           if (!line) continue
           if (line.startsWith('debug:')) continue
           cleanup()
+          finished = true
           resolve(line)
           return
         }
@@ -531,8 +602,10 @@ export class PS2KeyboardService {
       port.on('data', onData)
 
       const tick = () => {
+        if (finished) return
         if (now() - start >= timeoutMs) {
           cleanup()
+          finished = true
           reject(new Error('identify timeout'))
         } else {
           setTimeout(tick, 25)
@@ -550,35 +623,55 @@ export class PS2KeyboardService {
     for (const raw of lines) {
       const line = raw.trim()
       if (!line) continue
-
-      // Arduino contract: `success:` is ack; `debug:` is telemetry.
-      // Keep telemetry + unknown lines; suppress `success:` by default to reduce noise.
       if (line.startsWith('success:')) continue
 
-      if (line.startsWith('debug:') || !line.startsWith('debug:')) {
-        // Publish debug telemetry lines and unknown/unclassified lines.
-        // Plugin logging can choose to ignore these events.
-        this.events.publish({
-          kind: 'keyboard-debug-line',
-          at: now(),
-          line,
-        })
-      }
+      this.events.publish({
+        kind: 'keyboard-debug-line',
+        at: now(),
+        line,
+      })
     }
   }
 
-  private async handlePortError(_err: Error): Promise<void> {
-    await this.closePort('io-error')
-    this.scheduleReconnect()
+  private handlePortError(port: SerialPort, err: Error): void {
+    // If this isn't the active port anymore, ignore.
+    if (port !== this.port) return
+
+    // If we're intentionally closing, ignore error noise during teardown.
+    if (this.closingPort === port) return
+
+    void (async () => {
+      this.events.publish({
+        kind: 'recoverable-error',
+        at: now(),
+        // ✅ scope must be one of your union values; treat as read-side I/O
+        error: this.toErrorWithScope('read', err, true),
+      })
+      await this.closePort('io-error')
+      this.scheduleReconnect()
+    })()
   }
 
-  private async handlePortClose(): Promise<void> {
-    await this.closePort('io-error')
-    this.scheduleReconnect()
+  private handlePortClose(port: SerialPort): void {
+    // Ignore 'close' emitted from our own closePort().
+    if (this.closingPort === port) return
+
+    // If this isn't the current port, it's a stale close; ignore.
+    if (port !== this.port) return
+
+    void (async () => {
+      await this.closePort('io-error')
+      this.scheduleReconnect()
+    })()
   }
 
   private scheduleReconnect(): void {
+    if (this.stopping) return
     if (!this.cfg.reconnect.enabled) return
+    if (!this.devicePath) return
+
+    // Ensure only one reconnect timer exists at a time.
+    this.clearReconnectTimer()
 
     if (
       this.cfg.reconnect.maxAttempts > 0 &&
@@ -587,7 +680,11 @@ export class PS2KeyboardService {
       this.events.publish({
         kind: 'fatal-error',
         at: now(),
-        error: this.toErrorWithScope('open', 'reconnect attempts exhausted', false),
+        error: this.toErrorWithScope(
+          'open',
+          'reconnect attempts exhausted',
+          false
+        ),
       })
       return
     }
@@ -599,9 +696,14 @@ export class PS2KeyboardService {
     )
 
     this.reconnectTimer = setTimeout(() => {
-      if (this.devicePath) {
-        void this.openPort(this.cfg.baudRate)
-      }
+      this.reconnectTimer = null
+      if (this.stopping) return
+
+      const devicePath = this.devicePath
+      if (!devicePath) return
+
+      // Important: the timer callback must never leak an unhandled rejection.
+      void this.openPort(this.cfg.baudRate)
     }, delay)
   }
 
@@ -635,11 +737,12 @@ export class PS2KeyboardService {
   private tokenFor(identity: KeyIdentity, scan: PS2ScanCode): string {
     if (identity.code) return identity.code
     const prefix = scan.prefix ?? 0x00
-    return `${prefix.toString(16).padStart(2, '0')}:${scan.code.toString(16).padStart(2, '0')}`
+    return `${prefix.toString(16).padStart(2, '0')}:${scan.code
+      .toString(16)
+      .padStart(2, '0')}`
   }
 
   private modsSnapshot(): string[] {
-    // Stable ordering makes log diffing easier.
     return Array.from(this.heldModifiers).sort()
   }
 
@@ -655,10 +758,6 @@ export class PS2KeyboardService {
     const token = this.tokenFor(identity, scan)
     const isMod = this.isModifier(identity)
 
-    // Logging semantics:
-    // - Modifiers: log hold/release as mod down/up.
-    // - Non-modifiers: treat a keydown (`hold`) as a logical `press` for logs,
-    //   and suppress the corresponding non-modifier release logs.
     if (isMod) {
       if (action === 'hold') this.heldModifiers.add(token)
       if (action === 'release') this.heldModifiers.delete(token)
@@ -670,7 +769,6 @@ export class PS2KeyboardService {
         identity,
         scan,
         wire,
-        // For modifiers, mods is optional; leave it undefined to avoid noise.
         opId: this.activeOp?.id,
         requestedBy: meta?.requestedBy ?? this.activeOp?.requestedBy,
       })
@@ -678,12 +776,10 @@ export class PS2KeyboardService {
     }
 
     if (action === 'release') {
-      // Suppress non-modifier keyup noise.
       return
     }
 
-    const logicalAction: KeyboardAction =
-      action === 'hold' ? 'press' : action
+    const logicalAction: KeyboardAction = action === 'hold' ? 'press' : action
 
     this.events.publish({
       kind: 'keyboard-key-action',
@@ -698,7 +794,10 @@ export class PS2KeyboardService {
     })
   }
 
-  private summarize(op: QueuedOp, status: KeyboardOperationSummary['status']): KeyboardOperationSummary {
+  private summarize(
+    op: QueuedOp,
+    status: KeyboardOperationSummary['status']
+  ): KeyboardOperationSummary {
     return {
       id: op.id,
       kind: op.kind,
@@ -709,7 +808,10 @@ export class PS2KeyboardService {
     }
   }
 
-  private failFastHandle(kind: KeyboardOperationKind, message: string): KeyboardOperationHandle {
+  private failFastHandle(
+    kind: KeyboardOperationKind,
+    message: string
+  ): KeyboardOperationHandle {
     const id = makeOpId('kb')
     const createdAt = now()
     const error: KeyboardError = {
