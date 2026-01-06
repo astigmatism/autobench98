@@ -137,11 +137,9 @@
                 <div
                     ref="captureRef"
                     class="kb-capture-layer"
-                    :class="{ 'kb-capture-layer--disabled': !canCapture }"
-                    :tabindex="canCapture ? 0 : -1"
+                    tabindex="0"
                     role="button"
                     :aria-pressed="isCapturing ? 'true' : 'false'"
-                    :aria-disabled="canCapture ? 'false' : 'true'"
                     :data-capturing="isCapturing ? 'true' : 'false'"
                     @mousedown.prevent="armCaptureFromMouse"
                     @focus="onFocusCapture"
@@ -331,7 +329,7 @@ const bgMode = ref<'black' | 'pane'>('black')
 const reloadKey = ref(0)
 
 /* -------------------------------------------------------------------------- */
-/*  WS access (best-effort, matches PS2KeyboardTestPane pattern)               */
+/*  WS access (best-effort)                                                   */
 /* -------------------------------------------------------------------------- */
 
 const wsClientRef = ref<any | null>(null)
@@ -342,7 +340,6 @@ function refreshWsClient() {
 }
 
 let wsRetryTimer: number | null = null
-let wsRetryStopTimer: number | null = null
 
 onMounted(() => {
     refreshWsClient()
@@ -357,7 +354,8 @@ onMounted(() => {
         refreshWsClient()
     }, 250)
 
-    wsRetryStopTimer = window.setTimeout(() => {
+    // stop after 5s like the old pane; we also refresh again on capture start
+    window.setTimeout(() => {
         if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
         wsRetryTimer = null
     }, 5000)
@@ -381,6 +379,7 @@ function trySend(obj: any): boolean {
 }
 
 function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: string) {
+    // Strict: capture UI is independent of WS; sending is best-effort.
     trySend({
         type: 'ps2-keyboard.command',
         payload: {
@@ -416,7 +415,8 @@ const MODIFIER_CODES = new Set<string>([
 // so we can release them on exit to avoid "stuck modifier" behavior.
 const heldModifiers = new Set<string>()
 
-const canCapture = computed(() => enabled.value && wsAvailable.value)
+// Strict: capture is available whenever the stream is visible.
+const canCapture = computed(() => enabled.value)
 
 function focusCaptureLayer() {
     captureRef.value?.focus()
@@ -424,15 +424,26 @@ function focusCaptureLayer() {
 
 function armCaptureFromMouse() {
     if (!canCapture.value) return
+
+    // If WS comes up late, pick it up at the moment the user starts capture.
+    refreshWsClient()
+
     armOnNextFocus.value = true
     focusCaptureLayer()
+
+    // Belt + suspenders: if focus doesn't fire for any reason but we did focus successfully,
+    // start capturing immediately so visuals always show after click.
+    if (captureRef.value && document.activeElement === captureRef.value) {
+        isCapturing.value = true
+        armOnNextFocus.value = false
+    }
 }
 
 function releaseCapture(opts?: { fromBlur?: boolean }) {
     const fromBlur = !!opts?.fromBlur
 
     // Release any held modifiers so Win98 doesn't get "stuck keys"
-    if (wsAvailable.value && heldModifiers.size > 0) {
+    if (heldModifiers.size > 0) {
         const codes = Array.from(heldModifiers).sort()
         for (const code of codes) {
             sendKey('release', code)
@@ -457,6 +468,10 @@ function onFocusCapture() {
         releaseCapture()
         return
     }
+
+    // If WS comes up late, pick it up on focus as well.
+    refreshWsClient()
+
     if (armOnNextFocus.value) {
         isCapturing.value = true
         armOnNextFocus.value = false
@@ -529,15 +544,9 @@ function onKeyUp(e: KeyboardEvent) {
     blockBrowser(e)
 }
 
-// If stream is hidden or WS drops, release capture.
+// If stream is hidden, release capture.
 watch(
     () => enabled.value,
-    (v) => {
-        if (!v && (isCapturing.value || armOnNextFocus.value)) releaseCapture()
-    }
-)
-watch(
-    () => wsAvailable.value,
     (v) => {
         if (!v && (isCapturing.value || armOnNextFocus.value)) releaseCapture()
     }
@@ -756,16 +765,12 @@ onBeforeUnmount(() => {
     }
 
     if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
-    if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
     wsRetryTimer = null
-    wsRetryStopTimer = null
 })
 </script>
 
 <style scoped>
 .stream-pane {
-    /* --pane-fg: readable for plain text on the pane background
-       --panel-fg: readable for text inside dark panels (fixed light color) */
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
 
@@ -777,9 +782,6 @@ onBeforeUnmount(() => {
     width: 100%;
 }
 
-/* Hotspot area for advanced controls button (top-right).
-   Only hovering this region will reveal the button.
-   z-index ensures it floats above pane content. */
 .stream-advanced-hotspot {
     position: absolute;
     top: 0;
@@ -790,7 +792,6 @@ onBeforeUnmount(() => {
     z-index: 30;
 }
 
-/* Gear button (same pattern as logs / CF pane) */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -811,7 +812,6 @@ onBeforeUnmount(() => {
     z-index: 31;
 }
 
-/* Only show button while hotspot is hovered */
 .stream-advanced-hotspot:hover .gear-btn {
     opacity: 1;
     visibility: visible;
@@ -823,7 +823,6 @@ onBeforeUnmount(() => {
     transform: translateY(-1px);
 }
 
-/* Slide-fade transition (for controls panel) */
 .slide-fade-enter-active,
 .slide-fade-leave-active {
     transition: opacity 180ms ease, transform 180ms ease;
@@ -834,14 +833,12 @@ onBeforeUnmount(() => {
     transform: translateY(-6px);
 }
 
-/* Panel container */
 .controls-panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
 }
 
-/* Toolbar */
 .toolbar {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -850,22 +847,17 @@ onBeforeUnmount(() => {
     font-size: 14px;
 }
 
-/* Panel-styled controls keep panel foreground for readability */
 .panel-text span {
     color: var(--panel-fg);
 }
 
-/* Left/right areas */
 .toolbar .left {
     display: flex;
     align-items: center;
     gap: 12px;
     min-width: 0;
 }
-.toolbar .right {
-}
 
-/* Controls block */
 .toolbar .controls {
     --control-h: 30px;
     display: flex;
@@ -874,7 +866,6 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
 }
 
-/* Select + labels (panel) */
 .select {
     display: inline-flex;
     align-items: center;
@@ -895,7 +886,6 @@ onBeforeUnmount(() => {
     line-height: var(--control-h);
 }
 
-/* Checkbox (panel style) */
 .checkbox.panel {
     display: inline-flex;
     align-items: center;
@@ -915,7 +905,6 @@ onBeforeUnmount(() => {
     color: var(--panel-fg);
 }
 
-/* Buttons (panel) */
 .btn {
     padding: 0 12px;
     border-radius: 6px;
@@ -934,7 +923,6 @@ onBeforeUnmount(() => {
     background: #1a1a1a;
 }
 
-/* Health panel */
 .health-panel {
     margin-top: 4px;
     padding: 6px 8px;
@@ -1018,7 +1006,6 @@ onBeforeUnmount(() => {
     opacity: 0.7;
 }
 
-/* Main viewport */
 .viewport {
     position: relative;
     flex: 1;
@@ -1032,19 +1019,16 @@ onBeforeUnmount(() => {
     justify-content: stretch;
 }
 
-/* Background mode: pane vs black */
 .viewport[data-bg='pane'] {
     background: transparent;
     border-color: transparent;
 }
 
-/* Keyboard capturing outline (must remain visible even in bg='pane') */
 .viewport[data-kb-capturing='true'] {
     border-color: #38bdf8;
     box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
 }
 
-/* Inner container centers the stream visually */
 .viewport-inner {
     flex: 1;
     display: flex;
@@ -1053,7 +1037,6 @@ onBeforeUnmount(() => {
     overflow: hidden;
 }
 
-/* Capture layer wraps the stream image so it can receive focus + key events */
 .kb-capture-layer {
     position: relative;
     flex: 1;
@@ -1068,18 +1051,12 @@ onBeforeUnmount(() => {
     user-select: none;
 }
 
-.kb-capture-layer--disabled {
-    cursor: default;
-}
-
-/* MJPEG stream image */
 .stream-img {
     max-width: 100%;
     max-height: 100%;
     image-rendering: auto;
 }
 
-/* Scale modes */
 .stream-img[data-scale='fit'] {
     object-fit: contain;
 }
@@ -1099,7 +1076,6 @@ onBeforeUnmount(() => {
     object-fit: contain;
 }
 
-/* Bottom-center overlay indicator */
 .kb-overlay {
     position: absolute;
     left: 50%;
@@ -1139,7 +1115,6 @@ onBeforeUnmount(() => {
     font-weight: 700;
 }
 
-/* Placeholder when stream is disabled */
 .viewport-placeholder {
     flex: 1;
     display: flex;
