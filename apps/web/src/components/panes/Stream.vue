@@ -21,11 +21,7 @@
                         <div class="controls">
                             <!-- Enable / disable stream -->
                             <label class="checkbox panel panel-text">
-                                <input
-                                    type="checkbox"
-                                    v-model="enabled"
-                                    @change="onEnabledChange"
-                                />
+                                <input type="checkbox" v-model="enabled" @change="onEnabledChange" />
                                 <span>Show stream</span>
                             </label>
 
@@ -61,19 +57,13 @@
                         <span class="health-title">Sidecar / Stream health</span>
 
                         <span class="health-meta">
-                            <span
-                                v-if="healthLoading"
-                                class="health-pill health-pill--loading"
-                            >
+                            <span v-if="healthLoading" class="health-pill health-pill--loading">
                                 Loading…
                             </span>
                             <span v-else-if="health" class="health-pill health-pill--ok">
                                 {{ health.status === 'ok' ? 'OK' : health.status }}
                             </span>
-                            <span
-                                v-else-if="healthError"
-                                class="health-pill health-pill--error"
-                            >
+                            <span v-else-if="healthError" class="health-pill health-pill--error">
                                 Error
                             </span>
                         </span>
@@ -136,16 +126,46 @@
         </transition>
 
         <!-- Main viewport (panel-styled) -->
-        <div class="viewport" :data-bg="bgMode">
+        <div
+            class="viewport"
+            :data-bg="bgMode"
+            :data-kb-capturing="isCapturing ? 'true' : 'false'"
+            :data-kb-available="canCapture ? 'true' : 'false'"
+        >
             <div v-if="enabled" class="viewport-inner">
-                <img
-                    :key="reloadKey"
-                    class="stream-img"
-                    :data-scale="scaleMode"
-                    :src="STREAM_ENDPOINT"
-                    alt="Test machine stream"
-                />
+                <!-- Capture layer: click to arm, focus to capture -->
+                <div
+                    ref="captureRef"
+                    class="kb-capture-layer"
+                    tabindex="0"
+                    role="button"
+                    :aria-pressed="isCapturing ? 'true' : 'false'"
+                    :data-capturing="isCapturing ? 'true' : 'false'"
+                    @mousedown.prevent="armCaptureFromMouse"
+                    @focus="onFocusCapture"
+                    @blur="onBlurCapture"
+                    @keydown="onKeyDown"
+                    @keyup="onKeyUp"
+                >
+                    <img
+                        :key="reloadKey"
+                        class="stream-img"
+                        :data-scale="scaleMode"
+                        :src="STREAM_ENDPOINT"
+                        alt="Test machine stream"
+                        draggable="false"
+                    />
+
+                    <!-- Bottom-center overlay -->
+                    <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
+                        <div class="kb-overlay-inner">
+                            <span class="kb-pill">CAPTURING INPUT</span>
+                            <span class="kb-hint">Press <b>Ctrl+Esc</b> to cancel</span>
+                        </div>
+                    </div>
+                </div>
             </div>
+
             <div v-else class="viewport-placeholder">
                 <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
             </div>
@@ -154,7 +174,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { getRealtimeClient } from '@/bootstrap'
 
 /** Accept pane context (optional). */
 type Direction = 'row' | 'col'
@@ -308,6 +329,227 @@ const bgMode = ref<'black' | 'pane'>('black')
 const reloadKey = ref(0)
 
 /* -------------------------------------------------------------------------- */
+/*  WS access (best-effort, matches PS2KeyboardTestPane pattern)               */
+/* -------------------------------------------------------------------------- */
+
+const wsClientRef = ref<any | null>(null)
+const wsAvailable = computed(() => !!wsClientRef.value)
+
+function refreshWsClient() {
+    wsClientRef.value = getRealtimeClient()
+}
+
+let wsRetryTimer: number | null = null
+let wsRetryStopTimer: number | null = null
+
+onMounted(() => {
+    refreshWsClient()
+
+    // Best-effort: retry briefly for late connection setup.
+    wsRetryTimer = window.setInterval(() => {
+        if (wsClientRef.value) {
+            if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
+            wsRetryTimer = null
+            return
+        }
+        refreshWsClient()
+    }, 250)
+
+    wsRetryStopTimer = window.setTimeout(() => {
+        if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
+        wsRetryTimer = null
+    }, 5000)
+})
+
+onBeforeUnmount(() => {
+    if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
+    if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
+    wsRetryTimer = null
+    wsRetryStopTimer = null
+})
+
+function trySend(obj: any): boolean {
+    const ws = wsClientRef.value
+    if (!ws) return false
+
+    if (typeof ws.sendPs2KeyboardCommand === 'function') {
+        ws.sendPs2KeyboardCommand(obj.payload)
+        return true
+    }
+
+    if (typeof ws.send === 'function') {
+        ws.send(obj)
+        return true
+    }
+
+    return false
+}
+
+function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: string) {
+    trySend({
+        type: 'ps2-keyboard.command',
+        payload: {
+            kind: 'key',
+            action,
+            code,
+            key,
+            // NOTE: intentionally omit requestedBy to reduce server log noise
+        },
+    })
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Keyboard capture (click stream to capture; exit with Ctrl+Esc)             */
+/* -------------------------------------------------------------------------- */
+
+const captureRef = ref<HTMLElement | null>(null)
+const isCapturing = ref(false)
+const armOnNextFocus = ref(false)
+
+const MODIFIER_CODES = new Set<string>([
+    'ShiftLeft',
+    'ShiftRight',
+    'ControlLeft',
+    'ControlRight',
+    'AltLeft',
+    'AltRight',
+    'MetaLeft',
+    'MetaRight',
+])
+
+// Track which modifiers we have told the backend are currently held,
+// so we can release them on exit to avoid "stuck modifier" behavior.
+const heldModifiers = new Set<string>()
+
+const canCapture = computed(() => enabled.value && wsAvailable.value)
+
+function focusCaptureLayer() {
+    captureRef.value?.focus()
+}
+
+function armCaptureFromMouse() {
+    if (!canCapture.value) return
+    armOnNextFocus.value = true
+    focusCaptureLayer()
+}
+
+function releaseCapture(opts?: { fromBlur?: boolean }) {
+    const fromBlur = !!opts?.fromBlur
+
+    // Release any held modifiers so Win98 doesn't get "stuck keys"
+    if (wsAvailable.value && heldModifiers.size > 0) {
+        const codes = Array.from(heldModifiers).sort()
+        for (const code of codes) {
+            sendKey('release', code)
+        }
+    }
+    heldModifiers.clear()
+
+    isCapturing.value = false
+    armOnNextFocus.value = false
+
+    if (!fromBlur) {
+        try {
+            captureRef.value?.blur?.()
+        } catch {
+            // ignore
+        }
+    }
+}
+
+function onFocusCapture() {
+    if (!canCapture.value) {
+        releaseCapture()
+        return
+    }
+    if (armOnNextFocus.value) {
+        isCapturing.value = true
+        armOnNextFocus.value = false
+    }
+}
+
+function onBlurCapture() {
+    if (!isCapturing.value && !armOnNextFocus.value) return
+    releaseCapture({ fromBlur: true })
+}
+
+function isReleaseCombo(e: KeyboardEvent): boolean {
+    // Release capture ONLY on Ctrl + Escape.
+    // Plain Escape must pass through to the PS/2 keyboard (Win98 uses it heavily).
+    return e.code === 'Escape' && e.ctrlKey
+}
+
+function blockBrowser(e: KeyboardEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+}
+
+function onKeyDown(e: KeyboardEvent) {
+    if (!isCapturing.value) return
+
+    // Always block browser shortcuts while capturing.
+    // (This also stops the page from handling Escape, Backspace navigation, etc.)
+    if (isReleaseCombo(e)) {
+        blockBrowser(e)
+        releaseCapture()
+        return
+    }
+
+    const code = e.code || ''
+    if (!code) {
+        blockBrowser(e)
+        return
+    }
+
+    // Modifiers: hold on down, release on up.
+    if (MODIFIER_CODES.has(code)) {
+        // Avoid repeated holds.
+        if (!e.repeat && !heldModifiers.has(code)) {
+            sendKey('hold', code, e.key)
+            heldModifiers.add(code)
+        }
+        blockBrowser(e)
+        return
+    }
+
+    // Non-modifiers: log/send a single "press" on keydown (including repeats).
+    sendKey('press', code, e.key)
+    blockBrowser(e)
+}
+
+function onKeyUp(e: KeyboardEvent) {
+    if (!isCapturing.value) return
+
+    const code = e.code || ''
+    if (!code) {
+        blockBrowser(e)
+        return
+    }
+
+    // Only modifiers emit keyup traffic to the backend.
+    if (MODIFIER_CODES.has(code) && heldModifiers.has(code)) {
+        sendKey('release', code, e.key)
+        heldModifiers.delete(code)
+    }
+
+    blockBrowser(e)
+}
+
+// If stream is hidden or WS drops, release capture.
+watch(
+    () => enabled.value,
+    (v) => {
+        if (!v && (isCapturing.value || armOnNextFocus.value)) releaseCapture()
+    }
+)
+watch(
+    () => wsAvailable.value,
+    (v) => {
+        if (!v && (isCapturing.value || armOnNextFocus.value)) releaseCapture()
+    }
+)
+
+/* -------------------------------------------------------------------------- */
 /*  Per-pane persistence (localStorage + profile round-trip)                   */
 /* -------------------------------------------------------------------------- */
 
@@ -362,7 +604,7 @@ function exportPanePrefs(): StreamPanePrefs {
     return {
         enabled: !!enabled.value,
         scaleMode: scaleMode.value,
-        bgMode: bgMode.value
+        bgMode: bgMode.value,
     }
 }
 
@@ -428,12 +670,9 @@ watch([paneId, () => props.__streamPaneUi, () => props.__streamPaneProfileRev], 
 )
 
 // Persist per-pane prefs whenever these change (if pane id exists)
-watch(
-    [() => enabled.value, () => scaleMode.value, () => bgMode.value],
-    () => {
-        writePanePrefs(exportPanePrefs())
-    }
-)
+watch([() => enabled.value, () => scaleMode.value, () => bgMode.value], () => {
+    writePanePrefs(exportPanePrefs())
+})
 
 /* ------------- health state ------------- */
 
@@ -467,8 +706,8 @@ async function loadHealth() {
         const res = await fetch(HEALTH_ENDPOINT, {
             method: 'GET',
             headers: {
-                Accept: 'application/json'
-            }
+                Accept: 'application/json',
+            },
         })
 
         if (!res.ok) {
@@ -479,8 +718,9 @@ async function loadHealth() {
         health.value = json
     } catch (err: any) {
         health.value = null
-        healthError.value =
-            err?.message ? `Failed to load health: ${err.message}` : 'Failed to load health'
+        healthError.value = err?.message
+            ? `Failed to load health: ${err.message}`
+            : 'Failed to load health'
     } finally {
         healthLoading.value = false
     }
@@ -505,6 +745,9 @@ function onEnabledChange() {
     // When re-enabling the stream, force a reload so we don't rely on a stale connection.
     if (enabled.value) {
         reloadStream()
+    } else {
+        // Ensure capture is dropped if stream is hidden.
+        if (isCapturing.value || armOnNextFocus.value) releaseCapture()
     }
 }
 
@@ -771,6 +1014,7 @@ function reloadStream() {
 
 /* Main viewport */
 .viewport {
+    position: relative;
     flex: 1;
     min-height: 0;
     background: #000;
@@ -788,6 +1032,12 @@ function reloadStream() {
     border-color: transparent;
 }
 
+/* Keyboard capturing outline (must remain visible even in bg='pane') */
+.viewport[data-kb-capturing='true'] {
+    border-color: #38bdf8;
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
+}
+
 /* Inner container centers the stream visually */
 .viewport-inner {
     flex: 1;
@@ -795,6 +1045,21 @@ function reloadStream() {
     align-items: center;
     justify-content: center;
     overflow: hidden;
+}
+
+/* Capture layer wraps the stream image so it can receive focus + key events */
+.kb-capture-layer {
+    position: relative;
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    outline: none;
+    cursor: pointer;
+    user-select: none;
 }
 
 /* MJPEG stream image */
@@ -822,6 +1087,46 @@ function reloadStream() {
     max-width: none;
     max-height: none;
     object-fit: contain;
+}
+
+/* Bottom-center overlay indicator */
+.kb-overlay {
+    position: absolute;
+    left: 50%;
+    bottom: 12px;
+    transform: translateX(-50%);
+    pointer-events: none;
+    z-index: 5;
+}
+
+.kb-overlay-inner {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(56, 189, 248, 0.55);
+    background: rgba(2, 6, 23, 0.78);
+    color: var(--panel-fg);
+    font-size: 0.78rem;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(2px);
+}
+
+.kb-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(56, 189, 248, 0.7);
+    background: rgba(56, 189, 248, 0.12);
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+    font-weight: 600;
+}
+
+.kb-hint b {
+    font-weight: 700;
 }
 
 /* Placeholder when stream is disabled */
