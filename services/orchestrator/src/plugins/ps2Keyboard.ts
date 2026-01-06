@@ -49,6 +49,38 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
         return `${this.hex2(p)}:${this.hex2(c)}`
     }
 
+    /**
+     * Safety: keep serial-emitted firmware lines readable without accidentally
+     * injecting control characters into the log stream.
+     *
+     * IMPORTANT:
+     * - If the line is plain printable text (typical Arduino logs), we keep it verbatim.
+     * - If it contains control chars, we replace them with \xNN escapes.
+     */
+    private fmtFirmwareLine(line: string): string {
+        let needsEscape = false
+        for (let i = 0; i < line.length; i++) {
+            const c = line.charCodeAt(i)
+            // allow tab; everything else < 0x20 or DEL treated as control
+            if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+                needsEscape = true
+                break
+            }
+        }
+        if (!needsEscape) return line
+
+        let out = ''
+        for (let i = 0; i < line.length; i++) {
+            const c = line.charCodeAt(i)
+            if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+                out += `\\x${c.toString(16).padStart(2, '0')}`
+            } else {
+                out += line[i]
+            }
+        }
+        return out
+    }
+
     publish(evt: PS2KeyboardEvent): void {
         switch (evt.kind) {
             /* ---------------- Lifecycle / identification ------------------ */
@@ -110,6 +142,17 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
                 break
             }
 
+            /* ---------------- Firmware/Arduino-emitted sequence lines ------ */
+            case 'keyboard-debug-line': {
+                // This is the missing “strict sequence” detail from the old application:
+                // e.g. "keyboard sim recieved 0xff", "handling reset command", "acknowledge", etc.
+                //
+                // Log the line itself (no extra prefixes) so the channel label + timestamp
+                // provide the structure, like the pre-existing app.
+                this.logKb.info(this.fmtFirmwareLine(evt.line))
+                break
+            }
+
             /* ---------------- Failures / cancellations / errors ----------- */
             case 'keyboard-operation-cancelled': {
                 this.logKb.warn(`kind=${evt.kind} opId=${evt.opId} reason=${evt.reason}`)
@@ -138,8 +181,7 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
             case 'keyboard-operation-queued':
             case 'keyboard-operation-started':
             case 'keyboard-operation-progress':
-            case 'keyboard-operation-completed':
-            case 'keyboard-debug-line': {
+            case 'keyboard-operation-completed': {
                 break
             }
 

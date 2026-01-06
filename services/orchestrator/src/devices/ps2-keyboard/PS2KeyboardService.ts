@@ -623,8 +623,10 @@ export class PS2KeyboardService {
     for (const raw of lines) {
       const line = raw.trim()
       if (!line) continue
-      if (line.startsWith('success:')) continue
 
+      // SAFETY/OBSERVABILITY:
+      // Do not suppress firmware/emitted lines here. The logging sink decides what to keep.
+      // The “old app” power-on sequence detail lives in these lines.
       this.events.publish({
         kind: 'keyboard-debug-line',
         at: now(),
