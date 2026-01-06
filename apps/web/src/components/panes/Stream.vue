@@ -1069,7 +1069,9 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
+
+    /* Keep visible so non-inner effects wouldn't clip (safe default) */
+    overflow: visible;
 }
 
 /* Capture layer wraps the stream image so it can receive focus + key events */
@@ -1081,10 +1083,15 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
+
+    /* Keep stream contents clipped */
     overflow: hidden;
+
     outline: none;
     cursor: pointer;
     user-select: none;
+
+    border-radius: 6px;
 }
 
 /* MJPEG stream image */
@@ -1094,21 +1101,24 @@ onBeforeUnmount(() => {
     max-height: 100%;
     image-rendering: auto;
 
-    /* Keep it feeling like a "window" */
+    /* 🔑 Makes the inner glow follow corners cleanly */
     border-radius: 4px;
 
-    /* Smooth on/off when capture toggles */
-    transition: box-shadow 120ms ease, filter 120ms ease;
+    transition: box-shadow 120ms ease;
 }
 
-/* ✅ FAINT GLOW: apply ONLY to the actual stream window (the img) */
+/* ✅ Strong, thin INNER glow (cannot be clipped) */
 .kb-capture-layer[data-capturing='true'] .stream-img {
-    /* Very light edge so it reads as a window */
-    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35);
+    box-shadow:
+        inset 0 0 0 1px rgba(239, 68, 68, 0.85),
+        inset 0 0 10px rgba(239, 68, 68, 0.55),
+        inset 0 0 18px rgba(239, 68, 68, 0.25);
+    filter: none;
+}
 
-    /* Soft glow (not a hard outline) */
-    filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.30))
-        drop-shadow(0 0 22px rgba(239, 68, 68, 0.16));
+/* Optional: subtle focus hint when the capture layer is focused (not capturing) */
+.kb-capture-layer:focus-visible .stream-img {
+    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.25);
 }
 
 /* Scale modes */
@@ -1141,13 +1151,13 @@ onBeforeUnmount(() => {
     z-index: 5;
 }
 
-/* Neutral/small overlay; no red border */
+/* Smaller overlay; single line only */
 .kb-overlay-inner {
     display: inline-flex;
     align-items: center;
     padding: 4px 10px;
     border-radius: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(239, 68, 68, 0.55);
     background: rgba(2, 6, 23, 0.62);
     color: var(--panel-fg);
     font-size: 0.74rem;
@@ -1177,3 +1187,4 @@ onBeforeUnmount(() => {
         'Courier New', monospace;
 }
 </style>
+
