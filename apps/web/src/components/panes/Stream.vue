@@ -1082,7 +1082,7 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: center;
 
-    /* clip stream contents */
+    /* keep stream bounds clipped */
     overflow: hidden;
 
     outline: none;
@@ -1092,52 +1092,64 @@ onBeforeUnmount(() => {
     border-radius: 6px;
 }
 
-/* MJPEG stream image */
+/* Stream image */
 .stream-img {
     display: block;
+    width: 100%;
+    height: 100%;
     max-width: 100%;
     max-height: 100%;
     image-rendering: auto;
 
-    /* match container corners so inset glow follows the window cleanly */
+    /* match corners so overlay lines up cleanly */
     border-radius: 6px;
 
-    transition: filter 120ms ease;
+    /* ensure overlay sits above image pixels */
+    position: relative;
+    z-index: 1;
 }
 
-/* ✅ Strong, thin INNER glow on the image (won’t be clipped; minimal detail loss)
-   Use a drop-shadow stack for strength + a subtle inner ring via inset shadow. */
-.kb-capture-layer[data-capturing='true'] .stream-img {
+/* ✅ Internal glow overlay (renders ABOVE the stream; inset-only so no clipping issues) */
+.kb-capture-layer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 6px;
+    pointer-events: none;
+
+    /* above the image, below the hint overlay */
+    z-index: 2;
+
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+/* Strong + thin internal glow when capturing */
+.kb-capture-layer[data-capturing='true']::after {
+    opacity: 1;
     box-shadow:
-        inset 0 0 0 1px rgba(239, 68, 68, 0.92),
-        inset 0 0 6px rgba(239, 68, 68, 0.50);
-    filter:
-        drop-shadow(0 0 2px rgba(239, 68, 68, 0.60))
-        drop-shadow(0 0 6px rgba(239, 68, 68, 0.35));
+        inset 0 0 0 1px rgba(239, 68, 68, 0.95),
+        inset 0 0 8px rgba(239, 68, 68, 0.55),
+        inset 0 0 16px rgba(239, 68, 68, 0.28);
 }
 
-/* Optional: subtle "armed focus" hint without implying capture */
-.kb-capture-layer:focus-visible .stream-img {
+/* Optional: subtle focus hint (not capture) */
+.kb-capture-layer:focus-visible::after {
+    opacity: 1;
     box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.22);
 }
 
-/* Scale modes */
+/* Scale modes (keep behavior consistent with your template bindings) */
 .stream-img[data-scale='fit'] {
     object-fit: contain;
 }
 .stream-img[data-scale='fill'] {
-    width: 100%;
-    height: 100%;
     object-fit: cover;
 }
 .stream-img[data-scale='stretch'] {
-    width: 100%;
-    height: 100%;
     object-fit: fill;
 }
 .stream-img[data-scale='native'] {
-    max-width: none;
-    max-height: none;
     object-fit: contain;
 }
 
@@ -1151,7 +1163,7 @@ onBeforeUnmount(() => {
     z-index: 5;
 }
 
-/* Smaller overlay; keep neutral styling (no red border/glow) */
+/* Keep neutral styling (no red border/glow) */
 .kb-overlay-inner {
     display: inline-flex;
     align-items: center;
