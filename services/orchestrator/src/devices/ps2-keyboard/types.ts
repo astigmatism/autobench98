@@ -344,6 +344,24 @@ export type PS2KeyboardEvent =
       result: KeyboardOperationResult
     }
   | {
+      /**
+       * High-signal keyboard activity emitted by the service.
+       *
+       * NOTE:
+       * - press and hold are always emitted after the wire command is written
+       * - release is emitted only when it corresponds to a previously-held key
+       *   (to reduce noise from incidental keyup events)
+       */
+      kind: 'keyboard-key-action'
+      at: number
+      action: KeyboardAction
+      identity: KeyIdentity
+      scan: PS2ScanCode
+      wire: string
+      opId?: string
+      requestedBy?: string
+    }
+  | {
       kind: 'keyboard-debug-line'
       at: number
       line: string

@@ -10,6 +10,10 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     [LogChannel.ocr]:             { emoji: '🔎', color: 'green' },
     // More generic device marker
     [LogChannel.device]:          { emoji: '🛠️', color: 'red' },
+
+    // Keyboard-specific channel
+    [LogChannel.keyboard]:        { emoji: '⌨️', color: 'cyan' },
+
     [LogChannel.benchmark]:       { emoji: '⏱️', color: 'green' },
     [LogChannel.websocket]:       { emoji: '🔗', color: 'cyan' },
     [LogChannel.app]:             { emoji: '📦', color: 'blue' },
@@ -43,6 +47,10 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.stream]:          30,
     [LogChannel.ocr]:             30,
     [LogChannel.device]:          30,
+
+    // ✅ Keyboard-specific channel
+    [LogChannel.keyboard]:        30,
+
     [LogChannel.benchmark]:       30,
     [LogChannel.websocket]:       30,
     [LogChannel.app]:             30,

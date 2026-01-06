@@ -35,153 +35,122 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
 
     constructor(app: FastifyInstance) {
         const { channel } = createLogger('ps2-keyboard', app.clientBuf)
-        // Use device channel to avoid relying on a potentially-missing dedicated enum entry.
-        this.logKb = channel(LogChannel.device)
+        this.logKb = channel(LogChannel.keyboard)
     }
 
     publish(evt: PS2KeyboardEvent): void {
         const ts = new Date((evt as any).at ?? Date.now()).toISOString()
 
         switch (evt.kind) {
-            /* ---------------- Device lifecycle --------------------------- */
+            /* ---------------- Lifecycle / identification ------------------ */
             case 'keyboard-device-identified': {
-                const { id, path, baudRate } = evt as any
                 this.logKb.info(
-                    `ts=${ts} kind=${evt.kind} id=${id ?? 'unknown'} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} id=${evt.id} path=${evt.path} baud=${evt.baudRate}`
                 )
                 break
             }
 
             case 'keyboard-device-connected': {
-                const { path, baudRate } = evt as any
                 this.logKb.info(
-                    `ts=${ts} kind=${evt.kind} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} path=${evt.path} baud=${evt.baudRate}`
                 )
                 break
             }
 
             case 'keyboard-device-disconnected': {
-                const { path, reason } = evt as any
                 this.logKb.warn(
-                    `ts=${ts} kind=${evt.kind} path=${path ?? 'unknown'} reason=${reason ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} path=${evt.path} reason=${evt.reason}`
                 )
                 break
             }
 
             case 'keyboard-device-lost': {
-                const { id } = evt as any
-                this.logKb.warn(`ts=${ts} kind=${evt.kind} id=${id ?? 'unknown'}`)
+                this.logKb.warn(`ts=${ts} kind=${evt.kind} id=${evt.id}`)
                 break
             }
 
-            /* ---------------- Identification ---------------------------- */
             case 'keyboard-identify-start': {
-                this.logKb.info(`ts=${ts} kind=${evt.kind}`)
+                this.logKb.info(`ts=${ts} kind=${evt.kind} path=${evt.path}`)
                 break
             }
 
             case 'keyboard-identify-success': {
-                this.logKb.info(`ts=${ts} kind=${evt.kind}`)
+                this.logKb.info(`ts=${ts} kind=${evt.kind} token=${evt.token}`)
                 break
             }
 
             case 'keyboard-identify-failed': {
-                const { error } = evt as any
                 this.logKb.warn(
-                    `ts=${ts} kind=${evt.kind} error=${error?.message ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} error=${evt.error?.message ?? 'unknown'}`
                 )
                 break
             }
 
-            /* ---------------- Power / queue / operations ----------------- */
+            /* ---------------- Power -------------------------------------- */
             case 'keyboard-power-changed': {
-                const { power } = evt as any
-                this.logKb.info(`ts=${ts} kind=${evt.kind} power=${power ?? 'unknown'}`)
-                break
-            }
-
-            case 'keyboard-queue-depth': {
-                const { depth } = evt as any
-                this.logKb.debug(`ts=${ts} kind=${evt.kind} depth=${depth ?? 'unknown'}`)
-                break
-            }
-
-            case 'keyboard-operation-queued': {
-                const { op } = evt as any
                 this.logKb.info(
-                    `ts=${ts} kind=${evt.kind} opId=${op?.id ?? 'unknown'} type=${op?.type ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} power=${evt.power} requestedBy=${evt.requestedBy ?? 'unknown'}`
                 )
                 break
             }
 
-            case 'keyboard-operation-started': {
-                const { opId } = evt as any
-                this.logKb.info(`ts=${ts} kind=${evt.kind} opId=${opId ?? 'unknown'}`)
-                break
-            }
-
-            case 'keyboard-operation-progress': {
-                // High-frequency; debug only (and still potentially noisy).
-                const { opId, progress } = evt as any
-                this.logKb.debug(
-                    `ts=${ts} kind=${evt.kind} opId=${opId ?? 'unknown'} progress=${progress ?? 'unknown'}`
-                )
-                break
-            }
-
-            case 'keyboard-operation-completed': {
-                const { result } = evt as any
+            /* ---------------- High-signal key activity -------------------- */
+            case 'keyboard-key-action': {
+                const code = evt.identity?.code ?? ''
+                const key = evt.identity?.key ?? ''
+                const scanPrefix = (evt.scan?.prefix ?? 0x00).toString(16).padStart(2, '0')
+                const scanCode = (evt.scan?.code ?? 0x00).toString(16).padStart(2, '0')
                 this.logKb.info(
-                    `ts=${ts} kind=${evt.kind} opId=${result?.id ?? 'unknown'} status=${result?.status ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} action=${evt.action} code=${code || 'n/a'} key=${key || 'n/a'} scan=${scanPrefix}:${scanCode} opId=${evt.opId ?? 'unknown'} requestedBy=${evt.requestedBy ?? 'unknown'}`
                 )
                 break
             }
 
+            /* ---------------- Failures / cancellations / errors ----------- */
             case 'keyboard-operation-cancelled': {
-                const { opId, reason } = evt as any
                 this.logKb.warn(
-                    `ts=${ts} kind=${evt.kind} opId=${opId ?? 'unknown'} reason=${reason ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} opId=${evt.opId} reason=${evt.reason}`
                 )
                 break
             }
 
             case 'keyboard-operation-failed': {
-                const { result } = evt as any
                 this.logKb.warn(
-                    `ts=${ts} kind=${evt.kind} opId=${result?.id ?? 'unknown'} error=${result?.error?.message ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} opId=${evt.result?.id ?? 'unknown'} error=${evt.result?.error?.message ?? 'unknown'}`
                 )
                 break
             }
 
-            /* ---------------- Errors ------------------------------------- */
             case 'recoverable-error': {
-                const { error } = evt as any
                 this.logKb.warn(
-                    `ts=${ts} kind=${evt.kind} error=${error?.message ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} error=${evt.error?.message ?? 'unknown'}`
                 )
                 break
             }
 
             case 'fatal-error': {
-                const { error } = evt as any
                 this.logKb.error(
-                    `ts=${ts} kind=${evt.kind} error=${error?.message ?? 'unknown'}`
+                    `ts=${ts} kind=${evt.kind} error=${evt.error?.message ?? 'unknown'}`
                 )
                 break
             }
 
-            /* ---------------- Debug -------------------------------------- */
+            /* ---------------- Noise suppressed ---------------------------- */
+            // Intentionally NOT logging:
+            // - queue depth
+            // - operation queued/started/progress/completed
+            // - raw debug lines / success acks
+            case 'keyboard-queue-depth':
+            case 'keyboard-operation-queued':
+            case 'keyboard-operation-started':
+            case 'keyboard-operation-progress':
+            case 'keyboard-operation-completed':
             case 'keyboard-debug-line': {
-                const { line } = evt as any
-                this.logKb.debug(
-                    `ts=${ts} kind=${evt.kind} line=${JSON.stringify(line ?? '')}`
-                )
                 break
             }
 
             default: {
-                // Future-proof fallback
-                this.logKb.info(`ts=${ts} kind=${(evt as any).kind ?? 'unknown'}`)
+                // Future-proof fallback: ignore unknown events safely.
                 break
             }
         }

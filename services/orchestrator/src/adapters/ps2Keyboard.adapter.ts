@@ -168,6 +168,14 @@ export class PS2KeyboardStateAdapter {
         break
       }
 
+      /* ---------------- High-signal key activity ------------------------- */
+      case 'keyboard-key-action': {
+        // Intentionally not reflected into AppState by default.
+        // The UI should observe device phase/power/queue + last errors via state,
+        // and use logs for detailed input activity.
+        break
+      }
+
       /* ---------------- Errors ------------------------------------------- */
       case 'recoverable-error': {
         this.pushError(evt.error)

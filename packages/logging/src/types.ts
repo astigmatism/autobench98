@@ -5,6 +5,10 @@ export enum LogChannel {
     stream = 'stream',
     ocr = 'ocr',
     device = 'device',
+
+    // ✅ Keyboard-specific channel
+    keyboard = 'keyboard',
+
     benchmark = 'benchmark',
     websocket = 'websocket',
     app = 'app',

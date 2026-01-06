@@ -31,10 +31,10 @@ import type {
   KeyboardOperationSummary,
   PS2ScanCode,
   ClientKeyboardEvent,
+  KeyIdentity,
 } from './types'
 import { lookupScanCode } from './scancodes'
 import {
-  buildPS2KeyboardConfigFromEnv,
   sleep,
   now,
   makeOpId,
@@ -80,7 +80,11 @@ export class PS2KeyboardService {
   private reconnectAttempts = 0
   private reconnectTimer: NodeJS.Timeout | null = null
 
+  // Used for parsing serial inbound lines for debug/telemetry without spamming.
   private readBuffer = ''
+
+  // Tracks keys held down (to suppress noisy "release" logs unless it was actually held).
+  private heldKeys = new Set<string>()
 
   constructor(
     cfg: PS2KeyboardConfig,
@@ -106,6 +110,8 @@ export class PS2KeyboardService {
     this.phase = 'disconnected'
     this.identified = false
     this.power = 'unknown'
+    this.heldKeys.clear()
+    this.readBuffer = ''
   }
 
   /* ---------------------------------------------------------------------- */
@@ -154,6 +160,18 @@ export class PS2KeyboardService {
   public enqueueKeyEvent(evt: ClientKeyboardEvent): KeyboardOperationHandle {
     const scan = this.resolveScanCode(evt)
     if (!scan) {
+      // Surface as a recoverable error for observability (and UI error history).
+      this.events.publish({
+        kind: 'recoverable-error',
+        at: now(),
+        error: {
+          at: now(),
+          scope: 'protocol',
+          message: `Unsupported key: ${evt.code ?? evt.key ?? 'unknown'}`,
+          retryable: false,
+        },
+      })
+
       return this.failFastHandle(
         'press',
         `Unsupported key: ${evt.code ?? evt.key ?? 'unknown'}`
@@ -173,7 +191,11 @@ export class PS2KeyboardService {
       label: `${evt.action} ${evt.code ?? evt.key ?? ''}`,
       execute: async () => {
         await this.ensureReady()
-        await this.sendAction(evt.action, scan)
+        await this.sendAction(evt.action, scan, {
+          code: evt.code,
+          key: evt.key,
+          requestedBy: evt.requestedBy,
+        })
       },
     })
   }
@@ -312,7 +334,7 @@ export class PS2KeyboardService {
         result,
       })
     } catch (err) {
-      const error = this.toError(err)
+      const error = this.toErrorWithScope('unknown', err)
 
       const result: KeyboardOperationResult = {
         id: op.id,
@@ -366,6 +388,8 @@ export class PS2KeyboardService {
 
     this.port = port
     this.reconnectAttempts = 0
+    this.readBuffer = ''
+    this.heldKeys.clear()
 
     this.events.publish({
       kind: 'keyboard-device-connected',
@@ -378,13 +402,21 @@ export class PS2KeyboardService {
     port.on('error', (err) => this.handlePortError(err))
     port.on('close', () => this.handlePortClose())
 
-    await this.identify()
+    // Ensure identify failures are surfaced as events (and do not crash callers).
+    try {
+      await this.identify()
+    } catch {
+      await this.closePort('unknown')
+      this.scheduleReconnect()
+    }
   }
 
   private async closePort(reason: 'io-error' | 'explicit-close' | 'unknown' | 'device-lost'): Promise<void> {
     const port = this.port
     this.port = null
     this.identified = false
+    this.heldKeys.clear()
+    this.readBuffer = ''
 
     if (port && port.isOpen) {
       await new Promise<void>((resolve) => port.close(() => resolve()))
@@ -408,23 +440,36 @@ export class PS2KeyboardService {
       path: this.devicePath ?? 'unknown',
     })
 
-    await this.writeLine(this.cfg.identify.request)
+    try {
+      await this.writeLine(this.cfg.identify.request)
 
-    // Expect token line (ignore debug lines)
-    const token = await this.readLine(this.cfg.identify.timeoutMs)
-    if (token !== this.cfg.expectedIdToken) {
-      throw new Error(`unexpected identify token: ${token}`)
+      // Expect token line (ignore debug lines)
+      const token = await this.readLine(this.cfg.identify.timeoutMs)
+      if (token !== this.cfg.expectedIdToken) {
+        throw new Error(`unexpected identify token: ${token}`)
+      }
+
+      await this.writeLine(this.cfg.identify.completion)
+      this.identified = true
+      this.phase = 'ready'
+
+      this.events.publish({
+        kind: 'keyboard-identify-success',
+        at: now(),
+        token,
+      })
+    } catch (err) {
+      this.identified = false
+      this.phase = 'error'
+
+      this.events.publish({
+        kind: 'keyboard-identify-failed',
+        at: now(),
+        error: this.toErrorWithScope('identify', err, true),
+      })
+
+      throw err
     }
-
-    await this.writeLine(this.cfg.identify.completion)
-    this.identified = true
-    this.phase = 'ready'
-
-    this.events.publish({
-      kind: 'keyboard-identify-success',
-      at: now(),
-      token,
-    })
   }
 
   private async writeLine(line: string): Promise<void> {
@@ -465,10 +510,10 @@ export class PS2KeyboardService {
       }
 
       const cleanup = () => {
-        this.port?.off('data', onData)
+        this.port?.off('data', onData as any)
       }
 
-      this.port!.on('data', onData)
+      this.port!.on('data', onData as any)
 
       const tick = () => {
         if (now() - start >= timeoutMs) onTimeout()
@@ -479,14 +524,32 @@ export class PS2KeyboardService {
   }
 
   private handleData(chunk: string): void {
-    this.events.publish({
-      kind: 'keyboard-debug-line',
-      at: now(),
-      line: chunk.trim(),
-    })
+    // Parse into lines; avoid spamming logs for every raw chunk.
+    this.readBuffer += chunk
+    const lines = this.readBuffer.split(/\r?\n/)
+    this.readBuffer = lines.pop() ?? ''
+
+    for (const raw of lines) {
+      const line = raw.trim()
+      if (!line) continue
+
+      // Arduino contract: `success:` is ack; `debug:` is telemetry.
+      // We keep telemetry + unknown lines; suppress `success:` by default to reduce noise.
+      if (line.startsWith('success:')) continue
+
+      if (line.startsWith('debug:') || true) {
+        // Keep debug and unknown/unclassified lines (useful when diagnosing protocol issues).
+        // NOTE: Plugin-level logging can choose to ignore these events.
+        this.events.publish({
+          kind: 'keyboard-debug-line',
+          at: now(),
+          line,
+        })
+      }
+    }
   }
 
-  private async handlePortError(err: Error): Promise<void> {
+  private async handlePortError(_err: Error): Promise<void> {
     await this.closePort('io-error')
     this.scheduleReconnect()
   }
@@ -506,7 +569,7 @@ export class PS2KeyboardService {
       this.events.publish({
         kind: 'fatal-error',
         at: now(),
-        error: this.toError('reconnect attempts exhausted'),
+        error: this.toErrorWithScope('open', 'reconnect attempts exhausted', false),
       })
       return
     }
@@ -547,9 +610,47 @@ export class PS2KeyboardService {
     return null
   }
 
-  private async sendAction(action: KeyboardAction, scan: PS2ScanCode): Promise<void> {
+  private keyToken(identity: KeyIdentity, scan: PS2ScanCode): string {
+    // Prefer stable KeyboardEvent.code when available; otherwise fall back to scan bytes.
+    if (identity.code) return identity.code
+    const prefix = scan.prefix ?? 0x00
+    return `${prefix.toString(16).padStart(2, '0')}:${scan.code.toString(16).padStart(2, '0')}`
+  }
+
+  private async sendAction(
+    action: KeyboardAction,
+    scan: PS2ScanCode,
+    meta?: { code?: string; key?: string; requestedBy?: string }
+  ): Promise<void> {
     const wire = `${action} ${formatWireScanCode(scan.prefix, scan.code)}`
     await this.writeLine(wire)
+
+    const identity: KeyIdentity = { code: meta?.code, key: meta?.key }
+    const token = this.keyToken(identity, scan)
+
+    // Noise control:
+    // - press / hold: always emit
+    // - release: emit only if we previously saw a hold for the same key token
+    if (action === 'hold') {
+      this.heldKeys.add(token)
+    } else if (action === 'release') {
+      if (!this.heldKeys.has(token)) {
+        // Still send the release command, but suppress the activity event/log noise.
+        return
+      }
+      this.heldKeys.delete(token)
+    }
+
+    this.events.publish({
+      kind: 'keyboard-key-action',
+      at: now(),
+      action,
+      identity,
+      scan,
+      wire,
+      opId: this.activeOp?.id,
+      requestedBy: meta?.requestedBy ?? this.activeOp?.requestedBy,
+    })
   }
 
   private summarize(op: QueuedOp, status: KeyboardOperationSummary['status']): KeyboardOperationSummary {
@@ -585,13 +686,17 @@ export class PS2KeyboardService {
     return { id, kind, createdAt, done }
   }
 
-  private toError(err: unknown): KeyboardError {
+  private toErrorWithScope(
+    scope: KeyboardError['scope'],
+    err: unknown,
+    retryable?: boolean
+  ): KeyboardError {
     if (typeof err === 'string') {
-      return { at: now(), scope: 'unknown', message: err }
+      return { at: now(), scope, message: err, retryable }
     }
     if (err instanceof Error) {
-      return { at: now(), scope: 'unknown', message: err.message }
+      return { at: now(), scope, message: err.message, retryable }
     }
-    return { at: now(), scope: 'unknown', message: 'unknown error' }
+    return { at: now(), scope, message: 'unknown error', retryable }
   }
 }
