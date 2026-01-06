@@ -1072,7 +1072,7 @@ onBeforeUnmount(() => {
     overflow: hidden;
 }
 
-/* Capture layer wraps the stream image so it can receive focus + key events */
+/* Capture layer wraps the stream so it can receive focus + key events */
 .kb-capture-layer {
     position: relative;
     flex: 1;
@@ -1082,7 +1082,7 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: center;
 
-    /* keep stream bounds clipped */
+    /* keep the window bounded */
     overflow: hidden;
 
     outline: none;
@@ -1092,65 +1092,118 @@ onBeforeUnmount(() => {
     border-radius: 6px;
 }
 
-/* Stream image */
-.stream-img {
-    display: block;
-    width: 100%;
-    height: 100%;
+/* -------------------------------------------------------------------------- */
+/*  Stream frame + internal glow overlay                                      */
+/*  - Overlay is ABOVE pixels (so it works on MJPEG stream)                   */
+/*  - Overlay is INSET only (so no external clipping issues)                  */
+/*  - Frame sizing varies by scaleMode so glow matches the visible image      */
+/* -------------------------------------------------------------------------- */
+
+.stream-frame {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+
     max-width: 100%;
     max-height: 100%;
-    image-rendering: auto;
 
-    /* match corners so overlay lines up cleanly */
     border-radius: 6px;
-
-    /* ensure overlay sits above image pixels */
-    position: relative;
-    z-index: 1;
+    overflow: hidden; /* ensures inset glow stays clean at corners */
 }
 
-/* ✅ Internal glow overlay (renders ABOVE the stream; inset-only so no clipping issues) */
-.kb-capture-layer::after {
+/* Scale mode sizing for the frame */
+.stream-frame[data-scale='fill'],
+.stream-frame[data-scale='stretch'],
+.stream-frame[data-scale='native'] {
+    width: 100%;
+    height: 100%;
+}
+
+.stream-frame[data-scale='fit'] {
+    width: auto;
+    height: auto;
+}
+
+/* The stream itself (always under the overlay) */
+.stream-img {
+    display: block;
+    position: relative;
+    z-index: 1;
+
+    border-radius: inherit;
+    image-rendering: auto;
+}
+
+/* Fit: shrink-wrap to the image, constrained by capture bounds */
+.stream-img[data-scale='fit'] {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+/* Fill: cover the full window */
+.stream-img[data-scale='fill'] {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* Stretch: fill the window, distort aspect */
+.stream-img[data-scale='stretch'] {
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+}
+
+/* Native: 1:1 pixels (may overflow; capture layer clips) */
+.stream-img[data-scale='native'] {
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    object-fit: none;
+}
+
+/* Internal glow overlay: ABOVE the stream pixels, inset-only */
+.stream-frame::after {
     content: '';
     position: absolute;
     inset: 0;
-    border-radius: 6px;
+    border-radius: inherit;
     pointer-events: none;
-
-    /* above the image, below the hint overlay */
     z-index: 2;
 
     opacity: 0;
     transition: opacity 120ms ease;
 }
 
-/* Strong + thin internal glow when capturing */
-.kb-capture-layer[data-capturing='true']::after {
+/* Strong, thin INNER glow (edge-heavy, tapers inward) when capturing */
+.kb-capture-layer[data-capturing='true'] .stream-frame::after {
     opacity: 1;
+
+    /* thin hard ring + soft taper */
     box-shadow:
         inset 0 0 0 1px rgba(239, 68, 68, 0.95),
-        inset 0 0 8px rgba(239, 68, 68, 0.55),
-        inset 0 0 16px rgba(239, 68, 68, 0.28);
+        inset 0 0 10px rgba(239, 68, 68, 0.35),
+        inset 0 0 22px rgba(239, 68, 68, 0.18);
+
+    /* edge-weighted glow that fades toward the center */
+    background: radial-gradient(
+        closest-side,
+        rgba(239, 68, 68, 0) 62%,
+        rgba(239, 68, 68, 0.16) 82%,
+        rgba(239, 68, 68, 0.42) 100%
+    );
 }
 
 /* Optional: subtle focus hint (not capture) */
-.kb-capture-layer:focus-visible::after {
+.kb-capture-layer:focus-visible .stream-frame::after {
     opacity: 1;
     box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.22);
-}
-
-/* Scale modes (keep behavior consistent with your template bindings) */
-.stream-img[data-scale='fit'] {
-    object-fit: contain;
-}
-.stream-img[data-scale='fill'] {
-    object-fit: cover;
-}
-.stream-img[data-scale='stretch'] {
-    object-fit: fill;
-}
-.stream-img[data-scale='native'] {
-    object-fit: contain;
+    background: none;
 }
 
 /* Bottom-center overlay indicator */
