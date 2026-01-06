@@ -1069,9 +1069,7 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-
-    /* Keep visible so non-inner effects wouldn't clip (safe default) */
-    overflow: visible;
+    overflow: hidden;
 }
 
 /* Capture layer wraps the stream image so it can receive focus + key events */
@@ -1084,7 +1082,7 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: center;
 
-    /* Keep stream contents clipped */
+    /* clip stream contents */
     overflow: hidden;
 
     outline: none;
@@ -1101,24 +1099,26 @@ onBeforeUnmount(() => {
     max-height: 100%;
     image-rendering: auto;
 
-    /* 🔑 Makes the inner glow follow corners cleanly */
-    border-radius: 4px;
+    /* match container corners so inset glow follows the window cleanly */
+    border-radius: 6px;
 
-    transition: box-shadow 120ms ease;
+    transition: filter 120ms ease;
 }
 
-/* ✅ Strong, thin INNER glow (cannot be clipped) */
+/* ✅ Strong, thin INNER glow on the image (won’t be clipped; minimal detail loss)
+   Use a drop-shadow stack for strength + a subtle inner ring via inset shadow. */
 .kb-capture-layer[data-capturing='true'] .stream-img {
     box-shadow:
-        inset 0 0 0 1px rgba(239, 68, 68, 0.85),
-        inset 0 0 10px rgba(239, 68, 68, 0.55),
-        inset 0 0 18px rgba(239, 68, 68, 0.25);
-    filter: none;
+        inset 0 0 0 1px rgba(239, 68, 68, 0.92),
+        inset 0 0 6px rgba(239, 68, 68, 0.50);
+    filter:
+        drop-shadow(0 0 2px rgba(239, 68, 68, 0.60))
+        drop-shadow(0 0 6px rgba(239, 68, 68, 0.35));
 }
 
-/* Optional: subtle focus hint when the capture layer is focused (not capturing) */
+/* Optional: subtle "armed focus" hint without implying capture */
 .kb-capture-layer:focus-visible .stream-img {
-    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.25);
+    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.22);
 }
 
 /* Scale modes */
@@ -1151,13 +1151,13 @@ onBeforeUnmount(() => {
     z-index: 5;
 }
 
-/* Smaller overlay; single line only */
+/* Smaller overlay; keep neutral styling (no red border/glow) */
 .kb-overlay-inner {
     display: inline-flex;
     align-items: center;
     padding: 4px 10px;
     border-radius: 10px;
-    border: 1px solid rgba(239, 68, 68, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.16);
     background: rgba(2, 6, 23, 0.62);
     color: var(--panel-fg);
     font-size: 0.74rem;
@@ -1187,4 +1187,3 @@ onBeforeUnmount(() => {
         'Courier New', monospace;
 }
 </style>
-
