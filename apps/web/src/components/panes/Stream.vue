@@ -140,13 +140,14 @@
                     role="button"
                     :aria-pressed="isCapturing ? 'true' : 'false'"
                     :data-capturing="isCapturing ? 'true' : 'false'"
+                    :data-scale="scaleMode"
                     @mousedown.prevent="armCaptureFromMouse"
                     @focus="onFocusCapture"
                     @blur="onBlurCapture"
                     @keydown="onKeyDown"
                     @keyup="onKeyUp"
                 >
-                    <!-- ✅ Frame box sized per mode so FIT != FILL and glow hugs visible image bounds -->
+                    <!-- Frame box sized per mode so FIT != FILL -->
                     <div class="stream-frame" :data-scale="scaleMode" :style="streamFrameStyle">
                         <img
                             :key="reloadKey"
@@ -157,8 +158,12 @@
                             draggable="false"
                             @load="onStreamLoad"
                         />
-                        <div class="stream-glow" aria-hidden="true"></div>
+                        <!-- Glow that hugs the image bounds (works great for fit, fine for fill/stretch) -->
+                        <div class="stream-glow kb-glow" aria-hidden="true"></div>
                     </div>
+
+                    <!-- Glow that hugs the VIEWPORT bounds (needed for native/1:1 when image edges are offscreen) -->
+                    <div class="capture-glow kb-glow" aria-hidden="true"></div>
 
                     <!-- Bottom-center overlay -->
                     <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
@@ -571,10 +576,7 @@ watch(
 )
 
 /* -------------------------------------------------------------------------- */
-/*  Stream sizing (fix FIT)                                                   */
-/*  - FIT needs a real box size; MJPEG streams can be flaky with intrinsic     */
-/*    sizing, so we compute a contain box from capture bounds + stream AR.     */
-/*  - GLOW hugs the stream-frame bounds (not the pane bounds).                */
+/*  Stream sizing (fit + native sizing)                                       */
 /* -------------------------------------------------------------------------- */
 
 type StreamMeta = { w: number; h: number; ar: number }
@@ -605,11 +607,9 @@ function updateFrameBox() {
 
         // contain: whichever side constrains determines the other
         if (containerAr > ar) {
-            // container is wider than stream => height-limited
             h = ch
             w = Math.floor(h * ar)
         } else {
-            // width-limited
             w = cw
             h = Math.floor(w / ar)
         }
@@ -652,14 +652,12 @@ const streamFrameStyle = computed(() => {
     if (mode === 'fit') {
         const b = frameBox.value
         if (b) return { width: `${b.w}px`, height: `${b.h}px` }
-        // fallback until we have bounds
         return { width: '100%', height: '100%' }
     }
 
     if (mode === 'native') {
         const b = frameBox.value
         if (b) return { width: `${b.w}px`, height: `${b.h}px` }
-        // fallback until we have natural size
         return { width: '100%', height: '100%' }
     }
 
@@ -670,14 +668,11 @@ const streamFrameStyle = computed(() => {
 let frameResizeObs: ResizeObserver | null = null
 
 onMounted(() => {
-    // Observe capture bounds so FIT stays correct when pane resizes
     const el = captureRef.value
     if (el && typeof ResizeObserver !== 'undefined') {
         frameResizeObs = new ResizeObserver(() => updateFrameBox())
         frameResizeObs.observe(el)
     }
-
-    // One immediate attempt (works even before the stream loads; uses fallback AR)
     updateFrameBox()
 })
 
@@ -745,15 +740,6 @@ function exportPanePrefs(): StreamPanePrefs {
     }
 }
 
-/**
- * Hydration priority:
- * 1) profile-embedded prefs (leaf.props.__streamPaneUi) if present
- * 2) per-pane localStorage
- * 3) local defaults (refs above)
- *
- * Important: profile load must override "recent modifications", even if pane id is unchanged.
- * App.vue stamps a monotonic __streamPaneProfileRev on leaves to force this rehydrate.
- */
 const lastHydratedSig = ref<string>('')
 
 function hydrateForPane() {
@@ -761,7 +747,6 @@ function hydrateForPane() {
     const rev = typeof props.__streamPaneProfileRev === 'number' ? props.__streamPaneProfileRev : 0
     const hasEmbed = isObject(props.__streamPaneUi)
 
-    // If we can’t key this pane yet (no id), we can still apply embedded prefs on change.
     if (!key) {
         const sig = `nokey|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
         if (lastHydratedSig.value === sig) return
@@ -771,42 +756,31 @@ function hydrateForPane() {
         return
     }
 
-    // Rehydrate whenever:
-    // - pane id changes
-    // - profile rev changes
-    // - embedded presence changes
     const sig = `${key}|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
     if (lastHydratedSig.value === sig) return
     lastHydratedSig.value = sig
 
-    // 1) Embedded prefs from profile/layout snapshot (authoritative on profile load)
     if (hasEmbed) {
         applyPanePrefs(props.__streamPaneUi as StreamPanePrefs)
-        // Mirror into localStorage so it becomes the persistent per-pane baseline.
         writePanePrefs(exportPanePrefs())
         return
     }
 
-    // 2) localStorage
     const stored = readPanePrefs()
     if (stored) {
         applyPanePrefs(stored)
         return
     }
-
-    // 3) defaults already set by refs
 }
 
 onMounted(() => {
     hydrateForPane()
 })
 
-// Rehydrate on pane id change OR when profile injects new prefs/rev (profile load)
 watch([paneId, () => props.__streamPaneUi, () => props.__streamPaneProfileRev], () =>
     hydrateForPane()
 )
 
-// Persist per-pane prefs whenever these change (if pane id exists)
 watch([() => enabled.value, () => scaleMode.value, () => bgMode.value], () => {
     writePanePrefs(exportPanePrefs())
 })
@@ -817,7 +791,6 @@ const health = ref<SidecarHealth | null>(null)
 const healthLoading = ref(false)
 const healthError = ref<string | null>(null)
 
-/* Format uptime like "1h 32m 10s" or "12m 05s" etc. */
 const formattedUptime = computed(() => {
     const sec = health.value?.uptimeSec
     if (sec == null || !Number.isFinite(sec) || sec < 0) return '—'
@@ -842,14 +815,10 @@ async function loadHealth() {
     try {
         const res = await fetch(HEALTH_ENDPOINT, {
             method: 'GET',
-            headers: {
-                Accept: 'application/json',
-            },
+            headers: { Accept: 'application/json' },
         })
 
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`)
-        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
         const json = (await res.json()) as SidecarHealth
         health.value = json
@@ -864,26 +833,20 @@ async function loadHealth() {
 }
 
 function toggleControls() {
-    const next = !showControls.value
-    showControls.value = next
+    showControls.value = !showControls.value
 }
 
-/* When advanced panel is opened, fetch fresh health details. */
 watch(
     () => showControls.value,
     (open) => {
-        if (open) {
-            void loadHealth()
-        }
+        if (open) void loadHealth()
     }
 )
 
 function onEnabledChange() {
-    // When re-enabling the stream, force a reload so we don't rely on a stale connection.
     if (enabled.value) {
         reloadStream()
     } else {
-        // Ensure capture is dropped if stream is hidden.
         if (isCapturing.value || armOnNextFocus.value) releaseCapture()
     }
 }
@@ -893,7 +856,6 @@ function reloadStream() {
 }
 
 onBeforeUnmount(() => {
-    // Ensure we always drop capture and release any held modifiers on teardown.
     if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0) {
         releaseCapture()
     }
@@ -910,13 +872,12 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .stream-pane {
-    /* --pane-fg: readable for plain text on the pane background
-       --panel-fg: readable for text inside dark panels (fixed light color) */
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
 
-    /* Keyboard capture accent (red) */
+    /* Accent */
     --kb-accent: #ef4444;
+    --kb-accent-rgb: 239, 68, 68;
 
     position: relative;
     display: flex;
@@ -926,9 +887,7 @@ onBeforeUnmount(() => {
     width: 100%;
 }
 
-/* Hotspot area for advanced controls button (top-right).
-   Only hovering this region will reveal the button.
-   z-index ensures it floats above pane content. */
+/* Hotspot area for advanced controls button (top-right). */
 .stream-advanced-hotspot {
     position: absolute;
     top: 0;
@@ -939,7 +898,7 @@ onBeforeUnmount(() => {
     z-index: 30;
 }
 
-/* Gear button (same pattern as logs / CF pane) */
+/* Gear button */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -960,7 +919,6 @@ onBeforeUnmount(() => {
     z-index: 31;
 }
 
-/* Only show button while hotspot is hovered */
 .stream-advanced-hotspot:hover .gear-btn {
     opacity: 1;
     visibility: visible;
@@ -999,22 +957,17 @@ onBeforeUnmount(() => {
     font-size: 14px;
 }
 
-/* Panel-styled controls keep panel foreground for readability */
 .panel-text span {
     color: var(--panel-fg);
 }
 
-/* Left/right areas */
 .toolbar .left {
     display: flex;
     align-items: center;
     gap: 12px;
     min-width: 0;
 }
-.toolbar .right {
-}
 
-/* Controls block */
 .toolbar .controls {
     --control-h: 30px;
     display: flex;
@@ -1023,7 +976,6 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
 }
 
-/* Select + labels (panel) */
 .select {
     display: inline-flex;
     align-items: center;
@@ -1044,7 +996,6 @@ onBeforeUnmount(() => {
     line-height: var(--control-h);
 }
 
-/* Checkbox (panel style) */
 .checkbox.panel {
     display: inline-flex;
     align-items: center;
@@ -1064,7 +1015,6 @@ onBeforeUnmount(() => {
     color: var(--panel-fg);
 }
 
-/* Buttons (panel) */
 .btn {
     padding: 0 12px;
     border-radius: 6px;
@@ -1181,13 +1131,11 @@ onBeforeUnmount(() => {
     justify-content: stretch;
 }
 
-/* Background mode: pane vs black */
 .viewport[data-bg='pane'] {
     background: transparent;
     border-color: transparent;
 }
 
-/* Inner container centers the stream visually */
 .viewport-inner {
     flex: 1;
     display: flex;
@@ -1206,7 +1154,6 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: center;
 
-    /* keep the window bounded */
     overflow: hidden;
 
     outline: none;
@@ -1216,7 +1163,7 @@ onBeforeUnmount(() => {
     border-radius: 6px;
 }
 
-/* Stream frame (this is the box the glow hugs) */
+/* Stream frame (image bounds for fit; full viewport for fill/stretch; oversized for native) */
 .stream-frame {
     position: relative;
     display: inline-flex;
@@ -1226,11 +1173,9 @@ onBeforeUnmount(() => {
     border-radius: 6px;
     overflow: hidden;
 
-    /* allow native to overflow capture layer (capture layer clips) */
     flex: 0 0 auto;
 }
 
-/* Stream pixels */
 .stream-img {
     display: block;
     position: relative;
@@ -1243,7 +1188,7 @@ onBeforeUnmount(() => {
     image-rendering: auto;
 }
 
-/* Object-fit per mode */
+/* object-fit per mode */
 .stream-img[data-scale='fit'] {
     object-fit: contain;
 }
@@ -1257,40 +1202,60 @@ onBeforeUnmount(() => {
     object-fit: none;
 }
 
-/* Glow overlay element (ABOVE stream pixels) */
-.stream-glow {
+/* -------------------------------------------------------------------------- */
+/*  Glow (RECTANGULAR inner glow; NO border ring)                              */
+/* -------------------------------------------------------------------------- */
+
+.kb-glow {
     position: absolute;
     inset: 0;
     border-radius: inherit;
     pointer-events: none;
-    z-index: 2;
 
     opacity: 0;
     transition: opacity 120ms ease;
 
-    background: radial-gradient(
-        closest-side,
-        rgba(239, 68, 68, 0) 62%,
-        rgba(239, 68, 68, 0.16) 82%,
-        rgba(239, 68, 68, 0.42) 100%
-    );
-
-    box-shadow:
-        inset 0 0 0 1px rgba(239, 68, 68, 0.95),
-        inset 0 0 10px rgba(239, 68, 68, 0.35),
-        inset 0 0 22px rgba(239, 68, 68, 0.18);
+    /* Rectangle edge glow: 4 linear gradients that fade inward */
+    background-image:
+        linear-gradient(to bottom, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px),
+        linear-gradient(to top, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px),
+        linear-gradient(to right, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px),
+        linear-gradient(to left, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px);
+    background-repeat: no-repeat;
+    background-size: 100% 26px, 100% 26px, 26px 100%, 26px 100%;
+    background-position: top, bottom, left, right;
 }
 
-/* ON while capturing */
+/* This glow hugs IMAGE bounds */
+.stream-glow {
+    z-index: 2;
+}
+
+/* This glow hugs VIEWPORT bounds (so native/1:1 still shows glow even when image edges are offscreen) */
+.capture-glow {
+    z-index: 3;
+    border-radius: 6px; /* matches kb-capture-layer */
+}
+
+/* Turn on the image-bounds glow whenever capturing */
 .kb-capture-layer[data-capturing='true'] .stream-glow {
     opacity: 1;
 }
 
-/* Optional: subtle focus hint (not capture) */
-.kb-capture-layer:focus-visible .stream-glow {
+/* Turn on the viewport-bounds glow ONLY for native mode (solves "no glow in 1:1 oversized") */
+.kb-capture-layer[data-capturing='true'][data-scale='native'] .capture-glow {
     opacity: 1;
-    background: none;
-    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.22);
+}
+
+/* (Optional) subtle focus hint, same rectangular glow but much weaker */
+.kb-capture-layer:focus-visible .capture-glow {
+    opacity: 1;
+    background-image:
+        linear-gradient(to bottom, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px),
+        linear-gradient(to top, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px),
+        linear-gradient(to right, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px),
+        linear-gradient(to left, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px);
+    background-size: 100% 22px, 100% 22px, 22px 100%, 22px 100%;
 }
 
 /* Bottom-center overlay indicator */
@@ -1303,7 +1268,6 @@ onBeforeUnmount(() => {
     z-index: 5;
 }
 
-/* Keep neutral styling (no red border/glow) */
 .kb-overlay-inner {
     display: inline-flex;
     align-items: center;
