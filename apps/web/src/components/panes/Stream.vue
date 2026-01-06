@@ -158,12 +158,16 @@
                             draggable="false"
                             @load="onStreamLoad"
                         />
-                        <!-- Glow that hugs the image bounds (works great for fit, fine for fill/stretch) -->
+                        <!-- Glow that hugs the image bounds -->
                         <div class="stream-glow kb-glow" aria-hidden="true"></div>
                     </div>
 
-                    <!-- Glow that hugs the VIEWPORT bounds (needed for native/1:1 when image edges are offscreen) -->
-                    <div class="capture-glow kb-glow" aria-hidden="true"></div>
+                    <!-- Native-only: glow that hugs the viewport bounds (image may be offscreen in 1:1) -->
+                    <div
+                        v-if="scaleMode === 'native'"
+                        class="capture-glow kb-glow"
+                        aria-hidden="true"
+                    ></div>
 
                     <!-- Bottom-center overlay -->
                     <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
@@ -424,7 +428,6 @@ const MODIFIER_CODES = new Set<string>([
 const heldModifiers = new Set<string>()
 
 // IMPORTANT: Capture availability is based on stream visibility only.
-// (WS being absent must not prevent capture visuals/behavior.)
 const canCapture = computed(() => enabled.value)
 
 function focusCaptureLayer(): boolean {
@@ -445,20 +448,13 @@ function focusCaptureLayer(): boolean {
 function armCaptureFromMouse() {
     if (!canCapture.value) return
 
-    // Best-effort: pick up WS if it connects late.
     refreshWsClient()
 
-    // Start capture immediately on click (do not rely solely on focus event).
     isCapturing.value = true
     armOnNextFocus.value = false
 
-    // Ensure the capture layer has focus so it receives keyboard events.
     const focused = focusCaptureLayer()
-
-    // If focus did not land, we still keep isCapturing=true so visuals show;
-    // but in normal operation the focus should land due to tabindex=0 + focus().
     if (!focused) {
-        // As a fallback, arm on next focus (e.g., if browser delays focus).
         armOnNextFocus.value = true
     }
 }
@@ -466,7 +462,6 @@ function armCaptureFromMouse() {
 function releaseCapture(opts?: { fromBlur?: boolean }) {
     const fromBlur = !!opts?.fromBlur
 
-    // Release any held modifiers so Win98 doesn't get "stuck keys"
     if (heldModifiers.size > 0) {
         const codes = Array.from(heldModifiers).sort()
         for (const code of codes) {
@@ -507,8 +502,6 @@ function onBlurCapture() {
 }
 
 function isReleaseCombo(e: KeyboardEvent): boolean {
-    // Release capture ONLY on Ctrl + Escape.
-    // Plain Escape must pass through to the PS/2 keyboard (Win98 uses it heavily).
     return e.code === 'Escape' && e.ctrlKey
 }
 
@@ -520,7 +513,6 @@ function blockBrowser(e: KeyboardEvent) {
 function onKeyDown(e: KeyboardEvent) {
     if (!isCapturing.value) return
 
-    // Always block browser shortcuts while capturing.
     if (isReleaseCombo(e)) {
         blockBrowser(e)
         releaseCapture()
@@ -533,9 +525,7 @@ function onKeyDown(e: KeyboardEvent) {
         return
     }
 
-    // Modifiers: hold on down, release on up.
     if (MODIFIER_CODES.has(code)) {
-        // Avoid repeated holds.
         if (!e.repeat && !heldModifiers.has(code)) {
             sendKey('hold', code, e.key)
             heldModifiers.add(code)
@@ -544,7 +534,6 @@ function onKeyDown(e: KeyboardEvent) {
         return
     }
 
-    // Non-modifiers: send a single "press" on keydown (including repeats).
     sendKey('press', code, e.key)
     blockBrowser(e)
 }
@@ -558,7 +547,6 @@ function onKeyUp(e: KeyboardEvent) {
         return
     }
 
-    // Only modifiers emit keyup traffic to the backend.
     if (MODIFIER_CODES.has(code) && heldModifiers.has(code)) {
         sendKey('release', code, e.key)
         heldModifiers.delete(code)
@@ -567,7 +555,6 @@ function onKeyUp(e: KeyboardEvent) {
     blockBrowser(e)
 }
 
-// If stream is hidden, release capture.
 watch(
     () => enabled.value,
     (v) => {
@@ -605,7 +592,6 @@ function updateFrameBox() {
         let w = cw
         let h = ch
 
-        // contain: whichever side constrains determines the other
         if (containerAr > ar) {
             h = ch
             w = Math.floor(h * ar)
@@ -623,7 +609,6 @@ function updateFrameBox() {
 
     if (scaleMode.value === 'native') {
         if (meta?.w && meta?.h) {
-            // true 1:1 pixels; allow overflow (capture layer clips)
             frameBox.value = { w: Math.max(1, Math.floor(meta.w)), h: Math.max(1, Math.floor(meta.h)) }
         } else {
             frameBox.value = null
@@ -631,7 +616,6 @@ function updateFrameBox() {
         return
     }
 
-    // fill / stretch: frame occupies full capture area
     frameBox.value = null
 }
 
@@ -661,7 +645,6 @@ const streamFrameStyle = computed(() => {
         return { width: '100%', height: '100%' }
     }
 
-    // fill / stretch
     return { width: '100%', height: '100%' }
 })
 
@@ -875,7 +858,6 @@ onBeforeUnmount(() => {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
 
-    /* Accent */
     --kb-accent: #ef4444;
     --kb-accent-rgb: 239, 68, 68;
 
@@ -887,7 +869,6 @@ onBeforeUnmount(() => {
     width: 100%;
 }
 
-/* Hotspot area for advanced controls button (top-right). */
 .stream-advanced-hotspot {
     position: absolute;
     top: 0;
@@ -898,7 +879,6 @@ onBeforeUnmount(() => {
     z-index: 30;
 }
 
-/* Gear button */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -930,7 +910,6 @@ onBeforeUnmount(() => {
     transform: translateY(-1px);
 }
 
-/* Slide-fade transition (for controls panel) */
 .slide-fade-enter-active,
 .slide-fade-leave-active {
     transition: opacity 180ms ease, transform 180ms ease;
@@ -941,14 +920,12 @@ onBeforeUnmount(() => {
     transform: translateY(-6px);
 }
 
-/* Panel container */
 .controls-panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
 }
 
-/* Toolbar */
 .toolbar {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -1033,7 +1010,6 @@ onBeforeUnmount(() => {
     background: #1a1a1a;
 }
 
-/* Health panel */
 .health-panel {
     margin-top: 4px;
     padding: 6px 8px;
@@ -1117,7 +1093,6 @@ onBeforeUnmount(() => {
     opacity: 0.7;
 }
 
-/* Main viewport */
 .viewport {
     position: relative;
     flex: 1;
@@ -1144,7 +1119,6 @@ onBeforeUnmount(() => {
     overflow: hidden;
 }
 
-/* Capture layer wraps the stream so it can receive focus + key events */
 .kb-capture-layer {
     position: relative;
     flex: 1;
@@ -1163,7 +1137,6 @@ onBeforeUnmount(() => {
     border-radius: 6px;
 }
 
-/* Stream frame (image bounds for fit; full viewport for fill/stretch; oversized for native) */
 .stream-frame {
     position: relative;
     display: inline-flex;
@@ -1188,7 +1161,6 @@ onBeforeUnmount(() => {
     image-rendering: auto;
 }
 
-/* object-fit per mode */
 .stream-img[data-scale='fit'] {
     object-fit: contain;
 }
@@ -1202,10 +1174,7 @@ onBeforeUnmount(() => {
     object-fit: none;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Glow (RECTANGULAR inner glow; NO border ring)                              */
-/* -------------------------------------------------------------------------- */
-
+/* Rectangular inner glow; no border ring */
 .kb-glow {
     position: absolute;
     inset: 0;
@@ -1215,50 +1184,51 @@ onBeforeUnmount(() => {
     opacity: 0;
     transition: opacity 120ms ease;
 
-    /* Rectangle edge glow: 4 linear gradients that fade inward */
     background-image:
-        linear-gradient(to bottom, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px),
-        linear-gradient(to top, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px),
-        linear-gradient(to right, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px),
-        linear-gradient(to left, rgba(var(--kb-accent-rgb), 0.32), rgba(var(--kb-accent-rgb), 0) 26px);
+        linear-gradient(
+            to bottom,
+            rgba(var(--kb-accent-rgb), 0.32),
+            rgba(var(--kb-accent-rgb), 0) 26px
+        ),
+        linear-gradient(
+            to top,
+            rgba(var(--kb-accent-rgb), 0.32),
+            rgba(var(--kb-accent-rgb), 0) 26px
+        ),
+        linear-gradient(
+            to right,
+            rgba(var(--kb-accent-rgb), 0.32),
+            rgba(var(--kb-accent-rgb), 0) 26px
+        ),
+        linear-gradient(
+            to left,
+            rgba(var(--kb-accent-rgb), 0.32),
+            rgba(var(--kb-accent-rgb), 0) 26px
+        );
     background-repeat: no-repeat;
     background-size: 100% 26px, 100% 26px, 26px 100%, 26px 100%;
     background-position: top, bottom, left, right;
 }
 
-/* This glow hugs IMAGE bounds */
+/* image-bounds glow */
 .stream-glow {
     z-index: 2;
 }
 
-/* This glow hugs VIEWPORT bounds (so native/1:1 still shows glow even when image edges are offscreen) */
+/* viewport-bounds glow (native only) */
 .capture-glow {
     z-index: 3;
-    border-radius: 6px; /* matches kb-capture-layer */
+    border-radius: 6px;
 }
 
-/* Turn on the image-bounds glow whenever capturing */
+/* on while capturing */
 .kb-capture-layer[data-capturing='true'] .stream-glow {
     opacity: 1;
 }
-
-/* Turn on the viewport-bounds glow ONLY for native mode (solves "no glow in 1:1 oversized") */
-.kb-capture-layer[data-capturing='true'][data-scale='native'] .capture-glow {
+.kb-capture-layer[data-capturing='true'] .capture-glow {
     opacity: 1;
 }
 
-/* (Optional) subtle focus hint, same rectangular glow but much weaker */
-.kb-capture-layer:focus-visible .capture-glow {
-    opacity: 1;
-    background-image:
-        linear-gradient(to bottom, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px),
-        linear-gradient(to top, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px),
-        linear-gradient(to right, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px),
-        linear-gradient(to left, rgba(var(--kb-accent-rgb), 0.12), rgba(var(--kb-accent-rgb), 0) 22px);
-    background-size: 100% 22px, 100% 22px, 22px 100%, 22px 100%;
-}
-
-/* Bottom-center overlay indicator */
 .kb-overlay {
     position: absolute;
     left: 50%;
@@ -1285,7 +1255,6 @@ onBeforeUnmount(() => {
     font-weight: 700;
 }
 
-/* Placeholder when stream is disabled */
 .viewport-placeholder {
     flex: 1;
     display: flex;
