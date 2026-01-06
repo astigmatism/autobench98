@@ -207,6 +207,7 @@ export class PS2KeyboardService {
         await this.sendAction(evt.action, scan, {
           code: evt.code,
           key: evt.key,
+          requestedBy: evt.requestedBy,
         })
       },
     })
@@ -645,7 +646,7 @@ export class PS2KeyboardService {
   private async sendAction(
     action: KeyboardAction,
     scan: PS2ScanCode,
-    meta?: { code?: string; key?: string }
+    meta?: { code?: string; key?: string; requestedBy?: string }
   ): Promise<void> {
     const wire = `${action} ${formatWireScanCode(scan.prefix, scan.code)}`
     await this.writeLine(wire)
@@ -669,7 +670,9 @@ export class PS2KeyboardService {
         identity,
         scan,
         wire,
-        // Intentionally omit opId/requestedBy from this event to keep logs clean.
+        // For modifiers, mods is optional; leave it undefined to avoid noise.
+        opId: this.activeOp?.id,
+        requestedBy: meta?.requestedBy ?? this.activeOp?.requestedBy,
       })
       return
     }
@@ -682,7 +685,6 @@ export class PS2KeyboardService {
     const logicalAction: KeyboardAction =
       action === 'hold' ? 'press' : action
 
-    const mods = this.modsSnapshot()
     this.events.publish({
       kind: 'keyboard-key-action',
       at: now(),
@@ -690,9 +692,9 @@ export class PS2KeyboardService {
       identity,
       scan,
       wire,
-      // Only include mods if non-empty to reduce payload/noise.
-      ...(mods.length > 0 ? { mods } : {}),
-      // Intentionally omit opId/requestedBy from this event to keep logs clean.
+      mods: this.modsSnapshot(),
+      opId: this.activeOp?.id,
+      requestedBy: meta?.requestedBy ?? this.activeOp?.requestedBy,
     })
   }
 
