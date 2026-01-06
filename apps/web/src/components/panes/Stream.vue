@@ -1069,9 +1069,7 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-
-    /* 🔑 FIX: do NOT clip the capture ring/glow */
-    overflow: visible;
+    overflow: hidden;
 }
 
 /* Capture layer wraps the stream image so it can receive focus + key events */
@@ -1083,50 +1081,34 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-
-    /* Keep stream contents clipped */
     overflow: hidden;
-
     outline: none;
     cursor: pointer;
     user-select: none;
-
-    /* Make the capture window feel like a distinct "surface" */
-    border-radius: 6px;
-}
-
-/* Draw the ring + glow as an overlay so it's always visible and consistent */
-.kb-capture-layer::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 120ms ease;
-}
-
-/* Red glow capture outline ONLY on the capture window */
-.kb-capture-layer[data-capturing='true']::after {
-    opacity: 1;
-    box-shadow:
-        inset 0 0 0 2px rgba(239, 68, 68, 0.9),
-        0 0 0 2px rgba(239, 68, 68, 0.8),
-        0 0 22px rgba(239, 68, 68, 0.45),
-        0 0 44px rgba(239, 68, 68, 0.22);
-}
-
-/* Optional: subtle focus ring when armed (doesn't imply capturing) */
-.kb-capture-layer:focus-visible::after {
-    opacity: 1;
-    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.35);
 }
 
 /* MJPEG stream image */
 .stream-img {
+    display: block;
     max-width: 100%;
     max-height: 100%;
     image-rendering: auto;
+
+    /* Keep it feeling like a "window" */
+    border-radius: 4px;
+
+    /* Smooth on/off when capture toggles */
+    transition: box-shadow 120ms ease, filter 120ms ease;
+}
+
+/* ✅ FAINT GLOW: apply ONLY to the actual stream window (the img) */
+.kb-capture-layer[data-capturing='true'] .stream-img {
+    /* Very light edge so it reads as a window */
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35);
+
+    /* Soft glow (not a hard outline) */
+    filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.30))
+        drop-shadow(0 0 22px rgba(239, 68, 68, 0.16));
 }
 
 /* Scale modes */
@@ -1159,13 +1141,13 @@ onBeforeUnmount(() => {
     z-index: 5;
 }
 
-/* Smaller overlay; single line only */
+/* Neutral/small overlay; no red border */
 .kb-overlay-inner {
     display: inline-flex;
     align-items: center;
     padding: 4px 10px;
     border-radius: 10px;
-    border: 1px solid rgba(239, 68, 68, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.18);
     background: rgba(2, 6, 23, 0.62);
     color: var(--panel-fg);
     font-size: 0.74rem;
