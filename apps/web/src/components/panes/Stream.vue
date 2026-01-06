@@ -1142,6 +1142,7 @@ onBeforeUnmount(() => {
     display: inline-flex;
     align-items: stretch;
     justify-content: stretch;
+    background-color: #000;
 
     border-radius: 6px;
     overflow: hidden;
@@ -1187,26 +1188,26 @@ onBeforeUnmount(() => {
     background-image:
         linear-gradient(
             to bottom,
-            rgba(var(--kb-accent-rgb), 0.32),
-            rgba(var(--kb-accent-rgb), 0) 26px
+            rgba(var(--kb-accent-rgb), 0.75),
+            rgba(var(--kb-accent-rgb), 0) 15px
         ),
         linear-gradient(
             to top,
-            rgba(var(--kb-accent-rgb), 0.32),
-            rgba(var(--kb-accent-rgb), 0) 26px
+            rgba(var(--kb-accent-rgb), 0.75),
+            rgba(var(--kb-accent-rgb), 0) 15px
         ),
         linear-gradient(
             to right,
-            rgba(var(--kb-accent-rgb), 0.32),
-            rgba(var(--kb-accent-rgb), 0) 26px
+            rgba(var(--kb-accent-rgb), 0.75),
+            rgba(var(--kb-accent-rgb), 0) 15px
         ),
         linear-gradient(
             to left,
-            rgba(var(--kb-accent-rgb), 0.32),
-            rgba(var(--kb-accent-rgb), 0) 26px
+            rgba(var(--kb-accent-rgb), 0.75),
+            rgba(var(--kb-accent-rgb), 0) 15px
         );
     background-repeat: no-repeat;
-    background-size: 100% 26px, 100% 26px, 26px 100%, 26px 100%;
+    background-size: 100% 15px, 100% 15px, 15px 100%, 15px 100%;
     background-position: top, bottom, left, right;
 }
 
@@ -1232,7 +1233,7 @@ onBeforeUnmount(() => {
 .kb-overlay {
     position: absolute;
     left: 50%;
-    bottom: 12px;
+    bottom: 5px;
     transform: translateX(-50%);
     pointer-events: none;
     z-index: 5;
