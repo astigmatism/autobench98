@@ -333,7 +333,6 @@ const reloadKey = ref(0)
 /* -------------------------------------------------------------------------- */
 
 const wsClientRef = ref<any | null>(null)
-const wsAvailable = computed(() => !!wsClientRef.value)
 
 function refreshWsClient() {
     wsClientRef.value = getRealtimeClient()
