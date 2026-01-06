@@ -133,7 +133,7 @@
             :data-kb-available="canCapture ? 'true' : 'false'"
         >
             <div v-if="enabled" class="viewport-inner">
-                <!-- Capture layer: click to arm, focus to capture -->
+                <!-- Capture layer: click the stream view to start capturing -->
                 <div
                     ref="captureRef"
                     class="kb-capture-layer"
@@ -340,6 +340,7 @@ function refreshWsClient() {
 }
 
 let wsRetryTimer: number | null = null
+let wsRetryStopTimer: number | null = null
 
 onMounted(() => {
     refreshWsClient()
@@ -354,8 +355,7 @@ onMounted(() => {
         refreshWsClient()
     }, 250)
 
-    // stop after 5s like the old pane; we also refresh again on capture start
-    window.setTimeout(() => {
+    wsRetryStopTimer = window.setTimeout(() => {
         if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
         wsRetryTimer = null
     }, 5000)
@@ -379,7 +379,8 @@ function trySend(obj: any): boolean {
 }
 
 function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: string) {
-    // Strict: capture UI is independent of WS; sending is best-effort.
+    // Strict: capture is UI/UX-driven by the stream view, not WS availability.
+    // Sending is best-effort.
     trySend({
         type: 'ps2-keyboard.command',
         payload: {
@@ -415,27 +416,43 @@ const MODIFIER_CODES = new Set<string>([
 // so we can release them on exit to avoid "stuck modifier" behavior.
 const heldModifiers = new Set<string>()
 
-// Strict: capture is available whenever the stream is visible.
+// IMPORTANT: Capture availability is based on stream visibility only.
+// (WS being absent must not prevent capture visuals/behavior.)
 const canCapture = computed(() => enabled.value)
 
-function focusCaptureLayer() {
-    captureRef.value?.focus()
+function focusCaptureLayer(): boolean {
+    const el = captureRef.value
+    if (!el) return false
+    try {
+        ;(el as any).focus?.({ preventScroll: true })
+    } catch {
+        try {
+            el.focus?.()
+        } catch {
+            // ignore
+        }
+    }
+    return document.activeElement === el
 }
 
 function armCaptureFromMouse() {
     if (!canCapture.value) return
 
-    // If WS comes up late, pick it up at the moment the user starts capture.
+    // Best-effort: pick up WS if it connects late.
     refreshWsClient()
 
-    armOnNextFocus.value = true
-    focusCaptureLayer()
+    // Start capture immediately on click (do not rely solely on focus event).
+    isCapturing.value = true
+    armOnNextFocus.value = false
 
-    // Belt + suspenders: if focus doesn't fire for any reason but we did focus successfully,
-    // start capturing immediately so visuals always show after click.
-    if (captureRef.value && document.activeElement === captureRef.value) {
-        isCapturing.value = true
-        armOnNextFocus.value = false
+    // Ensure the capture layer has focus so it receives keyboard events.
+    const focused = focusCaptureLayer()
+
+    // If focus did not land, we still keep isCapturing=true so visuals show;
+    // but in normal operation the focus should land due to tabindex=0 + focus().
+    if (!focused) {
+        // As a fallback, arm on next focus (e.g., if browser delays focus).
+        armOnNextFocus.value = true
     }
 }
 
@@ -469,7 +486,6 @@ function onFocusCapture() {
         return
     }
 
-    // If WS comes up late, pick it up on focus as well.
     refreshWsClient()
 
     if (armOnNextFocus.value) {
@@ -765,12 +781,16 @@ onBeforeUnmount(() => {
     }
 
     if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
+    if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
     wsRetryTimer = null
+    wsRetryStopTimer = null
 })
 </script>
 
 <style scoped>
 .stream-pane {
+    /* --pane-fg: readable for plain text on the pane background
+       --panel-fg: readable for text inside dark panels (fixed light color) */
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
 
@@ -782,6 +802,9 @@ onBeforeUnmount(() => {
     width: 100%;
 }
 
+/* Hotspot area for advanced controls button (top-right).
+   Only hovering this region will reveal the button.
+   z-index ensures it floats above pane content. */
 .stream-advanced-hotspot {
     position: absolute;
     top: 0;
@@ -792,6 +815,7 @@ onBeforeUnmount(() => {
     z-index: 30;
 }
 
+/* Gear button (same pattern as logs / CF pane) */
 .gear-btn {
     position: absolute;
     top: 6px;
@@ -812,6 +836,7 @@ onBeforeUnmount(() => {
     z-index: 31;
 }
 
+/* Only show button while hotspot is hovered */
 .stream-advanced-hotspot:hover .gear-btn {
     opacity: 1;
     visibility: visible;
@@ -823,6 +848,7 @@ onBeforeUnmount(() => {
     transform: translateY(-1px);
 }
 
+/* Slide-fade transition (for controls panel) */
 .slide-fade-enter-active,
 .slide-fade-leave-active {
     transition: opacity 180ms ease, transform 180ms ease;
@@ -833,12 +859,14 @@ onBeforeUnmount(() => {
     transform: translateY(-6px);
 }
 
+/* Panel container */
 .controls-panel {
     display: flex;
     flex-direction: column;
     gap: 8px;
 }
 
+/* Toolbar */
 .toolbar {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -847,17 +875,22 @@ onBeforeUnmount(() => {
     font-size: 14px;
 }
 
+/* Panel-styled controls keep panel foreground for readability */
 .panel-text span {
     color: var(--panel-fg);
 }
 
+/* Left/right areas */
 .toolbar .left {
     display: flex;
     align-items: center;
     gap: 12px;
     min-width: 0;
 }
+.toolbar .right {
+}
 
+/* Controls block */
 .toolbar .controls {
     --control-h: 30px;
     display: flex;
@@ -866,6 +899,7 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
 }
 
+/* Select + labels (panel) */
 .select {
     display: inline-flex;
     align-items: center;
@@ -886,6 +920,7 @@ onBeforeUnmount(() => {
     line-height: var(--control-h);
 }
 
+/* Checkbox (panel style) */
 .checkbox.panel {
     display: inline-flex;
     align-items: center;
@@ -905,6 +940,7 @@ onBeforeUnmount(() => {
     color: var(--panel-fg);
 }
 
+/* Buttons (panel) */
 .btn {
     padding: 0 12px;
     border-radius: 6px;
@@ -923,6 +959,7 @@ onBeforeUnmount(() => {
     background: #1a1a1a;
 }
 
+/* Health panel */
 .health-panel {
     margin-top: 4px;
     padding: 6px 8px;
@@ -1006,6 +1043,7 @@ onBeforeUnmount(() => {
     opacity: 0.7;
 }
 
+/* Main viewport */
 .viewport {
     position: relative;
     flex: 1;
@@ -1019,16 +1057,19 @@ onBeforeUnmount(() => {
     justify-content: stretch;
 }
 
+/* Background mode: pane vs black */
 .viewport[data-bg='pane'] {
     background: transparent;
     border-color: transparent;
 }
 
+/* Keyboard capturing outline (must remain visible even in bg='pane') */
 .viewport[data-kb-capturing='true'] {
     border-color: #38bdf8;
     box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
 }
 
+/* Inner container centers the stream visually */
 .viewport-inner {
     flex: 1;
     display: flex;
@@ -1037,6 +1078,7 @@ onBeforeUnmount(() => {
     overflow: hidden;
 }
 
+/* Capture layer wraps the stream image so it can receive focus + key events */
 .kb-capture-layer {
     position: relative;
     flex: 1;
@@ -1051,12 +1093,14 @@ onBeforeUnmount(() => {
     user-select: none;
 }
 
+/* MJPEG stream image */
 .stream-img {
     max-width: 100%;
     max-height: 100%;
     image-rendering: auto;
 }
 
+/* Scale modes */
 .stream-img[data-scale='fit'] {
     object-fit: contain;
 }
@@ -1076,6 +1120,7 @@ onBeforeUnmount(() => {
     object-fit: contain;
 }
 
+/* Bottom-center overlay indicator */
 .kb-overlay {
     position: absolute;
     left: 50%;
@@ -1115,6 +1160,7 @@ onBeforeUnmount(() => {
     font-weight: 700;
 }
 
+/* Placeholder when stream is disabled */
 .viewport-placeholder {
     flex: 1;
     display: flex;
