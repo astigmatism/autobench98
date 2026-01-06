@@ -146,14 +146,18 @@
                     @keydown="onKeyDown"
                     @keyup="onKeyUp"
                 >
-                    <img
-                        :key="reloadKey"
-                        class="stream-img"
-                        :data-scale="scaleMode"
-                        :src="STREAM_ENDPOINT"
-                        alt="Test machine stream"
-                        draggable="false"
-                    />
+                    <!-- ✅ Wrapper + overlay ABOVE the MJPEG pixels -->
+                    <div class="stream-frame" :data-scale="scaleMode">
+                        <img
+                            :key="reloadKey"
+                            class="stream-img"
+                            :data-scale="scaleMode"
+                            :src="STREAM_ENDPOINT"
+                            alt="Test machine stream"
+                            draggable="false"
+                        />
+                        <div class="stream-glow" aria-hidden="true"></div>
+                    </div>
 
                     <!-- Bottom-center overlay -->
                     <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
@@ -1094,8 +1098,8 @@ onBeforeUnmount(() => {
 
 /* -------------------------------------------------------------------------- */
 /*  Stream frame + internal glow overlay                                      */
-/*  - Overlay is ABOVE pixels (so it works on MJPEG stream)                   */
-/*  - Overlay is INSET only (so no external clipping issues)                  */
+/*  - Glow is ABOVE pixels (so it works on MJPEG stream)                      */
+/*  - Glow is INSET only (no exterior clipping problems)                      */
 /*  - Frame sizing varies by scaleMode so glow matches the visible image      */
 /* -------------------------------------------------------------------------- */
 
@@ -1109,7 +1113,7 @@ onBeforeUnmount(() => {
     max-height: 100%;
 
     border-radius: 6px;
-    overflow: hidden; /* ensures inset glow stays clean at corners */
+    overflow: hidden;
 }
 
 /* Scale mode sizing for the frame */
@@ -1125,7 +1129,7 @@ onBeforeUnmount(() => {
     height: auto;
 }
 
-/* The stream itself (always under the overlay) */
+/* The stream itself (always under the glow) */
 .stream-img {
     display: block;
     position: relative;
@@ -1135,7 +1139,7 @@ onBeforeUnmount(() => {
     image-rendering: auto;
 }
 
-/* Fit: shrink-wrap to the image, constrained by capture bounds */
+/* Fit */
 .stream-img[data-scale='fit'] {
     width: auto;
     height: auto;
@@ -1144,21 +1148,21 @@ onBeforeUnmount(() => {
     object-fit: contain;
 }
 
-/* Fill: cover the full window */
+/* Fill */
 .stream-img[data-scale='fill'] {
     width: 100%;
     height: 100%;
     object-fit: cover;
 }
 
-/* Stretch: fill the window, distort aspect */
+/* Stretch */
 .stream-img[data-scale='stretch'] {
     width: 100%;
     height: 100%;
     object-fit: fill;
 }
 
-/* Native: 1:1 pixels (may overflow; capture layer clips) */
+/* Native */
 .stream-img[data-scale='native'] {
     width: auto;
     height: auto;
@@ -1167,9 +1171,8 @@ onBeforeUnmount(() => {
     object-fit: none;
 }
 
-/* Internal glow overlay: ABOVE the stream pixels, inset-only */
-.stream-frame::after {
-    content: '';
+/* Glow overlay element (ABOVE stream pixels) */
+.stream-glow {
     position: absolute;
     inset: 0;
     border-radius: inherit;
@@ -1178,17 +1181,6 @@ onBeforeUnmount(() => {
 
     opacity: 0;
     transition: opacity 120ms ease;
-}
-
-/* Strong, thin INNER glow (edge-heavy, tapers inward) when capturing */
-.kb-capture-layer[data-capturing='true'] .stream-frame::after {
-    opacity: 1;
-
-    /* thin hard ring + soft taper */
-    box-shadow:
-        inset 0 0 0 1px rgba(239, 68, 68, 0.95),
-        inset 0 0 10px rgba(239, 68, 68, 0.35),
-        inset 0 0 22px rgba(239, 68, 68, 0.18);
 
     /* edge-weighted glow that fades toward the center */
     background: radial-gradient(
@@ -1197,13 +1189,24 @@ onBeforeUnmount(() => {
         rgba(239, 68, 68, 0.16) 82%,
         rgba(239, 68, 68, 0.42) 100%
     );
+
+    /* thin hard ring + soft taper inward */
+    box-shadow:
+        inset 0 0 0 1px rgba(239, 68, 68, 0.95),
+        inset 0 0 10px rgba(239, 68, 68, 0.35),
+        inset 0 0 22px rgba(239, 68, 68, 0.18);
+}
+
+/* ON while capturing */
+.kb-capture-layer[data-capturing='true'] .stream-glow {
+    opacity: 1;
 }
 
 /* Optional: subtle focus hint (not capture) */
-.kb-capture-layer:focus-visible .stream-frame::after {
+.kb-capture-layer:focus-visible .stream-glow {
     opacity: 1;
-    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.22);
     background: none;
+    box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.22);
 }
 
 /* Bottom-center overlay indicator */
