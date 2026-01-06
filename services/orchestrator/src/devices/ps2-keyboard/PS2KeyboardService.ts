@@ -80,11 +80,24 @@ export class PS2KeyboardService {
   private reconnectAttempts = 0
   private reconnectTimer: NodeJS.Timeout | null = null
 
-  // Used for parsing serial inbound lines for debug/telemetry without spamming.
+  // Used for parsing inbound serial into lines (debug/telemetry) safely.
   private readBuffer = ''
 
-  // Tracks keys held down (to suppress noisy "release" logs unless it was actually held).
-  private heldKeys = new Set<string>()
+  // Only track modifier keys as "held" for logging semantics.
+  private heldModifiers = new Set<string>()
+
+  // Modifier identification is intentionally explicit and conservative.
+  // If you need more modifier-like keys (e.g., CapsLock), add them here deliberately.
+  private static readonly MODIFIER_CODES = new Set<string>([
+    'ShiftLeft',
+    'ShiftRight',
+    'ControlLeft',
+    'ControlRight',
+    'AltLeft',
+    'AltRight',
+    'MetaLeft',
+    'MetaRight',
+  ])
 
   constructor(
     cfg: PS2KeyboardConfig,
@@ -110,7 +123,7 @@ export class PS2KeyboardService {
     this.phase = 'disconnected'
     this.identified = false
     this.power = 'unknown'
-    this.heldKeys.clear()
+    this.heldModifiers.clear()
     this.readBuffer = ''
   }
 
@@ -194,7 +207,6 @@ export class PS2KeyboardService {
         await this.sendAction(evt.action, scan, {
           code: evt.code,
           key: evt.key,
-          requestedBy: evt.requestedBy,
         })
       },
     })
@@ -389,7 +401,7 @@ export class PS2KeyboardService {
     this.port = port
     this.reconnectAttempts = 0
     this.readBuffer = ''
-    this.heldKeys.clear()
+    this.heldModifiers.clear()
 
     this.events.publish({
       kind: 'keyboard-device-connected',
@@ -415,7 +427,7 @@ export class PS2KeyboardService {
     const port = this.port
     this.port = null
     this.identified = false
-    this.heldKeys.clear()
+    this.heldModifiers.clear()
     this.readBuffer = ''
 
     if (port && port.isOpen) {
@@ -490,8 +502,15 @@ export class PS2KeyboardService {
     let buf = ''
 
     return new Promise<string>((resolve, reject) => {
-      const onData = (chunk: string) => {
-        buf += chunk
+      if (!this.port) {
+        reject(new Error('port not open'))
+        return
+      }
+
+      const port = this.port
+
+      const onData = (data: Buffer) => {
+        buf += data.toString('utf8')
         const lines = buf.split(/\r?\n/)
         buf = lines.pop() ?? ''
         for (const l of lines) {
@@ -504,27 +523,25 @@ export class PS2KeyboardService {
         }
       }
 
-      const onTimeout = () => {
-        cleanup()
-        reject(new Error('identify timeout'))
-      }
-
       const cleanup = () => {
-        this.port?.off('data', onData as any)
+        port.off('data', onData)
       }
 
-      this.port!.on('data', onData as any)
+      port.on('data', onData)
 
       const tick = () => {
-        if (now() - start >= timeoutMs) onTimeout()
-        else setTimeout(tick, 25)
+        if (now() - start >= timeoutMs) {
+          cleanup()
+          reject(new Error('identify timeout'))
+        } else {
+          setTimeout(tick, 25)
+        }
       }
       tick()
     })
   }
 
   private handleData(chunk: string): void {
-    // Parse into lines; avoid spamming logs for every raw chunk.
     this.readBuffer += chunk
     const lines = this.readBuffer.split(/\r?\n/)
     this.readBuffer = lines.pop() ?? ''
@@ -534,12 +551,12 @@ export class PS2KeyboardService {
       if (!line) continue
 
       // Arduino contract: `success:` is ack; `debug:` is telemetry.
-      // We keep telemetry + unknown lines; suppress `success:` by default to reduce noise.
+      // Keep telemetry + unknown lines; suppress `success:` by default to reduce noise.
       if (line.startsWith('success:')) continue
 
-      if (line.startsWith('debug:') || true) {
-        // Keep debug and unknown/unclassified lines (useful when diagnosing protocol issues).
-        // NOTE: Plugin-level logging can choose to ignore these events.
+      if (line.startsWith('debug:') || !line.startsWith('debug:')) {
+        // Publish debug telemetry lines and unknown/unclassified lines.
+        // Plugin logging can choose to ignore these events.
         this.events.publish({
           kind: 'keyboard-debug-line',
           at: now(),
@@ -610,46 +627,72 @@ export class PS2KeyboardService {
     return null
   }
 
-  private keyToken(identity: KeyIdentity, scan: PS2ScanCode): string {
-    // Prefer stable KeyboardEvent.code when available; otherwise fall back to scan bytes.
+  private isModifier(identity: KeyIdentity): boolean {
+    return !!identity.code && PS2KeyboardService.MODIFIER_CODES.has(identity.code)
+  }
+
+  private tokenFor(identity: KeyIdentity, scan: PS2ScanCode): string {
     if (identity.code) return identity.code
     const prefix = scan.prefix ?? 0x00
     return `${prefix.toString(16).padStart(2, '0')}:${scan.code.toString(16).padStart(2, '0')}`
   }
 
+  private modsSnapshot(): string[] {
+    // Stable ordering makes log diffing easier.
+    return Array.from(this.heldModifiers).sort()
+  }
+
   private async sendAction(
     action: KeyboardAction,
     scan: PS2ScanCode,
-    meta?: { code?: string; key?: string; requestedBy?: string }
+    meta?: { code?: string; key?: string }
   ): Promise<void> {
     const wire = `${action} ${formatWireScanCode(scan.prefix, scan.code)}`
     await this.writeLine(wire)
 
     const identity: KeyIdentity = { code: meta?.code, key: meta?.key }
-    const token = this.keyToken(identity, scan)
+    const token = this.tokenFor(identity, scan)
+    const isMod = this.isModifier(identity)
 
-    // Noise control:
-    // - press / hold: always emit
-    // - release: emit only if we previously saw a hold for the same key token
-    if (action === 'hold') {
-      this.heldKeys.add(token)
-    } else if (action === 'release') {
-      if (!this.heldKeys.has(token)) {
-        // Still send the release command, but suppress the activity event/log noise.
-        return
-      }
-      this.heldKeys.delete(token)
+    // Logging semantics:
+    // - Modifiers: log hold/release as mod down/up.
+    // - Non-modifiers: treat a keydown (`hold`) as a logical `press` for logs,
+    //   and suppress the corresponding non-modifier release logs.
+    if (isMod) {
+      if (action === 'hold') this.heldModifiers.add(token)
+      if (action === 'release') this.heldModifiers.delete(token)
+
+      this.events.publish({
+        kind: 'keyboard-key-action',
+        at: now(),
+        action,
+        identity,
+        scan,
+        wire,
+        // Intentionally omit opId/requestedBy from this event to keep logs clean.
+      })
+      return
     }
 
+    if (action === 'release') {
+      // Suppress non-modifier keyup noise.
+      return
+    }
+
+    const logicalAction: KeyboardAction =
+      action === 'hold' ? 'press' : action
+
+    const mods = this.modsSnapshot()
     this.events.publish({
       kind: 'keyboard-key-action',
       at: now(),
-      action,
+      action: logicalAction,
       identity,
       scan,
       wire,
-      opId: this.activeOp?.id,
-      requestedBy: meta?.requestedBy ?? this.activeOp?.requestedBy,
+      // Only include mods if non-empty to reduce payload/noise.
+      ...(mods.length > 0 ? { mods } : {}),
+      // Intentionally omit opId/requestedBy from this event to keep logs clean.
     })
   }
 

@@ -345,12 +345,17 @@ export type PS2KeyboardEvent =
     }
   | {
       /**
-       * High-signal keyboard activity emitted by the service.
+       * High-signal keyboard activity intended for *human readable* logs.
        *
-       * NOTE:
-       * - press and hold are always emitted after the wire command is written
-       * - release is emitted only when it corresponds to a previously-held key
-       *   (to reduce noise from incidental keyup events)
+       * Semantics:
+       * - For non-modifier keys, panes often send keydown as `hold` and keyup as `release`.
+       *   To reduce noise, the service may publish `action: "press"` for those keydown
+       *   events and suppress the corresponding non-modifier releases.
+       * - For modifier keys (Shift/Ctrl/Alt/Meta left/right), the service publishes:
+       *   - `hold`  => modifier down
+       *   - `release` => modifier up
+       *
+       * `mods` captures modifiers held at the time of a non-modifier "press".
        */
       kind: 'keyboard-key-action'
       at: number
@@ -358,6 +363,8 @@ export type PS2KeyboardEvent =
       identity: KeyIdentity
       scan: PS2ScanCode
       wire: string
+      /** Modifier codes/tokens held down at the time of a non-modifier press. */
+      mods?: string[]
       opId?: string
       requestedBy?: string
     }
