@@ -137,9 +137,11 @@
                 <div
                     ref="captureRef"
                     class="kb-capture-layer"
-                    tabindex="0"
+                    :class="{ 'kb-capture-layer--disabled': !canCapture }"
+                    :tabindex="canCapture ? 0 : -1"
                     role="button"
                     :aria-pressed="isCapturing ? 'true' : 'false'"
+                    :aria-disabled="canCapture ? 'false' : 'true'"
                     :data-capturing="isCapturing ? 'true' : 'false'"
                     @mousedown.prevent="armCaptureFromMouse"
                     @focus="onFocusCapture"
@@ -361,13 +363,6 @@ onMounted(() => {
     }, 5000)
 })
 
-onBeforeUnmount(() => {
-    if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
-    if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
-    wsRetryTimer = null
-    wsRetryStopTimer = null
-})
-
 function trySend(obj: any): boolean {
     const ws = wsClientRef.value
     if (!ws) return false
@@ -488,7 +483,6 @@ function onKeyDown(e: KeyboardEvent) {
     if (!isCapturing.value) return
 
     // Always block browser shortcuts while capturing.
-    // (This also stops the page from handling Escape, Backspace navigation, etc.)
     if (isReleaseCombo(e)) {
         blockBrowser(e)
         releaseCapture()
@@ -512,7 +506,7 @@ function onKeyDown(e: KeyboardEvent) {
         return
     }
 
-    // Non-modifiers: log/send a single "press" on keydown (including repeats).
+    // Non-modifiers: send a single "press" on keydown (including repeats).
     sendKey('press', code, e.key)
     blockBrowser(e)
 }
@@ -754,6 +748,18 @@ function onEnabledChange() {
 function reloadStream() {
     reloadKey.value++
 }
+
+onBeforeUnmount(() => {
+    // Ensure we always drop capture and release any held modifiers on teardown.
+    if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0) {
+        releaseCapture()
+    }
+
+    if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
+    if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
+    wsRetryTimer = null
+    wsRetryStopTimer = null
+})
 </script>
 
 <style scoped>
@@ -1060,6 +1066,10 @@ function reloadStream() {
     outline: none;
     cursor: pointer;
     user-select: none;
+}
+
+.kb-capture-layer--disabled {
+    cursor: default;
 }
 
 /* MJPEG stream image */
