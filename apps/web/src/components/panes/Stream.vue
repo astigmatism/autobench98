@@ -129,7 +129,6 @@
         <div
             class="viewport"
             :data-bg="bgMode"
-            :data-kb-capturing="isCapturing ? 'true' : 'false'"
             :data-kb-available="canCapture ? 'true' : 'false'"
         >
             <div v-if="enabled" class="viewport-inner">
@@ -159,8 +158,7 @@
                     <!-- Bottom-center overlay -->
                     <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
                         <div class="kb-overlay-inner">
-                            <span class="kb-pill">CAPTURING INPUT</span>
-                            <span class="kb-hint">Press <b>Ctrl+Esc</b> to cancel</span>
+                            <span class="kb-hint">Press <b>Ctrl+Esc</b> to cancel input capture</span>
                         </div>
                     </div>
                 </div>
@@ -793,6 +791,9 @@ onBeforeUnmount(() => {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
 
+    /* Keyboard capture accent (red) */
+    --kb-accent: #ef4444;
+
     position: relative;
     display: flex;
     flex-direction: column;
@@ -1062,12 +1063,6 @@ onBeforeUnmount(() => {
     border-color: transparent;
 }
 
-/* Keyboard capturing outline (must remain visible even in bg='pane') */
-.viewport[data-kb-capturing='true'] {
-    border-color: #38bdf8;
-    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
-}
-
 /* Inner container centers the stream visually */
 .viewport-inner {
     flex: 1;
@@ -1090,6 +1085,21 @@ onBeforeUnmount(() => {
     outline: none;
     cursor: pointer;
     user-select: none;
+
+    /* Make the capture window feel like a distinct "surface" */
+    border-radius: 6px;
+}
+
+/* Red glow capture outline ONLY on the capture window (not the pane/viewport) */
+.kb-capture-layer[data-capturing='true'] {
+    box-shadow:
+        0 0 0 2px rgba(239, 68, 68, 0.75),
+        0 0 18px rgba(239, 68, 68, 0.35);
+}
+
+/* Optional: subtle focus ring when armed (doesn't imply capturing) */
+.kb-capture-layer:focus-visible {
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35);
 }
 
 /* MJPEG stream image */
@@ -1129,30 +1139,18 @@ onBeforeUnmount(() => {
     z-index: 5;
 }
 
+/* Smaller overlay; single line only */
 .kb-overlay-inner {
     display: inline-flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 12px;
-    border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.55);
-    background: rgba(2, 6, 23, 0.78);
+    padding: 4px 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(239, 68, 68, 0.55);
+    background: rgba(2, 6, 23, 0.62);
     color: var(--panel-fg);
-    font-size: 0.78rem;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+    font-size: 0.74rem;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
     backdrop-filter: blur(2px);
-}
-
-.kb-pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 10px;
-    border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.7);
-    background: rgba(56, 189, 248, 0.12);
-    font-size: 0.72rem;
-    letter-spacing: 0.02em;
-    font-weight: 600;
 }
 
 .kb-hint b {
