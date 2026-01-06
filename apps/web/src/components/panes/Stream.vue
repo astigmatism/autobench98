@@ -146,8 +146,8 @@
                     @keydown="onKeyDown"
                     @keyup="onKeyUp"
                 >
-                    <!-- ✅ Wrapper + overlay ABOVE the MJPEG pixels -->
-                    <div class="stream-frame" :data-scale="scaleMode">
+                    <!-- ✅ Frame box sized per mode so FIT != FILL and glow hugs visible image bounds -->
+                    <div class="stream-frame" :data-scale="scaleMode" :style="streamFrameStyle">
                         <img
                             :key="reloadKey"
                             class="stream-img"
@@ -155,6 +155,7 @@
                             :src="STREAM_ENDPOINT"
                             alt="Test machine stream"
                             draggable="false"
+                            @load="onStreamLoad"
                         />
                         <div class="stream-glow" aria-hidden="true"></div>
                     </div>
@@ -570,6 +571,122 @@ watch(
 )
 
 /* -------------------------------------------------------------------------- */
+/*  Stream sizing (fix FIT)                                                   */
+/*  - FIT needs a real box size; MJPEG streams can be flaky with intrinsic     */
+/*    sizing, so we compute a contain box from capture bounds + stream AR.     */
+/*  - GLOW hugs the stream-frame bounds (not the pane bounds).                */
+/* -------------------------------------------------------------------------- */
+
+type StreamMeta = { w: number; h: number; ar: number }
+const streamMeta = ref<StreamMeta | null>(null)
+const frameBox = ref<{ w: number; h: number } | null>(null)
+
+function clampInt(n: number, min: number, max: number): number {
+    if (!Number.isFinite(n)) return min
+    return Math.max(min, Math.min(max, Math.round(n)))
+}
+
+function updateFrameBox() {
+    const el = captureRef.value
+    if (!el) return
+
+    const r = el.getBoundingClientRect()
+    const cw = Math.max(0, Math.floor(r.width))
+    const ch = Math.max(0, Math.floor(r.height))
+    if (cw <= 0 || ch <= 0) return
+
+    const meta = streamMeta.value
+    const ar = meta?.ar && Number.isFinite(meta.ar) && meta.ar > 0 ? meta.ar : 4 / 3
+
+    if (scaleMode.value === 'fit') {
+        const containerAr = cw / ch
+        let w = cw
+        let h = ch
+
+        // contain: whichever side constrains determines the other
+        if (containerAr > ar) {
+            // container is wider than stream => height-limited
+            h = ch
+            w = Math.floor(h * ar)
+        } else {
+            // width-limited
+            w = cw
+            h = Math.floor(w / ar)
+        }
+
+        frameBox.value = {
+            w: clampInt(w, 1, cw),
+            h: clampInt(h, 1, ch),
+        }
+        return
+    }
+
+    if (scaleMode.value === 'native') {
+        if (meta?.w && meta?.h) {
+            // true 1:1 pixels; allow overflow (capture layer clips)
+            frameBox.value = { w: Math.max(1, Math.floor(meta.w)), h: Math.max(1, Math.floor(meta.h)) }
+        } else {
+            frameBox.value = null
+        }
+        return
+    }
+
+    // fill / stretch: frame occupies full capture area
+    frameBox.value = null
+}
+
+function onStreamLoad(e: Event) {
+    const img = e.target as HTMLImageElement | null
+    if (!img) return
+    const w = img.naturalWidth
+    const h = img.naturalHeight
+    if (w && h) {
+        streamMeta.value = { w, h, ar: w / h }
+    }
+    updateFrameBox()
+}
+
+const streamFrameStyle = computed(() => {
+    const mode = scaleMode.value
+
+    if (mode === 'fit') {
+        const b = frameBox.value
+        if (b) return { width: `${b.w}px`, height: `${b.h}px` }
+        // fallback until we have bounds
+        return { width: '100%', height: '100%' }
+    }
+
+    if (mode === 'native') {
+        const b = frameBox.value
+        if (b) return { width: `${b.w}px`, height: `${b.h}px` }
+        // fallback until we have natural size
+        return { width: '100%', height: '100%' }
+    }
+
+    // fill / stretch
+    return { width: '100%', height: '100%' }
+})
+
+let frameResizeObs: ResizeObserver | null = null
+
+onMounted(() => {
+    // Observe capture bounds so FIT stays correct when pane resizes
+    const el = captureRef.value
+    if (el && typeof ResizeObserver !== 'undefined') {
+        frameResizeObs = new ResizeObserver(() => updateFrameBox())
+        frameResizeObs.observe(el)
+    }
+
+    // One immediate attempt (works even before the stream loads; uses fallback AR)
+    updateFrameBox()
+})
+
+watch(
+    () => scaleMode.value,
+    () => updateFrameBox()
+)
+
+/* -------------------------------------------------------------------------- */
 /*  Per-pane persistence (localStorage + profile round-trip)                   */
 /* -------------------------------------------------------------------------- */
 
@@ -785,6 +902,9 @@ onBeforeUnmount(() => {
     if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
     wsRetryTimer = null
     wsRetryStopTimer = null
+
+    if (frameResizeObs) frameResizeObs.disconnect()
+    frameResizeObs = null
 })
 </script>
 
@@ -1096,78 +1216,44 @@ onBeforeUnmount(() => {
     border-radius: 6px;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Stream frame + internal glow overlay                                      */
-/*  - Glow is ABOVE pixels (so it works on MJPEG stream)                      */
-/*  - Glow is INSET only (no exterior clipping problems)                      */
-/*  - Frame sizing varies by scaleMode so glow matches the visible image      */
-/* -------------------------------------------------------------------------- */
-
+/* Stream frame (this is the box the glow hugs) */
 .stream-frame {
     position: relative;
     display: inline-flex;
-    align-items: center;
-    justify-content: center;
-
-    max-width: 100%;
-    max-height: 100%;
+    align-items: stretch;
+    justify-content: stretch;
 
     border-radius: 6px;
     overflow: hidden;
+
+    /* allow native to overflow capture layer (capture layer clips) */
+    flex: 0 0 auto;
 }
 
-/* Scale mode sizing for the frame */
-.stream-frame[data-scale='fill'],
-.stream-frame[data-scale='stretch'],
-.stream-frame[data-scale='native'] {
-    width: 100%;
-    height: 100%;
-}
-
-.stream-frame[data-scale='fit'] {
-    width: auto;
-    height: auto;
-}
-
-/* The stream itself (always under the glow) */
+/* Stream pixels */
 .stream-img {
     display: block;
     position: relative;
     z-index: 1;
 
+    width: 100%;
+    height: 100%;
+
     border-radius: inherit;
     image-rendering: auto;
 }
 
-/* Fit */
+/* Object-fit per mode */
 .stream-img[data-scale='fit'] {
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: 100%;
     object-fit: contain;
 }
-
-/* Fill */
 .stream-img[data-scale='fill'] {
-    width: 100%;
-    height: 100%;
     object-fit: cover;
 }
-
-/* Stretch */
 .stream-img[data-scale='stretch'] {
-    width: 100%;
-    height: 100%;
     object-fit: fill;
 }
-
-/* Native */
 .stream-img[data-scale='native'] {
-    width: auto;
-    height: auto;
-    max-width: none;
-    max-height: none;
     object-fit: none;
 }
 
@@ -1182,7 +1268,6 @@ onBeforeUnmount(() => {
     opacity: 0;
     transition: opacity 120ms ease;
 
-    /* edge-weighted glow that fades toward the center */
     background: radial-gradient(
         closest-side,
         rgba(239, 68, 68, 0) 62%,
@@ -1190,7 +1275,6 @@ onBeforeUnmount(() => {
         rgba(239, 68, 68, 0.42) 100%
     );
 
-    /* thin hard ring + soft taper inward */
     box-shadow:
         inset 0 0 0 1px rgba(239, 68, 68, 0.95),
         inset 0 0 10px rgba(239, 68, 68, 0.35),
