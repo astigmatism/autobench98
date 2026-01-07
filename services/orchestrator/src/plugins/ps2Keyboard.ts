@@ -3,11 +3,7 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
 
-import {
-    createLogger,
-    LogChannel,
-    type ClientLogBuffer,
-} from '@autobench98/logging'
+import { createLogger, LogChannel, type ClientLogBuffer } from '@autobench98/logging'
 
 import { PS2KeyboardService } from '../devices/ps2-keyboard/PS2KeyboardService.js'
 import type { PS2KeyboardEvent } from '../devices/ps2-keyboard/types.js'
@@ -81,11 +77,100 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
         return out
     }
 
+    // ---- Firmware-line enrichment (meaningful unknowns) --------------------
+
+    private decodeHostCommand(byte: number): string | null {
+        // This is a host->keyboard command decode table (not scan codes).
+        // It is intentionally conservative: only list bytes that are defined as commands
+        // and commonly appear during init sequences.
+        switch (byte) {
+            case 0xff: return 'RESET'
+            case 0xfe: return 'RESEND'
+            case 0xf2: return 'IDENTIFY'
+            case 0xed: return 'SET_LEDS'
+            case 0xee: return 'ECHO'
+            case 0xf0: return 'SET_SCAN_CODE_SET'
+            case 0xf3: return 'SET_TYPEMATIC_RATE_DELAY'
+            case 0xf4: return 'ENABLE_SCANNING'
+            case 0xf5: return 'DISABLE_SCANNING'
+            case 0xf6: return 'SET_DEFAULTS'
+            default: return null
+        }
+    }
+
+    private parseHexByte(s: string): number | null {
+        const t = s.trim().toLowerCase().replace(/^0x/, '')
+        if (!/^[0-9a-f]{1,2}$/.test(t)) return null
+        const n = Number.parseInt(t, 16)
+        if (!Number.isFinite(n) || n < 0 || n > 255) return null
+        return n
+    }
+
+    /**
+     * Convert Arduino sketch debug lines into *meaningful* messages:
+     *
+     * - "debug: keyboard sim recieved 0xNN" => (PS/2 host->kbd <decoded-name>|UNKNOWN_CMD_OR_DATA)
+     * - "debug: received unknown command NN" => (PS/2 host->kbd UNHANDLED_BY_FIRMWARE)
+     * - "debug: keyboard sim recieved unknown: NN" => (PS/2 read failed; value unreliable)
+     *
+     * Rationale:
+     * In the sketch you provided:
+     * - "recieved unknown: NN" is printed when keyboard.read(...) failed; NN is not trustworthy.
+     * - "received unknown command NN" is a real successfully-read byte that fell into default:.
+     */
+    private enrichFirmwareLine(rawLine: string): string {
+        const safe = this.fmtFirmwareLine(rawLine)
+
+        // 1) Read success line: "debug: keyboard sim recieved 0xff"
+        {
+            const m = rawLine.match(/^\s*debug:\s*keyboard sim recieved\s+0x([0-9a-fA-F]{1,2})\s*$/)
+                ?? rawLine.match(/^\s*debug:\s*keyboard sim recieved\s+0x([0-9a-fA-F]{1,2})\b/)
+            if (m) {
+                const b = this.parseHexByte(m[1])
+                if (b == null) return safe
+                const name = this.decodeHostCommand(b)
+                if (name) return `${safe} (PS/2 host->kbd ${name})`
+                return `${safe} (PS/2 host->kbd UNKNOWN_CMD_OR_DATA)`
+            }
+        }
+
+        // 2) "Unknown command" (real byte, unhandled in firmware):
+        //    "debug: received unknown command 2"
+        {
+            const m = rawLine.match(/^\s*debug:\s*received unknown command\s+([0-9a-fA-F]{1,2})\s*$/)
+                ?? rawLine.match(/^\s*debug:\s*received unknown command\s+([0-9a-fA-F]{1,2})\b/)
+            if (m) {
+                const b = this.parseHexByte(m[1])
+                if (b == null) return `${safe} (PS/2 host->kbd UNHANDLED_BY_FIRMWARE)`
+                const name = this.decodeHostCommand(b)
+                // Even if it is a known command byte (e.g., 0xFF), the sketch hit default:,
+                // so this indicates firmware-side classification mismatch.
+                if (name) return `${safe} (PS/2 host->kbd ${name}; UNHANDLED_BY_FIRMWARE)`
+                return `${safe} (PS/2 host->kbd UNHANDLED_BY_FIRMWARE)`
+            }
+        }
+
+        // 3) Read failure line: "debug: keyboard sim recieved unknown: ff"
+        {
+            const m = rawLine.match(/^\s*debug:\s*keyboard sim recieved unknown:\s*([0-9a-fA-F]{1,2})\s*$/)
+                ?? rawLine.match(/^\s*debug:\s*keyboard sim recieved unknown:\s*([0-9a-fA-F]{1,2})\b/)
+            if (m) {
+                const b = this.parseHexByte(m[1])
+                if (b == null) return `${safe} (PS/2 read failed; value unreliable)`
+                // Optionally show what it *would* decode to, but still mark as unreliable.
+                const name = this.decodeHostCommand(b)
+                if (name) return `${safe} (PS/2 read failed; value unreliable; looks like ${name})`
+                return `${safe} (PS/2 read failed; value unreliable)`
+            }
+        }
+
+        return safe
+    }
+
     publish(evt: PS2KeyboardEvent): void {
         switch (evt.kind) {
             /* ---------------- Lifecycle / identification ------------------ */
             case 'keyboard-device-identified': {
-                // Drop redundant ts/kind verbosity; keep useful fields.
                 this.logKb.info(`kind=${evt.kind} path=${evt.path} baud=${evt.baudRate}`)
                 break
             }
@@ -122,20 +207,16 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
 
             /* ---------------- Power -------------------------------------- */
             case 'keyboard-power-changed': {
-                // requestedBy intentionally omitted from logs.
                 this.logKb.info(`kind=${evt.kind} power=${evt.power}`)
                 break
             }
 
             /* ---------------- High-signal key activity -------------------- */
             case 'keyboard-key-action': {
-                // Desired format:
-                // kind=keyboard-key-action action=hold code=MetaLeft key=Meta scan=e0:1f
                 const code = evt.identity?.code ?? 'unknown'
                 const key = evt.identity?.key ?? 'unknown'
                 const scan = this.fmtScan(evt.scan as any)
 
-                // Keep it compact and consistent; no ts/opId/requestedBy/wire.
                 this.logKb.info(
                     `kind=${evt.kind} action=${evt.action} code=${code} key=${key} scan=${scan}`
                 )
@@ -144,12 +225,8 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
 
             /* ---------------- Firmware/Arduino-emitted sequence lines ------ */
             case 'keyboard-debug-line': {
-                // This is the missing “strict sequence” detail from the old application:
-                // e.g. "keyboard sim recieved 0xff", "handling reset command", "acknowledge", etc.
-                //
-                // Log the line itself (no extra prefixes) so the channel label + timestamp
-                // provide the structure, like the pre-existing app.
-                this.logKb.info(this.fmtFirmwareLine(evt.line))
+                // Make "unknowns" meaningful while preserving the original line.
+                this.logKb.info(this.enrichFirmwareLine(evt.line))
                 break
             }
 
@@ -231,14 +308,12 @@ const ps2KeyboardPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
         {
             publish(evt: PS2KeyboardEvent): void {
                 stateAdapter.handle(evt)
-                // Mirror into global AppState so panes can observe keyboard status.
                 updatePS2KeyboardSnapshot(stateAdapter.getState())
             },
         }
     )
 
     // 3) Instantiate service
-    // NOTE: service constructor is expected to accept { events } like other device services.
     const kb = new PS2KeyboardService(cfg, { events } as any)
 
     app.decorate('ps2Keyboard', kb)
