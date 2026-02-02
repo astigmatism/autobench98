@@ -5,10 +5,8 @@ export enum LogChannel {
     stream = 'stream',
     ocr = 'ocr',
     device = 'device',
-
-    // ✅ Keyboard-specific channel
     keyboard = 'keyboard',
-
+    message_bus = 'message-bus',
     benchmark = 'benchmark',
     websocket = 'websocket',
     app = 'app',
@@ -17,6 +15,7 @@ export enum LogChannel {
     serial_printer = 'serial-printer',
     atlona_controller = 'atlona-controller',
     cf_imager = 'cf-imager',
+    frontpanel = 'frontpanel',
 }
 
 export type ChannelColor =

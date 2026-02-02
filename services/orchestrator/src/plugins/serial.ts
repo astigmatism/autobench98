@@ -463,6 +463,27 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
           )
         }
       }
+
+      // 👉 Front panel wiring
+      if (kind === 'arduino.frontpanel' && (app as any).frontPanel) {
+        const fpSvc = (app as any).frontPanel as {
+          onDeviceIdentified: (info: {
+            id: string
+            path: string
+            baudRate?: number
+          }) => Promise<void> | void
+        }
+
+        try {
+          await fpSvc.onDeviceIdentified({ id, path, baudRate })
+        } catch (err) {
+          log.warn(
+            `frontPanel.onDeviceIdentified failed id=${id} path=${path} err="${
+              (err as Error).message
+            }"`
+          )
+        }
+      }
     }
   )
 
@@ -549,6 +570,23 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
       } catch (err) {
         log.warn(
           `ps2Keyboard.onDeviceLost failed id=${id} err="${
+            (err as Error).message
+          }"`
+        )
+      }
+    }
+
+    // 👉 Front panel lost wiring
+    if (kind === 'arduino.frontpanel' && (app as any).frontPanel) {
+      const fpSvc = (app as any).frontPanel as {
+        onDeviceLost: (info: { id: string }) => Promise<void> | void
+      }
+
+      try {
+        await fpSvc.onDeviceLost({ id })
+      } catch (err) {
+        log.warn(
+          `frontPanel.onDeviceLost failed id=${id} err="${
             (err as Error).message
           }"`
         )

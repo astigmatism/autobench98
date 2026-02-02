@@ -14,6 +14,9 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     // Keyboard-specific channel
     [LogChannel.keyboard]:        { emoji: '⌨️', color: 'cyan' },
 
+    // Message bus channel
+    [LogChannel.message_bus]:     { emoji: '🚌', color: 'cyan' },
+
     [LogChannel.benchmark]:       { emoji: '⏱️', color: 'green' },
     [LogChannel.websocket]:       { emoji: '🔗', color: 'cyan' },
     [LogChannel.app]:             { emoji: '📦', color: 'blue' },
@@ -25,6 +28,7 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     // Atlona controller-specific channel
     [LogChannel.atlona_controller]: { emoji: '📽️', color: 'purple' },
     [LogChannel.cf_imager]:       { emoji: '💾', color: 'cyan' },
+    [LogChannel.frontpanel]: { emoji: '⏻', color: 'red' },
 }
 
 export const ANSI: Record<ChannelColor, string> = {
@@ -47,10 +51,8 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.stream]:          30,
     [LogChannel.ocr]:             30,
     [LogChannel.device]:          30,
-
-    // ✅ Keyboard-specific channel
     [LogChannel.keyboard]:        30,
-
+    [LogChannel.message_bus]:     30,
     [LogChannel.benchmark]:       30,
     [LogChannel.websocket]:       30,
     [LogChannel.app]:             30,
@@ -59,4 +61,5 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.serial_printer]:  30,
     [LogChannel.atlona_controller]: 30,
     [LogChannel.cf_imager]:       30,
+    [LogChannel.frontpanel]:      30,
 }

@@ -48,7 +48,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'meter-device-identified': {
                 const { id, path, baudRate } = evt as any
                 this.logPm.info(
-                    `ts=${ts} kind=${evt.kind} id=${id ?? 'unknown'} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
+                    `kind=${evt.kind} id=${id ?? 'unknown'} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
                 )
                 break
             }
@@ -56,7 +56,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'meter-device-connected': {
                 const { path, baudRate } = evt as any
                 this.logPm.info(
-                    `ts=${ts} kind=${evt.kind} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
+                    `kind=${evt.kind} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
                 )
                 break
             }
@@ -64,7 +64,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'meter-device-disconnected': {
                 const { path, reason } = evt as any
                 this.logPm.warn(
-                    `ts=${ts} kind=${evt.kind} path=${path ?? 'unknown'} reason=${reason ?? 'unknown'}`
+                    `kind=${evt.kind} path=${path ?? 'unknown'} reason=${reason ?? 'unknown'}`
                 )
                 break
             }
@@ -72,7 +72,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'meter-device-lost': {
                 const { id } = evt as any
                 this.logPm.warn(
-                    `ts=${ts} kind=${evt.kind} id=${id ?? 'unknown'}`
+                    `kind=${evt.kind} id=${id ?? 'unknown'}`
                 )
                 break
             }
@@ -80,7 +80,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'recoverable-error': {
                 const { error } = evt as any
                 this.logPm.warn(
-                    `ts=${ts} kind=${evt.kind} error=${error ?? 'unknown'}`
+                    `kind=${evt.kind} error=${error ?? 'unknown'}`
                 )
                 break
             }
@@ -88,7 +88,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'fatal-error': {
                 const { error } = evt as any
                 this.logPm.error(
-                    `ts=${ts} kind=${evt.kind} error=${error ?? 'unknown'}`
+                    `kind=${evt.kind} error=${error ?? 'unknown'}`
                 )
                 break
             }
@@ -96,7 +96,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'recording-started': {
                 const { recorderId } = evt as any
                 this.logPm.info(
-                    `ts=${ts} kind=${evt.kind} recorderId=${recorderId ?? 'unknown'}`
+                    `kind=${evt.kind} recorderId=${recorderId ?? 'unknown'}`
                 )
                 break
             }
@@ -104,7 +104,7 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'recording-finished': {
                 const { recorderId } = evt as any
                 this.logPm.info(
-                    `ts=${ts} kind=${evt.kind} recorderId=${recorderId ?? 'unknown'}`
+                    `kind=${evt.kind} recorderId=${recorderId ?? 'unknown'}`
                 )
                 break
             }
@@ -112,26 +112,26 @@ class PowerMeterLoggerEventSink implements PowerMeterEventSink {
             case 'recording-cancelled': {
                 const { recorderId, reason } = evt as any
                 this.logPm.info(
-                    `ts=${ts} kind=${evt.kind} recorderId=${recorderId ?? 'unknown'} reason=${reason ?? 'unknown'}`
+                    `kind=${evt.kind} recorderId=${recorderId ?? 'unknown'} reason=${reason ?? 'unknown'}`
                 )
                 break
             }
 
             case 'meter-control-line': {
                 const line = (evt as any).line ?? ''
-                this.logPm.debug(`ts=${ts} kind=${evt.kind} line=${JSON.stringify(line)}`)
+                this.logPm.debug(`kind=${evt.kind} line=${JSON.stringify(line)}`)
                 break
             }
 
             case 'meter-unknown-line': {
                 const line = (evt as any).line ?? ''
-                this.logPm.debug(`ts=${ts} kind=${evt.kind} line=${JSON.stringify(line)}`)
+                this.logPm.debug(`kind=${evt.kind} line=${JSON.stringify(line)}`)
                 break
             }
 
             default: {
                 // Fallback for any future event kinds
-                this.logPm.info(`ts=${ts} kind=${(evt as any).kind ?? 'unknown'}`)
+                this.logPm.info(`kind=${(evt as any).kind ?? 'unknown'}`)
                 break
             }
         }

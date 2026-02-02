@@ -1,7 +1,5 @@
-// services/orchestrator/src/devices/ps2-keyboard/PS2KeyboardService.ts
-
 /* -------------------------------------------------------------------------- */
-/*  PS2KeyboardService                                                         */
+/*  PS2KeyboardService                                                        */
 /*                                                                            */
 /*  Responsibilities:                                                         */
 /*  - Own the serial port for the PS/2 keyboard Arduino                        */
@@ -36,6 +34,11 @@ import type {
 import { lookupScanCode } from './scancodes'
 import { sleep, now, makeOpId, formatWireScanCode } from './utils'
 
+// Message bus (orchestrator-internal)
+// NOTE: This import assumes the bus lives at services/orchestrator/src/core/events.
+// If your repo uses a different root, adjust this relative path.
+import type { Bus, Subscription, BusEvent } from '../../core/events'
+
 /* -------------------------------------------------------------------------- */
 /*  Internal operation model                                                   */
 /* -------------------------------------------------------------------------- */
@@ -57,10 +60,38 @@ interface QueuedOp {
 type DisconnectReason = 'io-error' | 'explicit-close' | 'unknown' | 'device-lost'
 
 /* -------------------------------------------------------------------------- */
+/*  Front panel -> bus contract (coordination only)                            */
+/* -------------------------------------------------------------------------- */
+
+type FrontPanelPowerState = 'on' | 'off' | 'unknown'
+
+interface FrontPanelPowerPayload {
+  state: FrontPanelPowerState
+  reason?: string
+}
+
+function parseFrontPanelPowerPayload(payload: unknown): FrontPanelPowerPayload | null {
+  if (!payload || typeof payload !== 'object') return null
+  const p = payload as Record<string, unknown>
+  const state = p.state
+  if (state !== 'on' && state !== 'off' && state !== 'unknown') return null
+  const reason = typeof p.reason === 'string' ? p.reason : undefined
+  return { state, reason }
+}
+
+function toKeyboardPowerState(s: FrontPanelPowerState): KeyboardPowerState {
+  // Safety: unknown is treated conservatively as off-equivalent for gating.
+  if (s === 'on') return 'on'
+  if (s === 'off') return 'off'
+  return 'unknown'
+}
+
+/* -------------------------------------------------------------------------- */
 
 export class PS2KeyboardService {
   private readonly cfg: PS2KeyboardConfig
   private readonly events: PS2KeyboardEventSink
+  private readonly bus?: Bus
 
   private deviceId: string | null = null
   private devicePath: string | null = null
@@ -94,6 +125,10 @@ export class PS2KeyboardService {
   private closingPort: SerialPort | null = null
   // --------------------------------------------------------------------------
 
+  // Message bus subscription + pending power state (bus is stateless; this is local coordination only)
+  private powerSub: Subscription | null = null
+  private pendingPowerFromFrontPanel: FrontPanelPowerState | null = null
+
   // Modifier identification is intentionally explicit and conservative.
   private static readonly MODIFIER_CODES = new Set<string>([
     'ShiftLeft',
@@ -106,9 +141,10 @@ export class PS2KeyboardService {
     'MetaRight',
   ])
 
-  constructor(cfg: PS2KeyboardConfig, deps: { events: PS2KeyboardEventSink }) {
+  constructor(cfg: PS2KeyboardConfig, deps: { events: PS2KeyboardEventSink; bus?: Bus }) {
     this.cfg = cfg
     this.events = deps.events
+    this.bus = deps.bus
   }
 
   /* ---------------------------------------------------------------------- */
@@ -116,13 +152,16 @@ export class PS2KeyboardService {
   /* ---------------------------------------------------------------------- */
 
   public async start(): Promise<void> {
-    // No-op; lifecycle is discovery-driven
     this.stopping = false
+    this.attachFrontPanelPowerSubscription()
   }
 
   public async stop(): Promise<void> {
     this.stopping = true
     this.clearReconnectTimer()
+
+    // Unsubscribe bus first (stop reacting during teardown)
+    this.detachFrontPanelPowerSubscription()
 
     // If an open attempt is in flight, wait for it to settle before closing.
     try {
@@ -138,6 +177,7 @@ export class PS2KeyboardService {
     this.phase = 'disconnected'
     this.identified = false
     this.power = 'unknown'
+    this.pendingPowerFromFrontPanel = null
     this.heldModifiers.clear()
     this.readBuffer = ''
   }
@@ -192,9 +232,23 @@ export class PS2KeyboardService {
   /* ---------------------------------------------------------------------- */
 
   public enqueueKeyEvent(evt: ClientKeyboardEvent): KeyboardOperationHandle {
+    // Gate key events on power state (safety: do not emit when off/unknown)
+    if (this.power !== 'on') {
+      const kind: KeyboardOperationKind =
+        evt.action === 'press'
+          ? 'press'
+          : evt.action === 'hold'
+          ? 'hold'
+          : 'release'
+
+      return this.failFastHandle(
+        kind,
+        `PC power state is ${this.power}; refusing key event`
+      )
+    }
+
     const scan = this.resolveScanCode(evt)
     if (!scan) {
-      // Surface as a recoverable error for observability (and UI error history).
       this.events.publish({
         kind: 'recoverable-error',
         at: now(),
@@ -224,7 +278,8 @@ export class PS2KeyboardService {
       tuning: evt.overrides,
       label: `${evt.action} ${evt.code ?? evt.key ?? ''}`,
       execute: async () => {
-        await this.ensureReady()
+        await this.ensureConnected()
+        await this.ensurePoweredOn()
         await this.sendAction(evt.action, scan, {
           code: evt.code,
           key: evt.key,
@@ -239,7 +294,7 @@ export class PS2KeyboardService {
       requestedBy,
       label: 'power on',
       execute: async () => {
-        await this.ensureReady()
+        await this.ensureConnected()
         await this.writeLine('power_on')
         this.power = 'on'
         this.events.publish({
@@ -257,7 +312,7 @@ export class PS2KeyboardService {
       requestedBy,
       label: 'power off',
       execute: async () => {
-        await this.ensureReady()
+        await this.ensureConnected()
         await this.writeLine('power_off')
         this.power = 'off'
         this.events.publish({
@@ -403,14 +458,11 @@ export class PS2KeyboardService {
     if (!devicePath) return
     if (this.stopping) return
 
-    // Ensure only one open attempt runs at a time.
     if (this.openInFlight) return this.openInFlight
 
-    // Any explicit open attempt should cancel pending reconnect timers.
     this.clearReconnectTimer()
 
     this.openInFlight = (async () => {
-      // If we still have a port object around, close it first to avoid lock races.
       if (this.port?.isOpen) {
         await this.closePort('unknown')
       }
@@ -419,7 +471,7 @@ export class PS2KeyboardService {
       this.identified = false
 
       const port = new SerialPort({
-        path: devicePath, // ✅ string
+        path: devicePath,
         baudRate,
         autoOpen: false,
         dataBits: 8,
@@ -434,7 +486,6 @@ export class PS2KeyboardService {
           port.open()
         })
       } catch (err) {
-        // Open failed (e.g. lock contention). Surface and retry via reconnect.
         this.phase = 'error'
         this.events.publish({
           kind: 'recoverable-error',
@@ -446,7 +497,6 @@ export class PS2KeyboardService {
       }
 
       if (this.stopping) {
-        // We opened while shutting down; close immediately and do not reconnect.
         this.closingPort = port
         await new Promise<void>((resolve) => port.close(() => resolve()))
         this.closingPort = null
@@ -461,7 +511,7 @@ export class PS2KeyboardService {
       this.events.publish({
         kind: 'keyboard-device-connected',
         at: now(),
-        path: devicePath, // ✅ string
+        path: devicePath,
         baudRate,
       })
 
@@ -469,9 +519,11 @@ export class PS2KeyboardService {
       port.on('error', (err) => this.handlePortError(port, err))
       port.on('close', () => this.handlePortClose(port))
 
-      // Identify; failures are handled here (no caller crash).
       try {
         await this.identify()
+
+        // After identify success, apply any pending frontpanel power state.
+        this.applyPendingFrontPanelPower()
       } catch {
         await this.closePort('unknown')
         this.scheduleReconnect()
@@ -487,7 +539,6 @@ export class PS2KeyboardService {
     const port = this.port
     const path = this.devicePath ?? 'unknown'
 
-    // Clear "current" port early so new opens won’t consider it active.
     this.port = null
     this.identified = false
     this.phase = 'disconnected'
@@ -495,13 +546,11 @@ export class PS2KeyboardService {
     this.readBuffer = ''
 
     if (port && port.isOpen) {
-      // Mark this close as intentional so the 'close' event doesn't double-handle.
       this.closingPort = port
       await new Promise<void>((resolve) => port.close(() => resolve()))
       this.closingPort = null
     }
 
-    // Publish disconnect (avoid type issue: path is always string)
     if (this.devicePath || port) {
       this.events.publish({
         kind: 'keyboard-device-disconnected',
@@ -525,7 +574,6 @@ export class PS2KeyboardService {
     try {
       await this.writeLine(this.cfg.identify.request)
 
-      // Expect token line (ignore debug lines)
       const token = await this.readLine(this.cfg.identify.timeoutMs)
       if (token !== this.cfg.expectedIdToken) {
         throw new Error(`unexpected identify token: ${token}`)
@@ -555,6 +603,9 @@ export class PS2KeyboardService {
   }
 
   private async writeLine(line: string): Promise<void> {
+    if (this.cancelled) {
+      throw new Error('operation cancelled')
+    }
     if (!this.port || !this.port.isOpen) {
       throw new Error('port not open')
     }
@@ -624,9 +675,6 @@ export class PS2KeyboardService {
       const line = raw.trim()
       if (!line) continue
 
-      // SAFETY/OBSERVABILITY:
-      // Do not suppress firmware/emitted lines here. The logging sink decides what to keep.
-      // The “old app” power-on sequence detail lives in these lines.
       this.events.publish({
         kind: 'keyboard-debug-line',
         at: now(),
@@ -636,17 +684,13 @@ export class PS2KeyboardService {
   }
 
   private handlePortError(port: SerialPort, err: Error): void {
-    // If this isn't the active port anymore, ignore.
     if (port !== this.port) return
-
-    // If we're intentionally closing, ignore error noise during teardown.
     if (this.closingPort === port) return
 
     void (async () => {
       this.events.publish({
         kind: 'recoverable-error',
         at: now(),
-        // ✅ scope must be one of your union values; treat as read-side I/O
         error: this.toErrorWithScope('read', err, true),
       })
       await this.closePort('io-error')
@@ -655,10 +699,7 @@ export class PS2KeyboardService {
   }
 
   private handlePortClose(port: SerialPort): void {
-    // Ignore 'close' emitted from our own closePort().
     if (this.closingPort === port) return
-
-    // If this isn't the current port, it's a stale close; ignore.
     if (port !== this.port) return
 
     void (async () => {
@@ -672,7 +713,6 @@ export class PS2KeyboardService {
     if (!this.cfg.reconnect.enabled) return
     if (!this.devicePath) return
 
-    // Ensure only one reconnect timer exists at a time.
     this.clearReconnectTimer()
 
     if (
@@ -704,7 +744,6 @@ export class PS2KeyboardService {
       const devicePath = this.devicePath
       if (!devicePath) return
 
-      // Important: the timer callback must never leak an unhandled rejection.
       void this.openPort(this.cfg.baudRate)
     }, delay)
   }
@@ -717,12 +756,112 @@ export class PS2KeyboardService {
   }
 
   /* ---------------------------------------------------------------------- */
+  /*  Message bus integration                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  private attachFrontPanelPowerSubscription(): void {
+    if (!this.bus) return
+    if (this.powerSub) return
+
+    this.powerSub = this.bus.subscribe<FrontPanelPowerPayload>(
+      { topic: 'frontpanel.power.changed' },
+      async (evt: BusEvent<FrontPanelPowerPayload>) => {
+        const parsed = parseFrontPanelPowerPayload(evt.payload)
+        if (!parsed) {
+          this.events.publish({
+            kind: 'recoverable-error',
+            at: now(),
+            error: {
+              at: now(),
+              scope: 'protocol',
+              message: `invalid frontpanel power payload`,
+              retryable: false,
+            },
+          })
+          // Fail closed: treat as unknown/off for safety.
+          this.onFrontPanelPowerChanged({ state: 'unknown', reason: 'invalid-payload' }, evt)
+          return
+        }
+
+        this.onFrontPanelPowerChanged(parsed, evt)
+      },
+      {
+        name: 'ps2keyboard-frontpanel-power',
+        onDisabled: () => {
+          // Fail closed on backpressure disable: stop emitting keyboard output
+          this.pendingPowerFromFrontPanel = 'unknown'
+          this.power = 'unknown'
+          this.cancelAll('bus-subscriber-disabled')
+          this.heldModifiers.clear()
+        },
+        onError: () => {
+          // No-op here; errors are already logged/telemetry’d by the bus.
+        },
+      }
+    )
+  }
+
+  private detachFrontPanelPowerSubscription(): void {
+    if (!this.powerSub) return
+    this.powerSub.unsubscribe()
+    this.powerSub = null
+  }
+
+  private onFrontPanelPowerChanged(payload: FrontPanelPowerPayload, evt: BusEvent<FrontPanelPowerPayload>): void {
+    // Store latest seen power state from frontpanel (bus is stateless; this is local coordination)
+    this.pendingPowerFromFrontPanel = payload.state
+
+    const requestedBy = `frontpanel${payload.reason ? `:${payload.reason}` : ''}`
+
+    if (payload.state === 'on') {
+      // If device not yet ready, defer until after identify
+      if (!this.port || !this.port.isOpen || !this.identified) return
+      void this.powerOn(requestedBy).done.catch(() => {})
+      return
+    }
+
+    // OFF or UNKNOWN: fail closed immediately
+    this.power = toKeyboardPowerState(payload.state)
+    this.cancelAll('power-gated')
+    this.heldModifiers.clear()
+
+    // If device is ready, explicitly command firmware power-off
+    if (this.port && this.port.isOpen && this.identified) {
+      void this.powerOff(requestedBy).done.catch(() => {})
+    }
+  }
+
+  private applyPendingFrontPanelPower(): void {
+    if (!this.pendingPowerFromFrontPanel) return
+    // Only apply if ready
+    if (!this.port || !this.port.isOpen || !this.identified) return
+
+    const state = this.pendingPowerFromFrontPanel
+    const requestedBy = 'frontpanel:pending'
+
+    if (state === 'on') {
+      void this.powerOn(requestedBy).done.catch(() => {})
+    } else {
+      // unknown/off => fail closed
+      this.power = toKeyboardPowerState(state)
+      this.cancelAll('power-gated')
+      this.heldModifiers.clear()
+      void this.powerOff(requestedBy).done.catch(() => {})
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
   /*  Helpers                                                                */
   /* ---------------------------------------------------------------------- */
 
-  private async ensureReady(): Promise<void> {
+  private async ensureConnected(): Promise<void> {
     if (!this.port || !this.port.isOpen) throw new Error('port not open')
     if (!this.identified) throw new Error('device not identified')
+  }
+
+  private async ensurePoweredOn(): Promise<void> {
+    // Safety: refuse keyboard output unless explicitly powered on.
+    if (this.power !== 'on') throw new Error(`pc power is ${this.power}`)
   }
 
   private resolveScanCode(evt: ClientKeyboardEvent): PS2ScanCode | null {

@@ -43,14 +43,14 @@ class CfImagerLoggerEventSink implements CfImagerEventSink {
             case 'cf-device-identified': {
                 const d = evt.device
                 this.log.info(
-                    `ts=${ts} kind=${evt.kind} id=${d.id} path=${d.path} vid=${d.vendorId ?? 'n/a'} pid=${d.productId ?? 'n/a'}`
+                    `kind=${evt.kind} id=${d.id} path=${d.path} vid=${d.vendorId ?? 'n/a'} pid=${d.productId ?? 'n/a'}`
                 )
                 break
             }
 
             case 'cf-device-disconnected': {
                 this.log.warn(
-                    `ts=${ts} kind=${evt.kind} deviceId=${evt.deviceId} reason=${evt.reason}`
+                    `kind=${evt.kind} deviceId=${evt.deviceId} reason=${evt.reason}`
                 )
                 break
             }
@@ -58,7 +58,7 @@ class CfImagerLoggerEventSink implements CfImagerEventSink {
             case 'cf-fs-updated': {
                 const fs = evt.fs
                 this.log.debug(
-                    `ts=${ts} kind=${evt.kind} cwd=${fs.cwd} entries=${fs.entries.length}`
+                    `kind=${evt.kind} cwd=${fs.cwd} entries=${fs.entries.length}`
                 )
                 break
             }
@@ -66,7 +66,7 @@ class CfImagerLoggerEventSink implements CfImagerEventSink {
             case 'cf-op-started': {
                 const op = evt.op
                 this.log.info(
-                    `ts=${ts} kind=${evt.kind} op=${op.kind} src=${op.source} dest=${op.destination}`
+                    `kind=${evt.kind} op=${op.kind} src=${op.source} dest=${op.destination}`
                 )
                 break
             }
@@ -74,7 +74,7 @@ class CfImagerLoggerEventSink implements CfImagerEventSink {
             case 'cf-op-progress': {
                 const op = evt.op
                 // this.log.debug(
-                //     `ts=${ts} kind=${evt.kind} op=${op.kind} pct=${op.progressPct.toFixed(1)}`
+                //     `kind=${evt.kind} op=${op.kind} pct=${op.progressPct.toFixed(1)}`
                 // )
                 break
             }
@@ -82,7 +82,7 @@ class CfImagerLoggerEventSink implements CfImagerEventSink {
             case 'cf-op-completed': {
                 const op = evt.op
                 this.log.info(
-                    `ts=${ts} kind=${evt.kind} op=${op.kind} src=${op.source} dest=${op.destination}`
+                    `kind=${evt.kind} op=${op.kind} src=${op.source} dest=${op.destination}`
                 )
                 break
             }
@@ -90,13 +90,13 @@ class CfImagerLoggerEventSink implements CfImagerEventSink {
             case 'cf-op-error': {
                 const op = evt.op
                 this.log.error(
-                    `ts=${ts} kind=${evt.kind} error=${evt.error} opKind=${op?.kind ?? 'n/a'}`
+                    `kind=${evt.kind} error=${evt.error} opKind=${op?.kind ?? 'n/a'}`
                 )
                 break
             }
 
             case 'cf-error': {
-                this.log.error(`ts=${ts} kind=${evt.kind} error=${evt.error}`)
+                this.log.error(`kind=${evt.kind} error=${evt.error}`)
                 break
             }
         }

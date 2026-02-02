@@ -6,6 +6,7 @@ import type {
     CfImagerMediaStatus,
 } from '../devices/cf-imager/types.js'
 import type { KeyboardStateSlice as PS2KeyboardSnapshot } from '../devices/ps2-keyboard/types.js'
+import type { FrontPanelStateSlice as FrontPanelSnapshot } from '../devices/front-panel/types.js'
 
 /**
  * Client-consumable server configuration shipped inside the state snapshot.
@@ -131,6 +132,12 @@ export type AtlonaControllerSnapshot = {
 // PS2KeyboardSnapshot is imported from ../devices/ps2-keyboard/types.js as KeyboardStateSlice.
 
 /* -------------------------------------------------------------------------- */
+/*  Front panel snapshot (alias of FrontPanelStateSlice)                      */
+/* -------------------------------------------------------------------------- */
+
+// FrontPanelSnapshot is imported from ../devices/front-panel/types.js as FrontPanelStateSlice.
+
+/* -------------------------------------------------------------------------- */
 /*  CF Imager snapshot (alias of CfImagerState)                               */
 /* -------------------------------------------------------------------------- */
 
@@ -181,6 +188,7 @@ export type AppState = {
     serialPrinter: SerialPrinterSnapshot
     atlonaController: AtlonaControllerSnapshot
     ps2Keyboard: PS2KeyboardSnapshot
+    frontPanel: FrontPanelSnapshot
     cfImager: CfImagerSnapshot
     sidecar: SidecarSnapshot
 }
@@ -325,6 +333,33 @@ const initialPs2Keyboard: PS2KeyboardSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Initial front panel slice                                                 */
+/* -------------------------------------------------------------------------- */
+
+const initialFrontPanel: FrontPanelSnapshot = {
+    phase: 'disconnected',
+    identified: false,
+
+    deviceId: null,
+    devicePath: null,
+    baudRate: null,
+
+    powerSense: 'unknown',
+    hddActive: false,
+    powerButtonHeld: false,
+
+    busy: false,
+    queueDepth: 0,
+    currentOp: null,
+
+    lastError: null,
+    errorHistory: [],
+    operationHistory: [],
+
+    updatedAt: Date.now(),
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initial CF Imager slice                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -389,6 +424,7 @@ let state: AppState = {
     serialPrinter: initialSerialPrinter,
     atlonaController: initialAtlonaController,
     ps2Keyboard: initialPs2Keyboard,
+    frontPanel: initialFrontPanel,
     cfImager: initialCfImager,
     sidecar: initialSidecar,
 }
@@ -601,6 +637,29 @@ export function updatePS2KeyboardSnapshot(partial: Partial<PS2KeyboardSnapshot>)
     }
 
     set('ps2Keyboard', merged)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Front panel update helpers                                                */
+/* -------------------------------------------------------------------------- */
+
+export function setFrontPanelSnapshot(next: FrontPanelSnapshot) {
+    set('frontPanel', next)
+}
+
+export function updateFrontPanelSnapshot(partial: Partial<FrontPanelSnapshot>) {
+    const prev = state.frontPanel
+
+    const merged: FrontPanelSnapshot = {
+        ...prev,
+        ...clone(partial),
+        updatedAt:
+            (partial as any).updatedAt !== undefined
+                ? (partial as any).updatedAt
+                : Date.now(),
+    }
+
+    set('frontPanel', merged)
 }
 
 /* -------------------------------------------------------------------------- */

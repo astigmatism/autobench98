@@ -42,7 +42,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'job-started': {
                 const { jobId } = evt
                 this.logSp.info(
-                    `kind=job-started ts=${ts} jobId=${jobId}`,
+                    `kind=job-started jobId=${jobId}`,
                 )
                 break
             }
@@ -52,7 +52,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
                 const sizeChars = job.raw.length
                 const durationMs = job.completedAt - job.createdAt
                 this.logSp.info(
-                    `kind=job-completed ts=${ts} jobId=${job.id} sizeChars=${sizeChars} durationMs=${durationMs}`,
+                    `kind=job-completed jobId=${job.id} sizeChars=${sizeChars} durationMs=${durationMs}`,
                 )
                 break
             }
@@ -60,7 +60,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'job-dismissed': {
                 const { jobId, reason } = evt
                 this.logSp.info(
-                    `kind=job-dismissed ts=${ts} jobId=${jobId} reason=${reason}`,
+                    `kind=job-dismissed jobId=${jobId} reason=${reason}`,
                 )
                 break
             }
@@ -68,7 +68,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'device-connected': {
                 const { portPath } = evt
                 this.logSp.info(
-                    `kind=device-connected ts=${ts} port=${portPath}`,
+                    `kind=device-connected port=${portPath}`,
                 )
                 break
             }
@@ -76,7 +76,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'device-disconnected': {
                 const { portPath, reason } = evt
                 this.logSp.warn(
-                    `kind=device-disconnected ts=${ts} port=${portPath} reason=${reason}`,
+                    `kind=device-disconnected port=${portPath} reason=${reason}`,
                 )
                 break
             }
@@ -84,7 +84,7 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'recoverable-error': {
                 const { error } = evt
                 this.logSp.warn(
-                    `kind=recoverable-error ts=${ts} error=${error}`,
+                    `kind=recoverable-error error=${error}`,
                 )
                 break
             }
@@ -92,14 +92,14 @@ class SerialPrinterLoggerEventSink implements SerialPrinterEventSink {
             case 'fatal-error': {
                 const { error } = evt
                 this.logSp.error(
-                    `kind=fatal-error ts=${ts} error=${error}`,
+                    `kind=fatal-error error=${error}`,
                 )
                 break
             }
 
             default: {
                 this.logSp.info(
-                    `kind=${(evt as any).kind ?? 'unknown'} ts=${ts}`,
+                    `kind=${(evt as any).kind ?? 'unknown'}`,
                 )
                 break
             }

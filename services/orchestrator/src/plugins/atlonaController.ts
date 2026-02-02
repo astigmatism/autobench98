@@ -40,7 +40,7 @@ class AtlonaControllerLoggerEventSink implements AtlonaControllerEventSink {
             case 'atlona-device-identified': {
                 const { id, path, baudRate } = evt as any
                 this.log.info(
-                    `ts=${ts} kind=${evt.kind} id=${id ?? 'unknown'} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
+                    `kind=${evt.kind} id=${id ?? 'unknown'} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
                 )
                 break
             }
@@ -48,7 +48,7 @@ class AtlonaControllerLoggerEventSink implements AtlonaControllerEventSink {
             case 'atlona-device-connected': {
                 const { path, baudRate } = evt as any
                 this.log.info(
-                    `ts=${ts} kind=${evt.kind} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
+                    `kind=${evt.kind} path=${path ?? 'unknown'} baud=${baudRate ?? 'unknown'}`
                 )
                 break
             }
@@ -56,7 +56,7 @@ class AtlonaControllerLoggerEventSink implements AtlonaControllerEventSink {
             case 'atlona-device-disconnected': {
                 const { path, reason } = evt as any
                 this.log.warn(
-                    `ts=${ts} kind=${evt.kind} path=${path ?? 'unknown'} reason=${reason ?? 'unknown'}`
+                    `kind=${evt.kind} path=${path ?? 'unknown'} reason=${reason ?? 'unknown'}`
                 )
                 break
             }
@@ -64,20 +64,20 @@ class AtlonaControllerLoggerEventSink implements AtlonaControllerEventSink {
             case 'atlona-device-lost': {
                 const { id } = evt as any
                 this.log.warn(
-                    `ts=${ts} kind=${evt.kind} id=${id ?? 'unknown'}`
+                    `kind=${evt.kind} id=${id ?? 'unknown'}`
                 )
                 break
             }
 
             case 'atlona-identified-complete': {
-                this.log.info(`ts=${ts} kind=${evt.kind}`)
+                this.log.info(`kind=${evt.kind}`)
                 break
             }
 
             case 'atlona-switch-held': {
                 const { switchId, switchName, requestedBy } = evt as any
                 this.log.info(
-                    `ts=${ts} kind=${evt.kind} id=${switchId} name=${switchName} requestedBy=${requestedBy ?? 'unknown'}`
+                    `kind=${evt.kind} id=${switchId} name=${switchName} requestedBy=${requestedBy ?? 'unknown'}`
                 )
                 break
             }
@@ -85,21 +85,21 @@ class AtlonaControllerLoggerEventSink implements AtlonaControllerEventSink {
             case 'atlona-switch-released': {
                 const { switchId, switchName, requestedBy } = evt as any
                 this.log.info(
-                    `ts=${ts} kind=${evt.kind} id=${switchId} name=${switchName} requestedBy=${requestedBy ?? 'unknown'}`
+                    `kind=${evt.kind} id=${switchId} name=${switchName} requestedBy=${requestedBy ?? 'unknown'}`
                 )
                 break
             }
 
             case 'atlona-debug-line': {
                 const line = (evt as any).line ?? ''
-                this.log.debug(`ts=${ts} kind=${evt.kind} line=${JSON.stringify(line)}`)
+                this.log.debug(`kind=${evt.kind} line=${JSON.stringify(line)}`)
                 break
             }
 
             case 'recoverable-error': {
                 const { error } = evt as any
                 this.log.warn(
-                    `ts=${ts} kind=${evt.kind} error=${error ?? 'unknown'}`
+                    `kind=${evt.kind} error=${error ?? 'unknown'}`
                 )
                 break
             }
@@ -107,13 +107,13 @@ class AtlonaControllerLoggerEventSink implements AtlonaControllerEventSink {
             case 'fatal-error': {
                 const { error } = evt as any
                 this.log.error(
-                    `ts=${ts} kind=${evt.kind} error=${error ?? 'unknown'}`
+                    `kind=${evt.kind} error=${error ?? 'unknown'}`
                 )
                 break
             }
 
             default: {
-                this.log.info(`ts=${ts} kind=${(evt as any).kind ?? 'unknown'}`)
+                this.log.info(`kind=${(evt as any).kind ?? 'unknown'}`)
                 break
             }
         }
