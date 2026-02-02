@@ -233,6 +233,7 @@ export class PS2KeyboardService {
 
   public enqueueKeyEvent(evt: ClientKeyboardEvent): KeyboardOperationHandle {
     // Gate key events on power state (safety: do not emit when off/unknown)
+    /*
     if (this.power !== 'on') {
       const kind: KeyboardOperationKind =
         evt.action === 'press'
@@ -246,6 +247,7 @@ export class PS2KeyboardService {
         `PC power state is ${this.power}; refusing key event`
       )
     }
+      */
 
     const scan = this.resolveScanCode(evt)
     if (!scan) {

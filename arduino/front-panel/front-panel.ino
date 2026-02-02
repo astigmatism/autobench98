@@ -19,12 +19,12 @@
 #define OLED_SCL_PIN 14
 #define OLED_SDA_PIN 15
 
-#define DEBOUNCE_DELAY 500       // debounce time in milliseconds (power sense)
-#define HDD_COOLDOWN_MS 200      // activity "linger" window to prevent serial spam
-#define OLED_MIN_REFRESH_MS 200  // avoid redrawing constantly
+#define DEBOUNCE_DELAY 500        // debounce time in milliseconds (power sense)
+#define HDD_COOLDOWN_MS 200       // activity "linger" window to prevent serial spam
+#define OLED_MIN_REFRESH_MS 200   // avoid redrawing constantly
 
-// How long to show "PULSE/OVRD" after a momentary press (display only)
-#define BTN_PULSE_WINDOW_MS 350
+// Display-only: how long to show RST_btn: ON after a reset pulse
+#define RST_PULSE_WINDOW_MS 350
 
 // OLED layout (128x64): 5 lines, evenly spaced (baseline positions)
 #define OLED_Y1 12
@@ -41,7 +41,7 @@ bool commandLock = false;      // Lock to prevent interference
 volatile unsigned long lastPowerLEDInterruptTime = 0;
 volatile bool powerLedStateChanged = false;  // Flag to indicate a state change
 
-bool powerButtonHeld = false;  // Tracks if power button is held
+bool powerButtonHeld = false;  // Tracks if POWER_BUTTON_PIN output is being held (host POWER_HOLD)
 
 // HDD activity capture: count edges in ISR; collapse to ON/OFF via cooldown window
 volatile uint32_t hddEdgeCount = 0;
@@ -52,12 +52,12 @@ bool hddActive = false;
 // Power state cache (for display + reduced redraw churn)
 bool pcPowerOnCached = false;
 
-// Button pulse timestamps (for display only)
-unsigned long lastPowerPulseMs = 0;
+// Reset pulse timestamp (display-only)
 unsigned long lastResetPulseMs = 0;
 
-// Track whether the last power pulse came from the OVERRIDE button
-bool lastPowerPulseWasOverride = false;
+// Override button tracking (edge detect + display)
+bool overrideDown = false;           // current sampled state
+bool overrideDownPrev = false;       // previous sampled state (for edges)
 
 // Display state
 static bool displayDirty = true;
@@ -97,19 +97,16 @@ static void markDisplayDirty(const char* label = nullptr) {
   displayDirty = true;
 }
 
-static const char* powerButtonStatus() {
-  const unsigned long now = millis();
-  if (powerButtonHeld) return "HELD";
-  if (lastPowerPulseMs != 0 && (now - lastPowerPulseMs) < BTN_PULSE_WINDOW_MS) {
-    return lastPowerPulseWasOverride ? "OVRD" : "PULSE";
-  }
+static const char* pwrBtnStatus() {
+  // HELD means: host POWER_HOLD is active OR physical override button is currently down.
+  if (powerButtonHeld || overrideDown) return "HELD";
   return "OFF";
 }
 
-static const char* resetButtonStatus() {
+static const char* rstBtnStatus() {
   const unsigned long now = millis();
-  if (lastResetPulseMs != 0 && (now - lastResetPulseMs) < BTN_PULSE_WINDOW_MS) return "PULSE";
-  return "OFF";
+  const bool inWindow = (lastResetPulseMs != 0) && ((now - lastResetPulseMs) < RST_PULSE_WINDOW_MS);
+  return inWindow ? "ON" : "OFF";
 }
 
 // =====================
@@ -144,20 +141,20 @@ static void drawDisplayPage() {
   u8g2.print("PWR_SNS: ");
   u8g2.print(pcPowerOnCached ? "ON" : "OFF");
 
-  // 2) Power button status
+  // 2) Power button status (HELD/OFF)
   u8g2.setCursor(0, y2);
-  u8g2.print("PWR_btn: ");
-  u8g2.print(powerButtonStatus());
+  u8g2.print("PWR_BTN: ");
+  u8g2.print(pwrBtnStatus());
 
-  // 3) Reset button status
+  // 3) Reset button status (ON briefly after pulse)
   u8g2.setCursor(0, y3);
-  u8g2.print("RST_btn: ");
-  u8g2.print(resetButtonStatus());
+  u8g2.print("RST_BTN: ");
+  u8g2.print(rstBtnStatus());
 
   // 4) HDD activity
   u8g2.setCursor(0, y4);
   u8g2.print("HDD_ACT: ");
-  u8g2.print(hddActive ? "ACT" : "INACT");
+  u8g2.print(hddActive ? "ON" : "OFF");
 
   // 5) Last command/event label
   u8g2.setCursor(0, y5);
@@ -201,9 +198,12 @@ static void processHddActivityTelemetry() {
   const unsigned long now = millis();
   const bool activeNow = (lastHddActivityMs != 0) && ((now - lastHddActivityMs) < HDD_COOLDOWN_MS);
 
-  // Keep the serial behavior intact: only emit HDD ON/OFF after identify_complete
+  // Keep serial behavior intact: only emit HDD ON/OFF after identify_complete
   if (!isIdentified) {
-    hddActive = false;
+    if (hddActive) {
+      hddActive = false;
+      displayDirty = true;
+    }
     return;
   }
 
@@ -223,16 +223,7 @@ static void processHddActivityTelemetry() {
 // =====================
 
 // Simulate a momentary button press with inverted logic
-void simulateButtonPress(int buttonPin, bool fromOverride = false) {
-  const unsigned long now = millis();
-
-  if (buttonPin == POWER_BUTTON_PIN) {
-    lastPowerPulseMs = now;
-    lastPowerPulseWasOverride = fromOverride;
-  } else if (buttonPin == RESET_BUTTON_PIN) {
-    lastResetPulseMs = now;
-  }
-
+void simulateButtonPress(int buttonPin) {
   // Press
   digitalWrite(buttonPin, HIGH);
   delay(100);
@@ -269,7 +260,6 @@ void setup() {
   pinMode(RESET_BUTTON_PIN, OUTPUT);  // inverted logic in this design
   pinMode(POWER_SENSE_PIN, INPUT_PULLUP);
   pinMode(OVERRIDE_POWER_BUTTON_PIN, INPUT_PULLUP);
-
   pinMode(HDD_SENSE_PIN, INPUT_PULLUP);
 
   digitalWrite(POWER_BUTTON_PIN, LOW);
@@ -291,6 +281,10 @@ void setup() {
   // Initialize cached power sense immediately for the display
   pcPowerOnCached = (digitalRead(POWER_SENSE_PIN) == LOW);
 
+  // Initialize override state immediately
+  overrideDown = (digitalRead(OVERRIDE_POWER_BUTTON_PIN) == LOW);
+  overrideDownPrev = overrideDown;
+
   markDisplayDirty("BOOT");
   maybeUpdateDisplay(true);
 }
@@ -300,6 +294,14 @@ void setup() {
 // =====================
 
 void loop() {
+  // Always sample override button so the display reflects HELD/OFF promptly
+  overrideDown = (digitalRead(OVERRIDE_POWER_BUTTON_PIN) == LOW);
+  if (overrideDown != overrideDownPrev) {
+    // Any press/release changes the display state for PWR_btn
+    displayDirty = true;
+    overrideDownPrev = overrideDown;
+  }
+
   // Process Serial Commands
   if (Serial.available()) {
     commandLock = true;
@@ -336,7 +338,8 @@ void loop() {
       Serial.println("debug: front panel power button released");
       markDisplayDirty("POWER_RELEASE");
     } else if (isIdentified && command == "RESET_HOLD") {
-      simulateButtonPress(RESET_BUTTON_PIN, false);
+      lastResetPulseMs = millis();
+      simulateButtonPress(RESET_BUTTON_PIN);
       Serial.println("debug: front panel reset button held");
       markDisplayDirty("RESET_HOLD");
     } else if (isIdentified && command == "RESET_RELEASE") {
@@ -359,12 +362,30 @@ void loop() {
     powerLedStateChanged = false;
     displayDirty = true;
   }
-  // Handle Override Button
-  else if (isIdentified && !commandLock && !powerButtonlock &&
-           digitalRead(OVERRIDE_POWER_BUTTON_PIN) == LOW) {
+  // Handle Override Button (edge-detected: one motherboard pulse per physical press)
+  else if (isIdentified && !commandLock && !powerButtonlock) {
+    // Only fire on press edge (HIGH->LOW). We already updated overrideDown/Prev at top.
+    // Press edge is when overrideDown just became true (overrideDownPrev was updated after change),
+    // so detect it by: overrideDown == true AND we changed this loop.
+    // Easiest: track a separate latch for firing.
+    static bool overrideFiredForThisPress = false;
 
-    simulateButtonPress(POWER_BUTTON_PIN, true);
-    markDisplayDirty("override");
+    if (overrideDown && !overrideFiredForThisPress) {
+      overrideFiredForThisPress = true;
+      simulateButtonPress(POWER_BUTTON_PIN);
+      markDisplayDirty("override");
+    } else if (!overrideDown && overrideFiredForThisPress) {
+      // Released; allow next press to fire.
+      overrideFiredForThisPress = false;
+    }
+  }
+
+  // If the reset pulse window expires, update the display (time-based state change)
+  static bool rstWasOn = false;
+  const bool rstOnNow = ((lastResetPulseMs != 0) && ((millis() - lastResetPulseMs) < RST_PULSE_WINDOW_MS));
+  if (rstOnNow != rstWasOn) {
+    rstWasOn = rstOnNow;
+    displayDirty = true;
   }
 
   // HDD telemetry (edge capture in ISR; ON/OFF collapse here)
