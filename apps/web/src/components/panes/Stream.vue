@@ -40,7 +40,7 @@
                                 </select>
                             </label>
 
-                            <!-- NEW: Viewer-side fps cap (auto uses health metrics to keep stream live) -->
+                            <!-- Viewer-side fps cap -->
                             <label class="select panel-text">
                                 <span>Viewer FPS</span>
                                 <select v-model="fpsMode">
@@ -104,7 +104,6 @@
                             </span>
                         </div>
 
-                        <!-- NEW: what we are asking the stream for -->
                         <div class="health-row">
                             <span class="label">Viewer cap</span>
                             <span class="value monospace">
@@ -116,6 +115,13 @@
                             <span class="label">Resyncs</span>
                             <span class="value monospace">
                                 {{ resyncCount }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Last resync</span>
+                            <span class="value monospace">
+                                {{ lastResyncLabel }}
                             </span>
                         </div>
 
@@ -151,6 +157,13 @@
                             <span class="label">Backpressure</span>
                             <span class="value monospace">
                                 {{ formattedBackpressure }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">BP / sec</span>
+                            <span class="value monospace">
+                                {{ formattedBackpressureRate }}
                             </span>
                         </div>
 
@@ -409,7 +422,15 @@ const autoMaxFps = ref<number>(60)
 const resyncCount = ref(0)
 
 const lastResyncTs = ref<number>(0)
+const lastResyncReason = ref<string>('')
+
+// Improve gating
 const stableImproveTicks = ref<number>(0)
+
+// Backpressure rate (computed from cumulative counter deltas)
+const lastBpEvents = ref<number | null>(null)
+const lastBpSampleTs = ref<number | null>(null)
+const bpPerSec = ref<number | null>(null)
 
 const MB = 1024 * 1024
 
@@ -426,8 +447,15 @@ const viewerCapLabel = computed(() => {
     return `${effectiveMaxFps.value}`
 })
 
+const lastResyncLabel = computed(() => {
+    const ts = lastResyncTs.value
+    if (!ts) return '—'
+    const age = Date.now() - ts
+    const why = lastResyncReason.value ? lastResyncReason.value : 'unknown'
+    return `${formatAge(age)} · ${why}`
+})
+
 // Build stream src with a client-controlled fps cap.
-// NOTE: This will only *change behavior* once the sidecar honors maxFps.
 const streamSrc = computed(() => {
     const params = new URLSearchParams()
     params.set('maxFps', String(effectiveMaxFps.value))
@@ -435,14 +463,14 @@ const streamSrc = computed(() => {
 })
 
 function requestStreamResync(reason: string) {
-    void reason
     if (!enabled.value) return
     const now = Date.now()
 
-    // Safety: avoid thrash (especially if health temporarily spikes)
+    // Safety: avoid thrash
     if (now - lastResyncTs.value < 1500) return
 
     lastResyncTs.value = now
+    lastResyncReason.value = reason
     resyncCount.value += 1
 
     // Remount the <img> to force a fresh connection (drops existing queued backlog).
@@ -956,6 +984,12 @@ const formattedBackpressure = computed(() => {
     return `${d.backpressureEvents}`
 })
 
+const formattedBackpressureRate = computed(() => {
+    const v = bpPerSec.value
+    if (v == null) return '—'
+    return `${v}`
+})
+
 const formattedAvgFrame = computed(() => {
     const d = streamDiag.value
     if (!d) return '—'
@@ -1000,36 +1034,61 @@ async function loadHealth(opts?: { silent?: boolean }) {
 /*  Auto throttle logic (based ONLY on metrics you already surface)           */
 /* -------------------------------------------------------------------------- */
 
-function nextHigherFps(cur: number): number {
-    const levels = [2, 4, 8, 15, 30, 60] as const
+const FPS_LEVELS = [2, 4, 8, 15, 30, 60] as const
 
-    const idx = levels.indexOf(cur as any)
-    if (idx === -1) {
-        // pick nearest >= current
-        for (let i = 0; i < levels.length; i++) {
-            const lvl = levels[i]
-            if (lvl !== undefined && cur <= lvl) return lvl
+function nextHigherFps(cur: number): number {
+    const last = FPS_LEVELS[FPS_LEVELS.length - 1]
+    const lastSafe = typeof last === 'number' ? last : 60
+
+    for (let i = 0; i < FPS_LEVELS.length; i++) {
+        const lvl = FPS_LEVELS[i]
+        if (typeof lvl !== 'number') continue
+
+        if (cur < lvl) return lvl
+        if (cur === lvl) {
+            const next = FPS_LEVELS[Math.min(i + 1, FPS_LEVELS.length - 1)]
+            return typeof next === 'number' ? next : lastSafe
         }
-        return levels[levels.length - 1] ?? 60
     }
 
-    const next = levels[Math.min(levels.length - 1, idx + 1)]
-    return next ?? levels[levels.length - 1] ?? 60
+    return lastSafe
 }
 
+function sampleBackpressureRate(d: SidecarStreamDiag | null) {
+    if (!d || typeof d.backpressureEvents !== 'number') return
+    const now = Date.now()
 
-function suggestFpsFromDiag(d: SidecarStreamDiag | null): number {
-    // If we have no diag, don’t guess — keep current auto cap.
+    const prevEvents = lastBpEvents.value
+    const prevTs = lastBpSampleTs.value
+
+    if (prevEvents != null && prevTs != null) {
+        const dt = now - prevTs
+        if (dt > 0) {
+            const delta = Math.max(0, d.backpressureEvents - prevEvents)
+            bpPerSec.value = Math.max(0, Math.round((delta * 1000) / dt))
+        }
+    }
+
+    lastBpEvents.value = d.backpressureEvents
+    lastBpSampleTs.value = now
+}
+
+function suggestFpsFromDiag(d: SidecarStreamDiag | null, bpRate: number | null): number {
     if (!d) return autoMaxFps.value
 
     const backlog = Number.isFinite(d.estBacklogMs as any) ? (d.estBacklogMs as number) : 0
     const buffered = Number.isFinite(d.maxClientBufferedBytes as any) ? d.maxClientBufferedBytes : 0
     const ratio = Number.isFinite(d.maxClientBufferedRatio as any) ? d.maxClientBufferedRatio : 0
+    const bp = bpRate != null && Number.isFinite(bpRate as any) ? bpRate : 0
 
-    // Thresholds are conservative and keyed to the *units you already show*:
-    // - backlog in ms
-    // - buffered in bytes
-    // - ratio ~ writableLength / highWaterMark
+    // 1) If the stream is constantly hitting backpressure, reduce FPS even if backlog looks small.
+    if (bp >= 800) return 2
+    if (bp >= 400) return 4
+    if (bp >= 200) return 8
+    if (bp >= 80) return 15
+    if (bp >= 25) return 30
+
+    // 2) Otherwise, use backlog/buffer/ratio thresholds.
     if (backlog >= 5000 || buffered >= 64 * MB || ratio >= 64) return 2
     if (backlog >= 3000 || buffered >= 32 * MB || ratio >= 32) return 4
     if (backlog >= 1500 || buffered >= 16 * MB || ratio >= 16) return 8
@@ -1045,15 +1104,19 @@ function maybeAutoAdjust() {
     const d = streamDiag.value
     if (!d) return
 
-    const suggested = suggestFpsFromDiag(d)
+    // Update bp/sec from the cumulative counter.
+    sampleBackpressureRate(d)
+
+    const suggested = suggestFpsFromDiag(d, bpPerSec.value)
     const current = autoMaxFps.value
 
-    // If backlog is already high, a resync is the fastest way to get “live now”
-    // because it drops queued bytes in the pipeline.
     const backlog = typeof d.estBacklogMs === 'number' ? d.estBacklogMs : 0
     const buffered = typeof d.maxClientBufferedBytes === 'number' ? d.maxClientBufferedBytes : 0
-    if (backlog >= 1000 || buffered >= 8 * MB) {
-        requestStreamResync('backlog_high')
+    const bp = bpPerSec.value ?? 0
+
+    // If we’re already behind or constantly backpressured, resync to drop queued bytes now.
+    if (backlog >= 1000 || buffered >= 8 * MB || bp >= 200) {
+        requestStreamResync('pressure')
     }
 
     // Degrade immediately on pressure.
@@ -1075,7 +1138,6 @@ function maybeAutoAdjust() {
         return
     }
 
-    // Equal: reset “improve” counter so we only upshift on sustained better-than-current conditions.
     stableImproveTicks.value = 0
 }
 
@@ -1112,7 +1174,6 @@ watch(
 function setHealthPollingActive(active: boolean) {
     if (active) {
         if (healthPollTimer != null) return
-        // Immediate sample (silent unless the panel is open)
         void loadHealth({ silent: !showControls.value })
         healthPollTimer = window.setInterval(() => void loadHealth({ silent: true }), 1000)
         return
@@ -1129,16 +1190,13 @@ function toggleControls() {
 watch(
     () => showControls.value,
     (open) => {
-        // When opened, do a non-silent refresh so the UI updates immediately.
         if (open) void loadHealth({ silent: false })
-        // Polling is handled by enabled/showControls watcher below.
     }
 )
 
 watch(
     [() => enabled.value, () => showControls.value],
     ([en, open]) => {
-        // Poll if stream is enabled (for auto throttle) OR panel is open (for visibility).
         setHealthPollingActive(!!en || !!open)
     },
     { immediate: true }
