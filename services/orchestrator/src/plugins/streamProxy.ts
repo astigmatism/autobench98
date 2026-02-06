@@ -1,4 +1,8 @@
-import type { FastifyInstance, FastifyPluginAsync } from 'fastify'
+import type {
+    FastifyInstance,
+    FastifyPluginAsync,
+    RouteShorthandOptions,
+} from 'fastify'
 import fp from 'fastify-plugin'
 import { request } from 'undici'
 
@@ -24,7 +28,7 @@ declare module 'fastify' {
  *   GET /api/sidecar/stream  →  GET http://127.0.0.1:SIDECAR_PORT/stream
  *   GET /api/sidecar/health  →  GET http://127.0.0.1:SIDECAR_PORT/health
  *
- * NOTE: Query params are forwarded for /stream (e.g. ?maxFps=15).
+ * NOTE: Query params are forwarded for /stream (e.g. ?maxFps=30).
  *
  * Sidecar is expected to bind to 0.0.0.0 or 127.0.0.1 on SIDECAR_PORT. We
  * always talk to it via 127.0.0.1 here, so the sidecar port does not need
@@ -40,19 +44,42 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     log.info(`sidecar proxy configured baseUrl=${baseUrl}`)
 
+    const HOP_BY_HOP = new Set([
+        'connection',
+        'keep-alive',
+        'proxy-authenticate',
+        'proxy-authorization',
+        'te',
+        'trailer',
+        'transfer-encoding',
+        'upgrade',
+    ])
+
+    function passThroughHeaders(
+        headers: Record<string, string | string[] | undefined>,
+        reply: any
+    ) {
+        for (const [name, value] of Object.entries(headers)) {
+            if (value == null) continue
+            const lower = name.toLowerCase()
+            if (HOP_BY_HOP.has(lower)) continue
+            reply.header(name, value as any)
+        }
+    }
+
     /**
      * MJPEG stream proxy.
      *
      * We stream the sidecar response body directly back to the client,
      * preserving status and most headers.
      *
-     * Query params are forwarded (e.g. /api/sidecar/stream?maxFps=15).
+     * Query params are forwarded (e.g. /api/sidecar/stream?maxFps=30).
      */
     app.get('/api/sidecar/stream', async (req, reply) => {
-        // Forward query string safely (Fastify raw url includes it).
+        // Fastify's req.url includes the query string.
         let search = ''
         try {
-            const u = new URL(req.raw.url ?? '/api/sidecar/stream', 'http://localhost')
+            const u = new URL(req.url ?? '/api/sidecar/stream', 'http://localhost')
             search = u.search || ''
         } catch {
             search = ''
@@ -70,7 +97,6 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
             }
         }
 
-        // req.raw is IncomingMessage; reply.raw is ServerResponse.
         try {
             req.raw.on('aborted', abort)
             req.raw.on('close', abort)
@@ -86,29 +112,22 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
                 signal: ac.signal,
             })
 
-            // Pass through content-type and other safe headers.
-            // We omit hop-by-hop headers (transfer-encoding, connection, etc.).
-            for (const [name, value] of Object.entries(headers)) {
-                if (!value) continue
-                const lower = name.toLowerCase()
-                if (lower === 'connection' || lower === 'transfer-encoding') continue
-                reply.header(name, value as any)
-            }
+            passThroughHeaders(headers as any, reply)
 
-            reply.status(statusCode)
+            // Fastify’s typed API is reply.code(), not reply.status().
+            reply.code(statusCode)
 
             // body is a Node Readable stream; Fastify can send it directly.
-            // This keeps the MJPEG stream live.
             return reply.send(body)
         } catch (err) {
             const msg = (err as Error).message ?? String(err)
             log.warn('error proxying sidecar stream', { error: msg })
 
-            reply.status(502)
-            return {
+            reply.code(502)
+            return reply.send({
                 ok: false,
                 error: 'sidecar stream unavailable',
-            }
+            })
         }
     })
 
@@ -116,17 +135,27 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
      * Health proxy.
      *
      * Used by StreamPane advanced panel to show sidecar uptime and capture metrics.
+     *
+     * NOTE: We mark this route as "silent" and add a config flag so your custom
+     * request logger can skip it (if you implement that check in app.ts hooks).
      */
-    app.get('/api/sidecar/health', async (_req, reply) => {
+    const healthRouteOpts: RouteShorthandOptions = {
+        // No-op if Fastify logger is disabled, but harmless and keeps intent.
+        logLevel: 'silent',
+        config: { skipRequestLog: true },
+    }
+
+    app.get('/api/sidecar/health', healthRouteOpts, async (_req, reply) => {
         const target = `${baseUrl}/health`
 
         try {
-            const { statusCode, body } = await request(target, {
+            const { statusCode, body, headers } = await request(target, {
                 method: 'GET',
-                headers: {
-                    accept: 'application/json',
-                },
+                headers: { accept: 'application/json' },
             })
+
+            // Propagate basic content-type if present.
+            passThroughHeaders(headers as any, reply)
 
             // Non-2xx from sidecar: surface as error to the client.
             if (statusCode < 200 || statusCode >= 300) {
@@ -136,44 +165,41 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
                     bodyPreview: text.slice(0, 200),
                 })
 
-                reply.status(statusCode)
-                return {
+                reply.code(statusCode)
+                return reply.send({
                     ok: false,
                     error: `sidecar health returned HTTP ${statusCode}`,
-                }
+                })
             }
 
             // Parse JSON payload and forward it as-is.
             let json: unknown
             try {
-                // undici body.json() is available, but be defensive in case of text.
                 json = await body.json()
             } catch {
                 const text = await body.text().catch(() => '')
                 log.warn('failed to parse sidecar health JSON', {
                     bodyPreview: text.slice(0, 200),
                 })
-                reply.status(502)
-                return {
+
+                reply.code(502).header('content-type', 'application/json; charset=utf-8')
+                return reply.send({
                     ok: false,
                     error: 'invalid sidecar health payload',
-                }
+                })
             }
 
-            reply
-                .status(200)
-                .header('content-type', 'application/json; charset=utf-8')
-
-            return json
+            reply.code(200).header('content-type', 'application/json; charset=utf-8')
+            return reply.send(json)
         } catch (err) {
             const msg = (err as Error).message ?? String(err)
             log.warn('error proxying sidecar health', { error: msg })
 
-            reply.status(502)
-            return {
+            reply.code(502).header('content-type', 'application/json; charset=utf-8')
+            return reply.send({
                 ok: false,
                 error: 'sidecar health unavailable',
-            }
+            })
         }
     })
 }

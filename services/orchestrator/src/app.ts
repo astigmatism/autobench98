@@ -51,7 +51,14 @@ interface LogsQuery {
 const REQUEST_VERBOSE = String(process.env.REQUEST_VERBOSE ?? 'false').toLowerCase() === 'true'
 const REQUEST_LOG_HEADERS =
     String(process.env.REQUEST_LOG_HEADERS ?? 'false').toLowerCase() === 'true'
-const REQUEST_SAMPLE = Math.max(1, Number(process.env.REQUEST_SAMPLE ?? '1'))
+
+// NOTE: if REQUEST_SAMPLE is invalid/NaN, fall back to 1
+const REQUEST_SAMPLE_RAW = Number(process.env.REQUEST_SAMPLE ?? '1')
+const REQUEST_SAMPLE = Number.isFinite(REQUEST_SAMPLE_RAW) ? Math.max(1, REQUEST_SAMPLE_RAW) : 1
+
+// NEW: silence /health and /api/sidecar/health request logs unless explicitly enabled
+const REQUEST_LOG_HEALTH = String(process.env.REQUEST_LOG_HEALTH ?? 'false').toLowerCase() === 'true'
+
 const WS_DEBUG = String(process.env.WS_DEBUG ?? 'false').toLowerCase() === 'true'
 // --------------------------------------
 
@@ -72,6 +79,13 @@ let reqCounter = 0
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const WEB_DIST = path.resolve(__dirname, '../../../apps/web/dist')
+
+function isHealthRequestUrl(url: string): boolean {
+    // Fastify's req.url may include querystring
+    if (url === '/health') return true
+    if (url.startsWith('/api/sidecar/health')) return true
+    return false
+}
 
 export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const { channel } = createLogger('orchestrator', clientBuf)
@@ -115,9 +129,10 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
         // 🚫 Don't generate request logs for the high-volume log ingest endpoint.
-        if (req.url === '/api/logs/ingest') {
-            return
-        }
+        if (req.url === '/api/logs/ingest') return
+
+        // NEW: silence health endpoints unless explicitly enabled
+        if (!REQUEST_LOG_HEALTH && isHealthRequestUrl(req.url)) return
 
         if (WS_DEBUG && req.url === '/ws') {
             const headers = req.headers as Record<string, unknown>
@@ -146,9 +161,10 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
 
     app.addHook('onResponse', async (req: FastifyRequest, reply: FastifyReply) => {
         // 🚫 Mirror the same exemption on the way out.
-        if (req.url === '/api/logs/ingest') {
-            return
-        }
+        if (req.url === '/api/logs/ingest') return
+
+        // NEW: silence health endpoints unless explicitly enabled
+        if (!REQUEST_LOG_HEALTH && isHealthRequestUrl(req.url)) return
 
         if (!sampledIds.has(req.id)) return
         sampledIds.delete(req.id)

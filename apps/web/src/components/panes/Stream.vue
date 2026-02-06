@@ -40,13 +40,14 @@
                                 </select>
                             </label>
 
-                            <!-- NEW: Viewer-side fps cap (auto uses health metrics to keep stream live) -->
+                            <!-- Viewer-side fps cap (auto uses health metrics to keep stream live) -->
                             <label class="select panel-text">
                                 <span>Viewer FPS</span>
                                 <select v-model="fpsMode">
                                     <option value="auto">Auto</option>
                                     <option value="60">60</option>
                                     <option value="30">30</option>
+                                    <option value="20">20</option>
                                     <option value="15">15</option>
                                     <option value="8">8</option>
                                     <option value="4">4</option>
@@ -104,7 +105,6 @@
                             </span>
                         </div>
 
-                        <!-- NEW: what we are asking the stream for -->
                         <div class="health-row">
                             <span class="label">Viewer cap</span>
                             <span class="value monospace">
@@ -280,7 +280,7 @@ type PaneInfo = {
     }
 }
 
-type StreamFpsMode = 'auto' | '60' | '30' | '15' | '8' | '4' | '2'
+type StreamFpsMode = 'auto' | '60' | '30' | '20' | '15' | '8' | '4' | '2'
 
 type StreamPanePrefs = {
     enabled?: boolean
@@ -403,7 +403,8 @@ const reloadKey = ref(0)
 const fpsMode = ref<StreamFpsMode>('auto')
 
 // Auto-selected cap (only used when fpsMode === 'auto')
-const autoMaxFps = ref<number>(60)
+// Default to 30 (your preference).
+const autoMaxFps = ref<number>(30)
 
 // How many times we forcibly resynced the <img> stream to drop backlog.
 const resyncCount = ref(0)
@@ -427,7 +428,6 @@ const viewerCapLabel = computed(() => {
 })
 
 // Build stream src with a client-controlled fps cap.
-// NOTE: This will only *change behavior* once the sidecar honors maxFps.
 const streamSrc = computed(() => {
     const params = new URLSearchParams()
     params.set('maxFps', String(effectiveMaxFps.value))
@@ -756,7 +756,7 @@ function isValidBgMode(x: any): x is 'black' | 'pane' {
     return x === 'black' || x === 'pane'
 }
 function isValidFpsMode(x: any): x is StreamFpsMode {
-    return x === 'auto' || x === '60' || x === '30' || x === '15' || x === '8' || x === '4' || x === '2'
+    return x === 'auto' || x === '60' || x === '30' || x === '20' || x === '15' || x === '8' || x === '4' || x === '2'
 }
 
 const paneId = computed(() => String(props.pane?.id ?? '').trim())
@@ -997,44 +997,39 @@ async function loadHealth(opts?: { silent?: boolean }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Auto throttle logic (based ONLY on metrics you already surface)           */
+/*  Auto throttle logic                                                       */
 /* -------------------------------------------------------------------------- */
 
 function nextHigherFps(cur: number): number {
-    const levels = [2, 4, 8, 15, 30, 60] as const
+    const levels = [2, 4, 8, 15, 20, 30, 60] as const
 
-    const idx = levels.indexOf(cur as any)
-    if (idx === -1) {
-        // pick nearest >= current
-        for (let i = 0; i < levels.length; i++) {
-            const lvl = levels[i]
-            if (lvl !== undefined && cur <= lvl) return lvl
-        }
-        return levels[levels.length - 1] ?? 60
+    // If cur is not exactly one of the levels, choose the next >= cur.
+    for (const lvl of levels) {
+        if (cur <= lvl) return lvl
     }
-
-    const next = levels[Math.min(levels.length - 1, idx + 1)]
-    return next ?? levels[levels.length - 1] ?? 60
+    return levels[levels.length - 1]!
 }
 
-
 function suggestFpsFromDiag(d: SidecarStreamDiag | null): number {
-    // If we have no diag, don’t guess — keep current auto cap.
     if (!d) return autoMaxFps.value
 
     const backlog = Number.isFinite(d.estBacklogMs as any) ? (d.estBacklogMs as number) : 0
     const buffered = Number.isFinite(d.maxClientBufferedBytes as any) ? d.maxClientBufferedBytes : 0
     const ratio = Number.isFinite(d.maxClientBufferedRatio as any) ? d.maxClientBufferedRatio : 0
 
-    // Thresholds are conservative and keyed to the *units you already show*:
-    // - backlog in ms
-    // - buffered in bytes
-    // - ratio ~ writableLength / highWaterMark
+    // Extreme cases: allow deeper drops (keeps “live now”).
     if (backlog >= 5000 || buffered >= 64 * MB || ratio >= 64) return 2
     if (backlog >= 3000 || buffered >= 32 * MB || ratio >= 32) return 4
-    if (backlog >= 1500 || buffered >= 16 * MB || ratio >= 16) return 8
-    if (backlog >= 600 || buffered >= 8 * MB || ratio >= 8) return 15
-    if (backlog >= 250 || buffered >= 2 * MB || ratio >= 3) return 30
+    if (backlog >= 2000 || buffered >= 24 * MB || ratio >= 24) return 8
+
+    // Preferred stepping: 30 → 20 → 15 under pressure.
+    if (backlog >= 900 || buffered >= 12 * MB || ratio >= 12) return 15
+    if (backlog >= 450 || buffered >= 6 * MB || ratio >= 6) return 20
+
+    // Default target is 30 unless the stream is very stable.
+    if (backlog >= 200 || buffered >= 2 * MB || ratio >= 3) return 30
+
+    // Very stable: allow 60 (we still start at 30 and only upshift slowly).
     return 60
 }
 
@@ -1048,8 +1043,6 @@ function maybeAutoAdjust() {
     const suggested = suggestFpsFromDiag(d)
     const current = autoMaxFps.value
 
-    // If backlog is already high, a resync is the fastest way to get “live now”
-    // because it drops queued bytes in the pipeline.
     const backlog = typeof d.estBacklogMs === 'number' ? d.estBacklogMs : 0
     const buffered = typeof d.maxClientBufferedBytes === 'number' ? d.maxClientBufferedBytes : 0
     if (backlog >= 1000 || buffered >= 8 * MB) {
@@ -1075,11 +1068,9 @@ function maybeAutoAdjust() {
         return
     }
 
-    // Equal: reset “improve” counter so we only upshift on sustained better-than-current conditions.
     stableImproveTicks.value = 0
 }
 
-// Run auto-throttle whenever health updates.
 watch(
     () => health.value,
     () => {
@@ -1087,7 +1078,7 @@ watch(
     }
 )
 
-// If user changes fps mode (or if effective cap changes), resync to apply immediately.
+// If user changes fps mode, resync to apply immediately.
 watch(
     () => fpsMode.value,
     () => {
@@ -1096,11 +1087,14 @@ watch(
     }
 )
 
+// Only resync on effectiveMaxFps changes for MANUAL modes.
+// Auto mode already resyncs inside maybeAutoAdjust() on cap changes.
 watch(
     () => effectiveMaxFps.value,
     (next, prev) => {
         if (!enabled.value) return
         if (next === prev) return
+        if (fpsMode.value === 'auto') return
         requestStreamResync('max_fps_changed')
     }
 )
@@ -1112,7 +1106,6 @@ watch(
 function setHealthPollingActive(active: boolean) {
     if (active) {
         if (healthPollTimer != null) return
-        // Immediate sample (silent unless the panel is open)
         void loadHealth({ silent: !showControls.value })
         healthPollTimer = window.setInterval(() => void loadHealth({ silent: true }), 1000)
         return
@@ -1129,16 +1122,13 @@ function toggleControls() {
 watch(
     () => showControls.value,
     (open) => {
-        // When opened, do a non-silent refresh so the UI updates immediately.
         if (open) void loadHealth({ silent: false })
-        // Polling is handled by enabled/showControls watcher below.
     }
 )
 
 watch(
     [() => enabled.value, () => showControls.value],
     ([en, open]) => {
-        // Poll if stream is enabled (for auto throttle) OR panel is open (for visibility).
         setHealthPollingActive(!!en || !!open)
     },
     { immediate: true }
@@ -1173,7 +1163,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* unchanged styling from your file, plus note line */
+/* (unchanged styling from your file) */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
