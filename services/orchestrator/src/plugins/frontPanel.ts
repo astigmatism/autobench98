@@ -11,8 +11,8 @@ import { buildFrontPanelConfigFromEnv } from '../devices/front-panel/utils.js'
 import { FrontPanelStateAdapter } from '../adapters/frontPanel.adapter.js'
 import { updateFrontPanelSnapshot } from '../core/state.js'
 
-// ✅ message bus type (optional dependency)
-import type { Bus } from '../core/events/index.js'
+// ✅ AppState slice mutator for power truth (replaces message bus fanout)
+import { setPcPowerTruth } from '../core/state/slices/power.js'
 
 // ---- Fastify decoration ----------------------------------------------------
 
@@ -20,7 +20,6 @@ declare module 'fastify' {
   interface FastifyInstance {
     frontPanel: FrontPanelService
     clientBuf: ClientLogBuffer
-    bus?: Bus
   }
 }
 
@@ -174,14 +173,36 @@ const frontPanelPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     loggerSink,
     {
       publish(evt: FrontPanelEvent): void {
-        stateAdapter.handle(evt)
-        updateFrontPanelSnapshot(stateAdapter.getState())
+        // Existing frontpanel snapshot adapter
+        try {
+          stateAdapter.handle(evt)
+          updateFrontPanelSnapshot(stateAdapter.getState())
+        } catch (err: unknown) {
+          logPlugin.warn('frontpanel snapshot update failed', {
+            err: (err as Error)?.message ?? String(err),
+          })
+        }
+
+        // NEW: AppState truth for PC power (replaces message bus coordination)
+        if (evt.kind === 'frontpanel-power-sense-changed') {
+          try {
+            setPcPowerTruth({
+              value: evt.powerSense, // 'on' | 'off' | 'unknown'
+              source: `frontpanel:${evt.source ?? 'unknown'}`,
+              changedAt: evt.at,
+            })
+          } catch (err: unknown) {
+            // Fail-safe: never crash the frontpanel path due to state write.
+            logPlugin.warn('pc power AppState update failed', {
+              err: (err as Error)?.message ?? String(err),
+            })
+          }
+        }
       },
     }
   )
 
-  // ✅ pass bus through (optional)
-  const svc = new FrontPanelService(cfg, { events, bus: (app as any).bus } as any)
+  const svc = new FrontPanelService(cfg, { events })
 
   app.decorate('frontPanel', svc)
 

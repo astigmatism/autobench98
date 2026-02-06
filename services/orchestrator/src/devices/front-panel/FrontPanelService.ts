@@ -15,18 +15,6 @@ import type {
 } from './types'
 import { sleep, now, makeOpId } from './utils'
 
-// Message bus (orchestrator-internal)
-import type { Bus } from '../../core/events/index.js'
-
-/* -------------------------------------------------------------------------- */
-/*  Message bus contract (frontpanel -> others)                               */
-/* -------------------------------------------------------------------------- */
-
-type FrontPanelPowerPayload = {
-  state: FrontPanelPowerSense // 'on' | 'off' | 'unknown'
-  reason?: string
-}
-
 interface QueuedOp {
   id: string
   kind: FrontPanelOperationKind
@@ -46,7 +34,6 @@ type DisconnectReason = 'io-error' | 'explicit-close' | 'unknown' | 'device-lost
 export class FrontPanelService {
   private readonly cfg: FrontPanelConfig
   private readonly events: FrontPanelEventSink
-  private readonly bus?: Bus
 
   private deviceId: string | null = null
   private devicePath: string | null = null
@@ -72,10 +59,9 @@ export class FrontPanelService {
   private openInFlight: Promise<void> | null = null
   private closingPort: SerialPort | null = null
 
-  constructor(cfg: FrontPanelConfig, deps: { events: FrontPanelEventSink; bus?: Bus }) {
+  constructor(cfg: FrontPanelConfig, deps: { events: FrontPanelEventSink }) {
     this.cfg = cfg
     this.events = deps.events
-    this.bus = deps.bus
   }
 
   /* ---------------------------------------------------------------------- */
@@ -105,6 +91,7 @@ export class FrontPanelService {
     this.phase = 'disconnected'
     this.identified = false
 
+    // Fail-closed local state
     this.powerSense = 'unknown'
     this.hddActive = false
     this.powerButtonHeld = false
@@ -435,13 +422,12 @@ export class FrontPanelService {
     this.phase = 'disconnected'
     this.readBuffer = ''
 
-    // Fail-closed visibility: on disconnect, treat telemetry as unknown/off.
-    this.powerSense = 'unknown'
+    // Fail-closed: on disconnect, treat telemetry as unknown/off.
+    // IMPORTANT: do not widen the FrontPanelEvent source type; keep it 'firmware'.
+    this.setPowerSense('unknown')
+
     this.hddActive = false
     this.powerButtonHeld = false
-
-    // 🔴 Fail-closed coordination: tell the bus "unknown" whenever we lose the device.
-    this.publishPowerSenseToBus('unknown', `disconnect:${reason}`)
 
     if (port && port.isOpen) {
       this.closingPort = port
@@ -694,39 +680,13 @@ export class FrontPanelService {
     if (this.powerSense === next) return
     this.powerSense = next
 
+    // NOTE: FrontPanelEvent contract types `source` as the literal "firmware".
     this.events.publish({
       kind: 'frontpanel-power-sense-changed',
       at: now(),
       powerSense: next,
       source: 'firmware',
     })
-
-    // ✅ Publish to message bus for coordination (keyboard, etc.)
-    this.publishPowerSenseToBus(next, 'firmware')
-  }
-
-  private publishPowerSenseToBus(state: FrontPanelPowerSense, reason: string): void {
-    if (!this.bus) return
-    try {
-      this.bus.publish<FrontPanelPowerPayload>({
-        topic: 'frontpanel.power.changed',
-        source: 'frontpanel',
-        schemaVersion: 1,
-        payload: { state, reason },
-        attributes: { state },
-      })
-    } catch (err) {
-      // Never let bus issues crash the frontpanel service; log via normal event sink.
-      this.events.publish({
-        kind: 'recoverable-error',
-        at: now(),
-        error: this.toErrorWithScope(
-          'unknown',
-          `bus publish failed: ${(err as Error)?.message ?? String(err)}`,
-          true
-        ),
-      })
-    }
   }
 
   private setHddActive(active: boolean): void {
