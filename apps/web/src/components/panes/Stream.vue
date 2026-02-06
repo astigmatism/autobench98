@@ -98,6 +98,22 @@
                             </span>
                         </div>
 
+                        <!-- NEW: capture freshness / lag diagnostic -->
+                        <div class="health-row">
+                            <span class="label">Capture age</span>
+                            <span class="value monospace" :data-age="captureAgeBucket">
+                                {{ formattedCaptureAge }}
+                            </span>
+                        </div>
+
+                        <!-- NEW: request timing; helps explain “health is stale” vs “capture is stale” -->
+                        <div class="health-row">
+                            <span class="label">Health RTT</span>
+                            <span class="value monospace">
+                                {{ healthRttMs != null ? `${healthRttMs}ms` : '—' }}
+                            </span>
+                        </div>
+
                         <div class="health-row">
                             <span class="label">Frame</span>
                             <span class="value monospace">
@@ -121,6 +137,13 @@
                     </div>
 
                     <div v-else class="health-empty">No health data yet.</div>
+
+                    <!-- Optional: tiny hint so interpretation is in the UI -->
+                    <div v-if="health" class="health-note">
+                        Capture age reflects sidecar capture freshness (not necessarily what the browser is
+                        currently displaying). If capture age stays low but the view lags, the stream path
+                        is backlogged.
+                    </div>
                 </div>
             </div>
         </transition>
@@ -774,6 +797,61 @@ const health = ref<SidecarHealth | null>(null)
 const healthLoading = ref(false)
 const healthError = ref<string | null>(null)
 
+/**
+ * Diagnostics for "is the capture stale, or is the stream/back-end path backlogged?"
+ * - healthRttMs: how long /health took (roughly)
+ * - healthClockOffsetMs: estimated (serverNow - clientNow) using midpoint method
+ */
+const healthRttMs = ref<number | null>(null)
+const healthClockOffsetMs = ref<number | null>(null)
+
+let healthInFlight = false
+let healthPollTimer: number | null = null
+
+function safeParseIsoMs(iso: string | undefined | null): number | null {
+    if (!iso) return null
+    const ms = Date.parse(iso)
+    return Number.isFinite(ms) ? ms : null
+}
+
+function clampNonNeg(n: number): number {
+    if (!Number.isFinite(n)) return 0
+    return Math.max(0, Math.floor(n))
+}
+
+function formatAge(ms: number): string {
+    const v = clampNonNeg(ms)
+    if (v < 1000) return `${v}ms`
+    const s = v / 1000
+    if (s < 60) return `${s.toFixed(1)}s`
+    const m = Math.floor(s / 60)
+    const rs = Math.floor(s % 60)
+    return `${m}m${String(rs).padStart(2, '0')}s`
+}
+
+const captureAgeMs = computed(() => {
+    const last = health.value?.capture?.lastFrameTs
+    if (last == null || !Number.isFinite(last)) return null
+
+    const offset = healthClockOffsetMs.value ?? 0
+    const approxServerNow = Date.now() + offset
+    return clampNonNeg(approxServerNow - last)
+})
+
+const formattedCaptureAge = computed(() => {
+    const ms = captureAgeMs.value
+    if (ms == null) return '—'
+    return formatAge(ms)
+})
+
+const captureAgeBucket = computed(() => {
+    const ms = captureAgeMs.value
+    if (ms == null) return 'unknown'
+    if (ms <= 250) return 'ok'
+    if (ms <= 1000) return 'warn'
+    return 'bad'
+})
+
 const formattedUptime = computed(() => {
     const sec = health.value?.uptimeSec
     if (sec == null || !Number.isFinite(sec) || sec < 0) return '—'
@@ -791,9 +869,16 @@ const formattedUptime = computed(() => {
     return parts.join(' ')
 })
 
-async function loadHealth() {
-    healthLoading.value = true
+async function loadHealth(opts?: { silent?: boolean }) {
+    if (healthInFlight) return
+    healthInFlight = true
+
+    const silent = !!opts?.silent
+    if (!silent) healthLoading.value = true
     healthError.value = null
+
+    const t0 = performance.now()
+    const wall0 = Date.now()
 
     try {
         const res = await fetch(HEALTH_ENDPOINT, {
@@ -801,17 +886,30 @@ async function loadHealth() {
             headers: { Accept: 'application/json' },
         })
 
+        const t1 = performance.now()
+        const wall1 = Date.now()
+        healthRttMs.value = Math.max(0, Math.round(t1 - t0))
+
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
         const json = (await res.json()) as SidecarHealth
         health.value = json
+
+        // Estimate server clock offset using midpoint method:
+        // serverNow (from json.timestamp) - clientMid (between request start/end).
+        const serverNowMs = safeParseIsoMs(json?.timestamp)
+        if (serverNowMs != null) {
+            const clientMid = (wall0 + wall1) / 2
+            healthClockOffsetMs.value = Math.round(serverNowMs - clientMid)
+        }
     } catch (err: any) {
         health.value = null
         healthError.value = err?.message
             ? `Failed to load health: ${err.message}`
             : 'Failed to load health'
     } finally {
-        healthLoading.value = false
+        healthInFlight = false
+        if (!silent) healthLoading.value = false
     }
 }
 
@@ -822,7 +920,18 @@ function toggleControls() {
 watch(
     () => showControls.value,
     (open) => {
-        if (open) void loadHealth()
+        // Poll while panel is open so "Capture age" updates during an episode.
+        if (open) {
+            void loadHealth()
+            if (healthPollTimer != null) window.clearInterval(healthPollTimer)
+            healthPollTimer = window.setInterval(() => {
+                void loadHealth({ silent: true })
+            }, 1000)
+            return
+        }
+
+        if (healthPollTimer != null) window.clearInterval(healthPollTimer)
+        healthPollTimer = null
     }
 )
 
@@ -850,6 +959,9 @@ onBeforeUnmount(() => {
 
     if (frameResizeObs) frameResizeObs.disconnect()
     frameResizeObs = null
+
+    if (healthPollTimer != null) window.clearInterval(healthPollTimer)
+    healthPollTimer = null
 })
 </script>
 
@@ -992,24 +1104,6 @@ onBeforeUnmount(() => {
     color: var(--panel-fg);
 }
 
-.btn {
-    padding: 0 12px;
-    border-radius: 6px;
-    border: 1px solid #333;
-    background: #111;
-    color: var(--panel-fg);
-    cursor: pointer;
-    height: var(--control-h);
-    line-height: var(--control-h);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    white-space: nowrap;
-}
-.btn:hover {
-    background: #1a1a1a;
-}
-
 .health-panel {
     margin-top: 4px;
     padding: 6px 8px;
@@ -1018,7 +1112,7 @@ onBeforeUnmount(() => {
     background: #020617;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
     font-size: 0.76rem;
     color: var(--panel-fg);
 }
@@ -1087,6 +1181,22 @@ onBeforeUnmount(() => {
 
 .health-row .value {
     text-align: right;
+}
+
+.health-row .value[data-age='ok'] {
+    opacity: 0.95;
+}
+.health-row .value[data-age='warn'] {
+    opacity: 0.95;
+}
+.health-row .value[data-age='bad'] {
+    opacity: 0.95;
+}
+
+.health-note {
+    opacity: 0.72;
+    line-height: 1.35;
+    font-size: 0.72rem;
 }
 
 .health-empty {
@@ -1175,7 +1285,6 @@ onBeforeUnmount(() => {
     object-fit: none;
 }
 
-/* Rectangular inner glow; no border ring */
 .kb-glow {
     position: absolute;
     inset: 0;
@@ -1211,18 +1320,15 @@ onBeforeUnmount(() => {
     background-position: top, bottom, left, right;
 }
 
-/* image-bounds glow */
 .stream-glow {
     z-index: 2;
 }
 
-/* viewport-bounds glow (native only) */
 .capture-glow {
     z-index: 3;
     border-radius: 6px;
 }
 
-/* on while capturing */
 .kb-capture-layer[data-capturing='true'] .stream-glow {
     opacity: 1;
 }
@@ -1250,10 +1356,6 @@ onBeforeUnmount(() => {
     font-size: 0.74rem;
     box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
     backdrop-filter: blur(2px);
-}
-
-.kb-hint b {
-    font-weight: 700;
 }
 
 .viewport-placeholder {
