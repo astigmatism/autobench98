@@ -1,5 +1,3 @@
-// services/orchestrator/src/plugins/frontPanel.ts
-
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
 
@@ -8,10 +6,8 @@ import { createLogger, LogChannel, type ClientLogBuffer } from '@autobench98/log
 import { FrontPanelService } from '../devices/front-panel/FrontPanelService.js'
 import type { FrontPanelEvent } from '../devices/front-panel/types.js'
 import { buildFrontPanelConfigFromEnv } from '../devices/front-panel/utils.js'
-import { FrontPanelStateAdapter } from '../adapters/frontPanel.adapter.js'
-import { updateFrontPanelSnapshot } from '../core/state.js'
 
-// ✅ AppState slice mutator for power truth (replaces message bus fanout)
+// ✅ AppState slice mutator for power truth (replaces message bus + legacy snapshot updater)
 import { setPcPowerTruth } from '../core/state/slices/power.js'
 
 // ---- Fastify decoration ----------------------------------------------------
@@ -167,32 +163,50 @@ const frontPanelPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
   const cfg = buildFrontPanelConfigFromEnv(env)
 
   const loggerSink = new FrontPanelLoggerEventSink(app)
-  const stateAdapter = new FrontPanelStateAdapter()
 
   const events: FrontPanelEventSink = new FanoutFrontPanelEventSink(
     loggerSink,
     {
       publish(evt: FrontPanelEvent): void {
-        // Existing frontpanel snapshot adapter
-        try {
-          stateAdapter.handle(evt)
-          updateFrontPanelSnapshot(stateAdapter.getState())
-        } catch (err: unknown) {
-          logPlugin.warn('frontpanel snapshot update failed', {
-            err: (err as Error)?.message ?? String(err),
-          })
-        }
-
-        // NEW: AppState truth for PC power (replaces message bus coordination)
+        // AppState truth for PC power
         if (evt.kind === 'frontpanel-power-sense-changed') {
           try {
             setPcPowerTruth({
               value: evt.powerSense, // 'on' | 'off' | 'unknown'
-              source: `frontpanel:${evt.source ?? 'unknown'}`,
+              source: `frontpanel:${evt.source}`, // evt.source is the literal "firmware"
               changedAt: evt.at,
             })
           } catch (err: unknown) {
-            // Fail-safe: never crash the frontpanel path due to state write.
+            // Fail-safe: never crash frontpanel path due to state write.
+            logPlugin.warn('pc power AppState update failed', {
+              err: (err as Error)?.message ?? String(err),
+            })
+          }
+        }
+
+        // Fail-closed on disconnect/loss even if no power-sense event was emitted
+        if (evt.kind === 'frontpanel-device-disconnected') {
+          try {
+            setPcPowerTruth({
+              value: 'unknown',
+              source: `frontpanel:disconnect:${evt.reason}`,
+              changedAt: evt.at,
+            })
+          } catch (err: unknown) {
+            logPlugin.warn('pc power AppState update failed', {
+              err: (err as Error)?.message ?? String(err),
+            })
+          }
+        }
+
+        if (evt.kind === 'frontpanel-device-lost') {
+          try {
+            setPcPowerTruth({
+              value: 'unknown',
+              source: `frontpanel:device-lost`,
+              changedAt: evt.at,
+            })
+          } catch (err: unknown) {
             logPlugin.warn('pc power AppState update failed', {
               err: (err as Error)?.message ?? String(err),
             })

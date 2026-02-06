@@ -1,5 +1,3 @@
-// services/orchestrator/src/devices/front-panel/FrontPanelService.ts
-
 import { SerialPort } from 'serialport'
 import type {
   FrontPanelConfig,
@@ -46,6 +44,10 @@ export class FrontPanelService {
   private hddActive = false
   private powerButtonHeld = false
 
+  // Safety: do not publish telemetry until identify is confirmed.
+  private pendingPowerSense: FrontPanelPowerSense | null = null
+  private pendingHddActive: boolean | null = null
+
   private queue: QueuedOp[] = []
   private activeOp: QueuedOp | null = null
   private cancelled = false
@@ -58,6 +60,13 @@ export class FrontPanelService {
   private stopping = false
   private openInFlight: Promise<void> | null = null
   private closingPort: SerialPort | null = null
+
+  private static readonly IDENTIFY_IGNORE_LINES = new Set<string>([
+    'POWER_LED_ON',
+    'POWER_LED_OFF',
+    'HDD_ACTIVE_ON',
+    'HDD_ACTIVE_OFF',
+  ])
 
   constructor(cfg: FrontPanelConfig, deps: { events: FrontPanelEventSink }) {
     this.cfg = cfg
@@ -95,6 +104,8 @@ export class FrontPanelService {
     this.powerSense = 'unknown'
     this.hddActive = false
     this.powerButtonHeld = false
+    this.pendingPowerSense = null
+    this.pendingHddActive = null
 
     this.readBuffer = ''
     this.deviceId = null
@@ -351,6 +362,8 @@ export class FrontPanelService {
 
       this.phase = 'connecting'
       this.identified = false
+      this.pendingPowerSense = null
+      this.pendingHddActive = null
 
       const port = new SerialPort({
         path: devicePath,
@@ -422,12 +435,12 @@ export class FrontPanelService {
     this.phase = 'disconnected'
     this.readBuffer = ''
 
-    // Fail-closed: on disconnect, treat telemetry as unknown/off.
-    // IMPORTANT: do not widen the FrontPanelEvent source type; keep it 'firmware'.
-    this.setPowerSense('unknown')
-
+    // Fail-closed local state
+    this.powerSense = 'unknown'
     this.hddActive = false
     this.powerButtonHeld = false
+    this.pendingPowerSense = null
+    this.pendingHddActive = null
 
     if (port && port.isOpen) {
       this.closingPort = port
@@ -442,6 +455,86 @@ export class FrontPanelService {
         path,
         reason,
       })
+    }
+  }
+
+  private waitForLineMatching(
+    timeoutMs: number,
+    opts: {
+      accept: (line: string) => boolean
+      ignore?: (line: string) => boolean
+      failOnUnexpected?: boolean
+    }
+  ): { promise: Promise<string>; cancel: (err?: unknown) => void } {
+    if (!this.port) throw new Error('port not open')
+
+    const port = this.port
+    let finished = false
+    let buf = ''
+    let timer: NodeJS.Timeout | null = null
+
+    let resolveFn!: (v: string) => void
+    let rejectFn!: (e: Error) => void
+
+    const cleanup = (onData: (data: Buffer) => void) => {
+      port.off('data', onData)
+      if (timer) clearTimeout(timer)
+      timer = null
+    }
+
+    const promise = new Promise<string>((resolve, reject) => {
+      resolveFn = resolve
+      rejectFn = (e: Error) => reject(e)
+    })
+
+    const settleResolve = (onData: (data: Buffer) => void, line: string) => {
+      if (finished) return
+      finished = true
+      cleanup(onData)
+      resolveFn(line)
+    }
+
+    const settleReject = (onData: (data: Buffer) => void, err: unknown) => {
+      if (finished) return
+      finished = true
+      cleanup(onData)
+      const e = err instanceof Error ? err : new Error(String(err))
+      rejectFn(e)
+    }
+
+    const onData = (data: Buffer) => {
+      if (finished) return
+      buf += data.toString('utf8')
+      const lines = buf.split(/\r?\n/)
+      buf = lines.pop() ?? ''
+
+      for (const l of lines) {
+        const line = l.trim()
+        if (!line) continue
+        if (line.startsWith('debug:')) continue
+        if (opts.ignore?.(line)) continue
+
+        if (opts.accept(line)) {
+          settleResolve(onData, line)
+          return
+        }
+
+        if (opts.failOnUnexpected ?? true) {
+          settleReject(onData, new Error(`unexpected identify token: ${line}`))
+          return
+        }
+      }
+    }
+
+    port.on('data', onData)
+
+    timer = setTimeout(() => {
+      settleReject(onData, new Error('identify timeout'))
+    }, timeoutMs)
+
+    return {
+      promise,
+      cancel: (err?: unknown) => settleReject(onData, err ?? new Error('cancelled')),
     }
   }
 
@@ -462,12 +555,19 @@ export class FrontPanelService {
       let lastErr: unknown = null
 
       for (let attempt = 1; attempt <= this.cfg.identify.retries; attempt++) {
+        const waiter = this.waitForLineMatching(this.cfg.identify.timeoutMs, {
+          accept: (line) => line === expected,
+          ignore: (line) => FrontPanelService.IDENTIFY_IGNORE_LINES.has(line),
+          failOnUnexpected: true,
+        })
+
         try {
+          // Critical: attach listener BEFORE sending request to avoid missing fast replies.
           await this.writeLine(this.cfg.identify.request)
-          const t = await this.readLine(this.cfg.identify.timeoutMs)
-          token = t
+          token = await waiter.promise
           break
         } catch (err) {
+          waiter.cancel(err)
           lastErr = err
         }
       }
@@ -476,11 +576,9 @@ export class FrontPanelService {
         throw lastErr ?? new Error('identify failed')
       }
 
-      if (token !== expected) {
-        throw new Error(`unexpected identify token: ${token}`)
-      }
-
+      // token is expected at this point; any other value would have rejected above.
       await this.writeLine(this.cfg.identify.completion)
+
       this.identified = true
       this.phase = 'ready'
 
@@ -489,6 +587,16 @@ export class FrontPanelService {
         at: now(),
         token,
       })
+
+      // Apply any telemetry we observed during identify, now that identity is confirmed.
+      if (this.pendingPowerSense) {
+        this.setPowerSense(this.pendingPowerSense)
+        this.pendingPowerSense = null
+      }
+      if (this.pendingHddActive !== null) {
+        this.setHddActive(this.pendingHddActive)
+        this.pendingHddActive = null
+      }
     } catch (err) {
       this.identified = false
       this.phase = 'error'
@@ -514,55 +622,6 @@ export class FrontPanelService {
     })
   }
 
-  private async readLine(timeoutMs: number): Promise<string> {
-    const start = now()
-    let buf = ''
-
-    return new Promise<string>((resolve, reject) => {
-      if (!this.port) {
-        reject(new Error('port not open'))
-        return
-      }
-
-      const port = this.port
-      let finished = false
-
-      const onData = (data: Buffer) => {
-        if (finished) return
-        buf += data.toString('utf8')
-        const lines = buf.split(/\r?\n/)
-        buf = lines.pop() ?? ''
-        for (const l of lines) {
-          const line = l.trim()
-          if (!line) continue
-          if (line.startsWith('debug:')) continue
-          cleanup()
-          finished = true
-          resolve(line)
-          return
-        }
-      }
-
-      const cleanup = () => {
-        port.off('data', onData)
-      }
-
-      port.on('data', onData)
-
-      const tick = () => {
-        if (finished) return
-        if (now() - start >= timeoutMs) {
-          cleanup()
-          finished = true
-          reject(new Error('identify timeout'))
-        } else {
-          setTimeout(tick, 25)
-        }
-      }
-      tick()
-    })
-  }
-
   private handleData(chunk: string): void {
     this.readBuffer += chunk
     const lines = this.readBuffer.split(/\r?\n/)
@@ -574,6 +633,33 @@ export class FrontPanelService {
 
       // Avoid log noise: during identify, token line can arrive and would otherwise show as debug.
       if (!this.identified && line === this.cfg.expectedIdToken) {
+        continue
+      }
+
+      // Safety: do not publish telemetry until identify is confirmed.
+      if (!this.identified) {
+        if (line === 'POWER_LED_ON') {
+          this.pendingPowerSense = 'on'
+          continue
+        }
+        if (line === 'POWER_LED_OFF') {
+          this.pendingPowerSense = 'off'
+          continue
+        }
+        if (line === 'HDD_ACTIVE_ON') {
+          this.pendingHddActive = true
+          continue
+        }
+        if (line === 'HDD_ACTIVE_OFF') {
+          this.pendingHddActive = false
+          continue
+        }
+        // Still allow debug visibility during identify.
+        this.events.publish({
+          kind: 'frontpanel-debug-line',
+          at: now(),
+          line,
+        })
         continue
       }
 
