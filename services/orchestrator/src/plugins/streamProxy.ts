@@ -29,10 +29,6 @@ declare module 'fastify' {
  *   GET /api/sidecar/health  →  GET http://127.0.0.1:SIDECAR_PORT/health
  *
  * NOTE: Query params are forwarded for /stream (e.g. ?maxFps=30).
- *
- * Sidecar is expected to bind to 0.0.0.0 or 127.0.0.1 on SIDECAR_PORT. We
- * always talk to it via 127.0.0.1 here, so the sidecar port does not need
- * to be exposed externally.
  */
 const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     const { channel } = createLogger('sidecar-proxy', app.clientBuf)
@@ -41,6 +37,15 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     const rawPort = process.env.SIDECAR_PORT
     const port = Number.isFinite(Number(rawPort)) ? Number(rawPort) : 3100
     const baseUrl = `http://127.0.0.1:${port}`
+
+    // Rate-limit non-2xx health logs (ms)
+    const HEALTH_NON_2XX_LOG_INTERVAL_MS = Math.max(
+        0,
+        Number(process.env.SIDECAR_PROXY_HEALTH_NON_2XX_LOG_INTERVAL_MS ?? '5000')
+    )
+
+    let lastHealthNon2xxSig = ''
+    let lastHealthNon2xxAt = 0
 
     log.info(`sidecar proxy configured baseUrl=${baseUrl}`)
 
@@ -67,16 +72,36 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
         }
     }
 
+    function compactPreview(input: string, max = 200): string {
+        return String(input ?? '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, max)
+    }
+
+    function maybeLogHealthNon2xx(statusCode: number, preview: string) {
+        const sig = `${statusCode}:${preview}`
+        const now = Date.now()
+
+        // If identical message is repeating rapidly, log at most once per interval.
+        if (sig === lastHealthNon2xxSig && now - lastHealthNon2xxAt < HEALTH_NON_2XX_LOG_INTERVAL_MS) {
+            return
+        }
+
+        lastHealthNon2xxSig = sig
+        lastHealthNon2xxAt = now
+
+        // One-line log (no structured object dump).
+        log.warn(
+            `sidecar health non-2xx statusCode=${statusCode} bodyPreview=${JSON.stringify(preview)}`
+        )
+    }
+
     /**
      * MJPEG stream proxy.
-     *
-     * We stream the sidecar response body directly back to the client,
-     * preserving status and most headers.
-     *
-     * Query params are forwarded (e.g. /api/sidecar/stream?maxFps=30).
      */
     app.get('/api/sidecar/stream', async (req, reply) => {
-        // Fastify's req.url includes the query string.
+        // req.url includes query string
         let search = ''
         try {
             const u = new URL(req.url ?? '/api/sidecar/stream', 'http://localhost')
@@ -114,33 +139,24 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
 
             passThroughHeaders(headers as any, reply)
 
-            // Fastify’s typed API is reply.code(), not reply.status().
+            // Fastify uses reply.code(), not reply.status()
             reply.code(statusCode)
-
-            // body is a Node Readable stream; Fastify can send it directly.
             return reply.send(body)
         } catch (err) {
             const msg = (err as Error).message ?? String(err)
-            log.warn('error proxying sidecar stream', { error: msg })
+            log.warn(`error proxying sidecar stream error=${JSON.stringify(msg)}`)
 
             reply.code(502)
-            return reply.send({
-                ok: false,
-                error: 'sidecar stream unavailable',
-            })
+            return reply.send({ ok: false, error: 'sidecar stream unavailable' })
         }
     })
 
     /**
      * Health proxy.
      *
-     * Used by StreamPane advanced panel to show sidecar uptime and capture metrics.
-     *
-     * NOTE: We mark this route as "silent" and add a config flag so your custom
-     * request logger can skip it (if you implement that check in app.ts hooks).
+     * NOTE: Route is marked skipRequestLog so app.ts can skip request logs for it.
      */
     const healthRouteOpts: RouteShorthandOptions = {
-        // No-op if Fastify logger is disabled, but harmless and keeps intent.
         logLevel: 'silent',
         config: { skipRequestLog: true },
     }
@@ -149,57 +165,47 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
         const target = `${baseUrl}/health`
 
         try {
-            const { statusCode, body, headers } = await request(target, {
+            const { statusCode, headers, body } = await request(target, {
                 method: 'GET',
                 headers: { accept: 'application/json' },
             })
 
-            // Propagate basic content-type if present.
             passThroughHeaders(headers as any, reply)
 
-            // Non-2xx from sidecar: surface as error to the client.
-            if (statusCode < 200 || statusCode >= 300) {
-                const text = await body.text().catch(() => '')
-                log.warn('sidecar health returned non-2xx', {
-                    statusCode,
-                    bodyPreview: text.slice(0, 200),
-                })
+            // Read body once, then attempt JSON parse. (Sidecar returns JSON even on 503.)
+            const text = await body.text().catch(() => '')
+            const preview = compactPreview(text)
 
-                reply.code(statusCode)
-                return reply.send({
-                    ok: false,
-                    error: `sidecar health returned HTTP ${statusCode}`,
-                })
+            let parsed: unknown = null
+            if (text) {
+                try {
+                    parsed = JSON.parse(text)
+                } catch {
+                    parsed = null
+                }
             }
 
-            // Parse JSON payload and forward it as-is.
-            let json: unknown
-            try {
-                json = await body.json()
-            } catch {
-                const text = await body.text().catch(() => '')
-                log.warn('failed to parse sidecar health JSON', {
-                    bodyPreview: text.slice(0, 200),
-                })
+            if (statusCode < 200 || statusCode >= 300) {
+                maybeLogHealthNon2xx(statusCode, preview)
 
-                reply.code(502).header('content-type', 'application/json; charset=utf-8')
-                return reply.send({
-                    ok: false,
-                    error: 'invalid sidecar health payload',
-                })
+                reply.code(statusCode).header('content-type', 'application/json; charset=utf-8')
+                // Forward parsed JSON if available; otherwise provide a small proxy error shape.
+                return reply.send(
+                    parsed ?? {
+                        ok: false,
+                        error: `sidecar health returned HTTP ${statusCode}`,
+                    }
+                )
             }
 
             reply.code(200).header('content-type', 'application/json; charset=utf-8')
-            return reply.send(json)
+            return reply.send(parsed ?? { ok: false, error: 'invalid sidecar health payload' })
         } catch (err) {
             const msg = (err as Error).message ?? String(err)
-            log.warn('error proxying sidecar health', { error: msg })
+            log.warn(`error proxying sidecar health error=${JSON.stringify(msg)}`)
 
             reply.code(502).header('content-type', 'application/json; charset=utf-8')
-            return reply.send({
-                ok: false,
-                error: 'sidecar health unavailable',
-            })
+            return reply.send({ ok: false, error: 'sidecar health unavailable' })
         }
     })
 }

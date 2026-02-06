@@ -406,9 +406,7 @@ const fpsMode = ref<StreamFpsMode>('auto')
 // Default to 30 (your preference).
 const autoMaxFps = ref<number>(30)
 
-// How many times we forcibly resynced the <img> stream to drop backlog.
 const resyncCount = ref(0)
-
 const lastResyncTs = ref<number>(0)
 const stableImproveTicks = ref<number>(0)
 
@@ -427,7 +425,6 @@ const viewerCapLabel = computed(() => {
     return `${effectiveMaxFps.value}`
 })
 
-// Build stream src with a client-controlled fps cap.
 const streamSrc = computed(() => {
     const params = new URLSearchParams()
     params.set('maxFps', String(effectiveMaxFps.value))
@@ -438,14 +435,10 @@ function requestStreamResync(reason: string) {
     void reason
     if (!enabled.value) return
     const now = Date.now()
-
-    // Safety: avoid thrash (especially if health temporarily spikes)
     if (now - lastResyncTs.value < 1500) return
 
     lastResyncTs.value = now
     resyncCount.value += 1
-
-    // Remount the <img> to force a fresh connection (drops existing queued backlog).
     reloadStream()
 }
 
@@ -983,13 +976,32 @@ async function loadHealth(opts?: { silent?: boolean }) {
         const t1 = performance.now()
         healthRttMs.value = Math.max(0, Math.round(t1 - t0))
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        // Parse JSON even for non-2xx so we can still show "unhealthy" details.
+        let json: unknown = null
+        try {
+            json = await res.json()
+        } catch {
+            json = null
+        }
 
-        const json = (await res.json()) as SidecarHealth
-        health.value = json
+        if (json && typeof json === 'object') {
+            health.value = json as SidecarHealth
+        } else if (res.ok) {
+            health.value = null
+        }
+
+        if (!res.ok) {
+            healthError.value = `Sidecar unhealthy (HTTP ${res.status})`
+            return
+        }
+
+        // OK
+        healthError.value = null
+        return
     } catch (err: any) {
-        health.value = null
         healthError.value = err?.message ? `Failed to load health: ${err.message}` : 'Failed to load health'
+        // Keep last known health if we have one; don’t force-clear it here.
+        return
     } finally {
         healthInFlight = false
         if (!silent) healthLoading.value = false
@@ -1002,8 +1014,6 @@ async function loadHealth(opts?: { silent?: boolean }) {
 
 function nextHigherFps(cur: number): number {
     const levels = [2, 4, 8, 15, 20, 30, 60] as const
-
-    // If cur is not exactly one of the levels, choose the next >= cur.
     for (const lvl of levels) {
         if (cur <= lvl) return lvl
     }
@@ -1017,19 +1027,14 @@ function suggestFpsFromDiag(d: SidecarStreamDiag | null): number {
     const buffered = Number.isFinite(d.maxClientBufferedBytes as any) ? d.maxClientBufferedBytes : 0
     const ratio = Number.isFinite(d.maxClientBufferedRatio as any) ? d.maxClientBufferedRatio : 0
 
-    // Extreme cases: allow deeper drops (keeps “live now”).
     if (backlog >= 5000 || buffered >= 64 * MB || ratio >= 64) return 2
     if (backlog >= 3000 || buffered >= 32 * MB || ratio >= 32) return 4
     if (backlog >= 2000 || buffered >= 24 * MB || ratio >= 24) return 8
 
-    // Preferred stepping: 30 → 20 → 15 under pressure.
     if (backlog >= 900 || buffered >= 12 * MB || ratio >= 12) return 15
     if (backlog >= 450 || buffered >= 6 * MB || ratio >= 6) return 20
 
-    // Default target is 30 unless the stream is very stable.
     if (backlog >= 200 || buffered >= 2 * MB || ratio >= 3) return 30
-
-    // Very stable: allow 60 (we still start at 30 and only upshift slowly).
     return 60
 }
 
@@ -1049,7 +1054,6 @@ function maybeAutoAdjust() {
         requestStreamResync('backlog_high')
     }
 
-    // Degrade immediately on pressure.
     if (suggested < current) {
         stableImproveTicks.value = 0
         autoMaxFps.value = suggested
@@ -1057,7 +1061,6 @@ function maybeAutoAdjust() {
         return
     }
 
-    // Improve slowly (needs sustained stability).
     if (suggested > current) {
         stableImproveTicks.value += 1
         if (stableImproveTicks.value >= 5) {
@@ -1078,7 +1081,6 @@ watch(
     }
 )
 
-// If user changes fps mode, resync to apply immediately.
 watch(
     () => fpsMode.value,
     () => {
@@ -1087,8 +1089,6 @@ watch(
     }
 )
 
-// Only resync on effectiveMaxFps changes for MANUAL modes.
-// Auto mode already resyncs inside maybeAutoAdjust() on cap changes.
 watch(
     () => effectiveMaxFps.value,
     (next, prev) => {
