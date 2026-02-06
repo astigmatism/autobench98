@@ -73,107 +73,19 @@ function toKeyboardPowerState(s: FrontPanelPowerSense): KeyboardPowerState {
   return 'unknown'
 }
 
-function safeNumber(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-
-/**
- * Support both common AppState slice names:
- * - snap.frontPanel.powerSense (camel)
- * - snap.frontpanel.powerSense (lower)
- *
- * Prefer the slice with the most recent updatedAt when both exist.
- */
 function readFrontPanelPowerFromSnapshot(snap: AppState): {
   powerSense: FrontPanelPowerSense
   updatedAt: number | null
-  path: 'frontPanel.powerSense' | 'frontpanel.powerSense' | 'missing'
-  rawFrontPanel?: unknown
-  rawFrontpanel?: unknown
 } {
-  const s: any = snap as any
+  const raw = (snap as any)?.frontPanel?.powerSense
+  const updatedAt =
+    typeof (snap as any)?.frontPanel?.updatedAt === 'number'
+      ? ((snap as any).frontPanel.updatedAt as number)
+      : null
 
-  const frontPanel = s?.frontPanel
-  const frontpanel = s?.frontpanel
-
-  const rawA = frontPanel?.powerSense
-  const rawB = frontpanel?.powerSense
-
-  const aExists = rawA !== undefined
-  const bExists = rawB !== undefined
-
-  const aUpdatedAt = safeNumber(frontPanel?.updatedAt)
-  const bUpdatedAt = safeNumber(frontpanel?.updatedAt)
-
-  // If neither exists, return unknown with explicit "missing"
-  if (!aExists && !bExists) {
-    return {
-      powerSense: 'unknown',
-      updatedAt: null,
-      path: 'missing',
-      rawFrontPanel: rawA,
-      rawFrontpanel: rawB,
-    }
-  }
-
-  // If only one exists, use it
-  if (aExists && !bExists) {
-    return {
-      powerSense: normalizeFrontPanelPowerSense(rawA),
-      updatedAt: aUpdatedAt,
-      path: 'frontPanel.powerSense',
-      rawFrontPanel: rawA,
-      rawFrontpanel: rawB,
-    }
-  }
-
-  if (!aExists && bExists) {
-    return {
-      powerSense: normalizeFrontPanelPowerSense(rawB),
-      updatedAt: bUpdatedAt,
-      path: 'frontpanel.powerSense',
-      rawFrontPanel: rawA,
-      rawFrontpanel: rawB,
-    }
-  }
-
-  // Both exist: prefer most recent updatedAt if available
-  if (aUpdatedAt != null && bUpdatedAt != null) {
-    if (bUpdatedAt >= aUpdatedAt) {
-      return {
-        powerSense: normalizeFrontPanelPowerSense(rawB),
-        updatedAt: bUpdatedAt,
-        path: 'frontpanel.powerSense',
-        rawFrontPanel: rawA,
-        rawFrontpanel: rawB,
-      }
-    }
-    return {
-      powerSense: normalizeFrontPanelPowerSense(rawA),
-      updatedAt: aUpdatedAt,
-      path: 'frontPanel.powerSense',
-      rawFrontPanel: rawA,
-      rawFrontpanel: rawB,
-    }
-  }
-
-  if (bUpdatedAt != null && aUpdatedAt == null) {
-    return {
-      powerSense: normalizeFrontPanelPowerSense(rawB),
-      updatedAt: bUpdatedAt,
-      path: 'frontpanel.powerSense',
-      rawFrontPanel: rawA,
-      rawFrontpanel: rawB,
-    }
-  }
-
-  // Default: pick lower-case slice because your project logs/use is "frontpanel"
   return {
-    powerSense: normalizeFrontPanelPowerSense(rawB),
-    updatedAt: bUpdatedAt,
-    path: 'frontpanel.powerSense',
-    rawFrontPanel: rawA,
-    rawFrontpanel: rawB,
+    powerSense: normalizeFrontPanelPowerSense(raw),
+    updatedAt,
   }
 }
 
@@ -215,9 +127,10 @@ export class PS2KeyboardService {
   private closingPort: SerialPort | null = null
   // --------------------------------------------------------------------------
 
-  // AppState subscription + pending frontpanel power sense
+  // AppState subscription + last-seen frontpanel power sense
   private appStateAttached = false
-  private pendingPowerFromFrontPanel: FrontPanelPowerSense | null = null
+  private lastFrontPanelPowerSense: FrontPanelPowerSense | null = null
+  private lastFrontPanelUpdatedAt: number | null = null
 
   // Modifier identification is intentionally explicit and conservative.
   private static readonly MODIFIER_CODES = new Set<string>([
@@ -242,7 +155,7 @@ export class PS2KeyboardService {
 
   public async start(): Promise<void> {
     this.stopping = false
-    this.attachFrontPanelPowerWatcher()
+    this.ensureFrontPanelPowerWatcherAttached('start')
   }
 
   public async stop(): Promise<void> {
@@ -267,7 +180,8 @@ export class PS2KeyboardService {
     this.phase = 'disconnected'
     this.identified = false
     this.power = 'unknown'
-    this.pendingPowerFromFrontPanel = null
+    this.lastFrontPanelPowerSense = null
+    this.lastFrontPanelUpdatedAt = null
     this.heldModifiers.clear()
     this.readBuffer = ''
   }
@@ -281,6 +195,10 @@ export class PS2KeyboardService {
     path: string
     baudRate?: number
   }): Promise<void> {
+    // CRITICAL: do not rely on plugin lifecycle calling start().
+    // Attach AppState watcher here as well, idempotently.
+    this.ensureFrontPanelPowerWatcherAttached('onDeviceIdentified')
+
     this.deviceId = args.id
     this.devicePath = args.path
 
@@ -322,7 +240,7 @@ export class PS2KeyboardService {
   /* ---------------------------------------------------------------------- */
 
   public enqueueKeyEvent(evt: ClientKeyboardEvent): KeyboardOperationHandle {
-    // Gate key events on power state (safety: do not emit when off/unknown)
+    // Gate key events on power state (do not emit when off/unknown)
     if (this.power !== 'on') {
       const kind: KeyboardOperationKind =
         evt.action === 'press'
@@ -629,8 +547,11 @@ export class PS2KeyboardService {
 
         await this.identify()
 
-        // After identify success, apply any pending frontpanel power state.
-        this.applyPendingFrontPanelPower()
+        // After identify, resync from AppState once (covers start-order issues).
+        this.syncFrontPanelPowerFromSnapshot(getSnapshot(), 'appstate:after-identify')
+
+        // Apply power command to firmware if required by current AppState.
+        this.applyFrontPanelPowerToFirmware('after-identify')
       } catch {
         await this.closePort('unknown')
         this.scheduleReconnect()
@@ -863,63 +784,64 @@ export class PS2KeyboardService {
   }
 
   /* ---------------------------------------------------------------------- */
-  /*  AppState integration (frontpanel powerSense -> internal power gating)  */
+  /*  AppState integration (frontPanel.powerSense -> internal power gating)  */
   /* ---------------------------------------------------------------------- */
 
   private onAppStateSnapshot = (snap: AppState): void => {
     this.syncFrontPanelPowerFromSnapshot(snap, 'appstate:snapshot')
+    this.applyFrontPanelPowerToFirmware('snapshot')
   }
 
   private onAppStatePatch = (): void => {
-    // Many state implementations emit patch far more reliably than snapshot.
+    // Patch is emitted before snapshot in core/state.ts, but we always read
+    // the latest snapshot to avoid patch parsing.
     try {
       const snap = getSnapshot()
       this.syncFrontPanelPowerFromSnapshot(snap, 'appstate:patch')
+      this.applyFrontPanelPowerToFirmware('patch')
     } catch {
       // fail-closed: keep existing state
     }
   }
 
-  private attachFrontPanelPowerWatcher(): void {
+  private ensureFrontPanelPowerWatcherAttached(caller: string): void {
     if (this.appStateAttached) return
+    this.attachFrontPanelPowerWatcher(caller)
+  }
+
+  private attachFrontPanelPowerWatcher(caller: string): void {
     this.appStateAttached = true
 
     // Prove in logs that keyboard is actually watching AppState.
+    let snap: AppState | null = null
+    try {
+      snap = getSnapshot()
+    } catch {
+      snap = null
+    }
+
+    const metaStartedAt = snap ? (snap as any)?.meta?.startedAt : 'unavailable'
+    const version = snap ? (snap as any)?.version : 'unavailable'
+    const { powerSense, updatedAt } = snap
+      ? readFrontPanelPowerFromSnapshot(snap)
+      : { powerSense: 'unknown' as const, updatedAt: null }
+
     this.events.publish({
       kind: 'keyboard-debug-line',
       at: now(),
-      line: 'debug: appstate watcher attached (listening to snapshot + patch)',
+      line:
+        `debug: appstate watcher attached caller=${caller} ` +
+        `state.version=${String(version)} meta.startedAt=${String(metaStartedAt)} ` +
+        `frontPanel.powerSense=${powerSense}` +
+        (updatedAt != null ? ` frontPanel.updatedAt=${updatedAt}` : ''),
     })
 
-    // Sync immediately at attach time.
-    try {
-      const snap = getSnapshot()
-      const { powerSense, updatedAt, path, rawFrontPanel, rawFrontpanel } =
-        readFrontPanelPowerFromSnapshot(snap)
-
-      this.events.publish({
-        kind: 'keyboard-debug-line',
-        at: now(),
-        line:
-          `debug: appstate initial powerSense=${powerSense} path=${path}` +
-          (updatedAt != null ? ` updatedAt=${updatedAt}` : '') +
-          ` raw(frontPanel)=${String(rawFrontPanel)} raw(frontpanel)=${String(
-            rawFrontpanel
-          )}`,
-      })
-
-      this.syncFrontPanelPowerChanged(powerSense, 'appstate:attach', updatedAt, path)
-    } catch {
-      // Fail-closed: treat as unknown, but DO NOT force power_off.
-      this.syncFrontPanelPowerChanged(
-        'unknown',
-        'appstate:attach:read-failed',
-        null,
-        'missing'
-      )
+    // Sync immediately at attach time (this updates this.power).
+    if (snap) {
+      this.syncFrontPanelPowerFromSnapshot(snap, `appstate:attach:${caller}`)
     }
 
-    // Attach both listeners.
+    // Attach listeners.
     stateEvents.on('snapshot', this.onAppStateSnapshot)
     stateEvents.on('patch', this.onAppStatePatch)
   }
@@ -932,86 +854,62 @@ export class PS2KeyboardService {
   }
 
   private syncFrontPanelPowerFromSnapshot(snap: AppState, reason: string): void {
-    const { powerSense, updatedAt, path } = readFrontPanelPowerFromSnapshot(snap)
-    this.syncFrontPanelPowerChanged(powerSense, reason, updatedAt, path)
+    const { powerSense, updatedAt } = readFrontPanelPowerFromSnapshot(snap)
+    this.syncFrontPanelPowerChanged(powerSense, updatedAt, reason)
   }
 
   private syncFrontPanelPowerChanged(
     next: FrontPanelPowerSense,
-    reason: string,
-    frontPanelUpdatedAt: number | null,
-    path: string
+    updatedAt: number | null,
+    reason: string
   ): void {
-    const prev = this.pendingPowerFromFrontPanel
+    const prev = this.lastFrontPanelPowerSense
 
     // Only act/log when the value actually changes.
     if (prev === next) return
 
-    this.pendingPowerFromFrontPanel = next
+    this.lastFrontPanelPowerSense = next
+    this.lastFrontPanelUpdatedAt = updatedAt
 
     // Update internal gating immediately from AppState.
     this.power = toKeyboardPowerState(next)
 
-    // Log power-sense updates at the service level (shows in server logs).
     this.events.publish({
       kind: 'keyboard-debug-line',
       at: now(),
       line:
-        `debug: appstate powerSense changed prev=${prev ?? 'null'} next=${next}` +
-        ` path=${path} reason=${reason}` +
-        (frontPanelUpdatedAt != null ? ` updatedAt=${frontPanelUpdatedAt}` : '') +
-        ` => keyboard.power=${this.power}`,
+        `debug: appstate frontPanel.powerSense changed prev=${prev ?? 'null'} next=${next}` +
+        (updatedAt != null ? ` frontPanel.updatedAt=${updatedAt}` : '') +
+        ` reason=${reason} => keyboard.power=${this.power}`,
     })
 
-    this.onFrontPanelPowerChanged(next, reason)
-  }
-
-  private onFrontPanelPowerChanged(state: FrontPanelPowerSense, reason: string): void {
-    const requestedBy = `frontpanel:${reason}`
-
-    if (state === 'on') {
-      // If device not yet ready, defer firmware command until after identify.
-      if (!this.port || !this.port.isOpen || !this.identified) return
-      void this.powerOn(requestedBy).done.catch(() => {})
-      return
-    }
-
-    // OFF or UNKNOWN: fail closed (gates keys) and clear queued work.
-    // IMPORTANT: unknown should NOT force a firmware power_off (we simply don't know).
-    this.cancelAll('power-gated')
-    this.heldModifiers.clear()
-
-    if (state === 'off') {
-      // If device is ready, explicitly command firmware power-off.
-      if (this.port && this.port.isOpen && this.identified) {
-        void this.powerOff(requestedBy).done.catch(() => {})
-      }
-    }
-  }
-
-  private applyPendingFrontPanelPower(): void {
-    const pending = this.pendingPowerFromFrontPanel
-    if (!pending) return
-    if (!this.port || !this.port.isOpen || !this.identified) return
-
-    const requestedBy = 'frontpanel:pending'
-
-    if (pending === 'on') {
-      void this.powerOn(requestedBy).done.catch(() => {})
-      return
-    }
-
-    // pending off => force firmware off
-    if (pending === 'off') {
+    // Cancel queued work when power is not definitively on.
+    if (next !== 'on') {
       this.cancelAll('power-gated')
       this.heldModifiers.clear()
+    }
+  }
+
+  private applyFrontPanelPowerToFirmware(source: string): void {
+    const s = this.lastFrontPanelPowerSense
+    if (!s) return
+
+    // Only send firmware commands when device is ready.
+    if (!this.port || !this.port.isOpen || !this.identified) return
+
+    const requestedBy = `frontpanel:${source}`
+
+    if (s === 'on') {
+      void this.powerOn(requestedBy).done.catch(() => {})
+      return
+    }
+
+    if (s === 'off') {
       void this.powerOff(requestedBy).done.catch(() => {})
       return
     }
 
-    // pending unknown => gate keys, but do not force firmware off
-    this.cancelAll('power-gated')
-    this.heldModifiers.clear()
+    // unknown => do not force firmware off (we simply don't know)
   }
 
   /* ---------------------------------------------------------------------- */
@@ -1024,7 +922,7 @@ export class PS2KeyboardService {
   }
 
   private async ensurePoweredOn(): Promise<void> {
-    // Safety: refuse keyboard output unless explicitly powered on.
+    // Refuse keyboard output unless AppState says power is on.
     if (this.power !== 'on') throw new Error(`pc power is ${this.power}`)
   }
 
