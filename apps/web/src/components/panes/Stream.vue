@@ -39,6 +39,20 @@
                                     <option value="pane">Pane</option>
                                 </select>
                             </label>
+
+                            <!-- NEW: Viewer-side fps cap (auto uses health metrics to keep stream live) -->
+                            <label class="select panel-text">
+                                <span>Viewer FPS</span>
+                                <select v-model="fpsMode">
+                                    <option value="auto">Auto</option>
+                                    <option value="60">60</option>
+                                    <option value="30">30</option>
+                                    <option value="15">15</option>
+                                    <option value="8">8</option>
+                                    <option value="4">4</option>
+                                    <option value="2">2</option>
+                                </select>
+                            </label>
                         </div>
                     </div>
                     <div class="right"></div>
@@ -87,6 +101,21 @@
                                         >s</span
                                     >
                                 </span>
+                            </span>
+                        </div>
+
+                        <!-- NEW: what we are asking the stream for -->
+                        <div class="health-row">
+                            <span class="label">Viewer cap</span>
+                            <span class="value monospace">
+                                {{ viewerCapLabel }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Resyncs</span>
+                            <span class="value monospace">
+                                {{ resyncCount }}
                             </span>
                         </div>
 
@@ -192,7 +221,7 @@
                             :key="reloadKey"
                             class="stream-img"
                             :data-scale="scaleMode"
-                            :src="STREAM_ENDPOINT"
+                            :src="streamSrc"
                             alt="Test machine stream"
                             draggable="false"
                             @load="onStreamLoad"
@@ -251,10 +280,13 @@ type PaneInfo = {
     }
 }
 
+type StreamFpsMode = 'auto' | '60' | '30' | '15' | '8' | '4' | '2'
+
 type StreamPanePrefs = {
     enabled?: boolean
     scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
     bgMode?: 'black' | 'pane'
+    fpsMode?: StreamFpsMode
 }
 
 function isObject(x: any): x is Record<string, unknown> {
@@ -363,6 +395,58 @@ const enabled = ref(true)
 const scaleMode = ref<'fit' | 'fill' | 'stretch' | 'native'>('fit')
 const bgMode = ref<'black' | 'pane'>('black')
 const reloadKey = ref(0)
+
+/* -------------------------------------------------------------------------- */
+/*  Viewer FPS cap (adaptive)                                                 */
+/* -------------------------------------------------------------------------- */
+
+const fpsMode = ref<StreamFpsMode>('auto')
+
+// Auto-selected cap (only used when fpsMode === 'auto')
+const autoMaxFps = ref<number>(60)
+
+// How many times we forcibly resynced the <img> stream to drop backlog.
+const resyncCount = ref(0)
+
+const lastResyncTs = ref<number>(0)
+const stableImproveTicks = ref<number>(0)
+
+const MB = 1024 * 1024
+
+function modeToFps(m: StreamFpsMode): number {
+    if (m === 'auto') return autoMaxFps.value
+    const n = parseInt(m, 10)
+    return Number.isFinite(n) && n > 0 ? n : autoMaxFps.value
+}
+
+const effectiveMaxFps = computed(() => modeToFps(fpsMode.value))
+
+const viewerCapLabel = computed(() => {
+    if (fpsMode.value === 'auto') return `Auto (${effectiveMaxFps.value})`
+    return `${effectiveMaxFps.value}`
+})
+
+// Build stream src with a client-controlled fps cap.
+// NOTE: This will only *change behavior* once the sidecar honors maxFps.
+const streamSrc = computed(() => {
+    const params = new URLSearchParams()
+    params.set('maxFps', String(effectiveMaxFps.value))
+    return `${STREAM_ENDPOINT}?${params.toString()}`
+})
+
+function requestStreamResync(reason: string) {
+    if (!enabled.value) return
+    const now = Date.now()
+
+    // Safety: avoid thrash (especially if health temporarily spikes)
+    if (now - lastResyncTs.value < 1500) return
+
+    lastResyncTs.value = now
+    resyncCount.value += 1
+
+    // Remount the <img> to force a fresh connection (drops existing queued backlog).
+    reloadStream()
+}
 
 /* -------------------------------------------------------------------------- */
 /*  WS access                                                                 */
@@ -670,6 +754,9 @@ function isValidScaleMode(x: any): x is 'fit' | 'fill' | 'stretch' | 'native' {
 function isValidBgMode(x: any): x is 'black' | 'pane' {
     return x === 'black' || x === 'pane'
 }
+function isValidFpsMode(x: any): x is StreamFpsMode {
+    return x === 'auto' || x === '60' || x === '30' || x === '15' || x === '8' || x === '4' || x === '2'
+}
 
 const paneId = computed(() => String(props.pane?.id ?? '').trim())
 const STORAGE_PREFIX = 'stream:pane:ui:'
@@ -709,10 +796,18 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 
     const nextBg = (prefs as any).bgMode
     if (isValidBgMode(nextBg)) bgMode.value = nextBg
+
+    const nextFps = (prefs as any).fpsMode
+    if (isValidFpsMode(nextFps)) fpsMode.value = nextFps
 }
 
 function exportPanePrefs(): StreamPanePrefs {
-    return { enabled: !!enabled.value, scaleMode: scaleMode.value, bgMode: bgMode.value }
+    return {
+        enabled: !!enabled.value,
+        scaleMode: scaleMode.value,
+        bgMode: bgMode.value,
+        fpsMode: fpsMode.value,
+    }
 }
 
 const lastHydratedSig = ref<string>('')
@@ -746,7 +841,9 @@ function hydrateForPane() {
 
 onMounted(() => hydrateForPane())
 watch([paneId, () => props.__streamPaneUi, () => props.__streamPaneProfileRev], () => hydrateForPane())
-watch([() => enabled.value, () => scaleMode.value, () => bgMode.value], () => writePanePrefs(exportPanePrefs()))
+watch([() => enabled.value, () => scaleMode.value, () => bgMode.value, () => fpsMode.value], () =>
+    writePanePrefs(exportPanePrefs())
+)
 
 /* -------------------------------------------------------------------------- */
 /*  Health state + formatting                                                 */
@@ -812,7 +909,9 @@ const captureAgeMs = computed(() => {
     if (ms == null || !Number.isFinite(ms)) return null
     return clampNonNeg(ms)
 })
-const formattedCaptureAge = computed(() => (captureAgeMs.value == null ? '—' : formatAge(captureAgeMs.value)))
+const formattedCaptureAge = computed(() =>
+    captureAgeMs.value == null ? '—' : formatAge(captureAgeMs.value)
+)
 const captureAgeBucket = computed(() => {
     const ms = captureAgeMs.value
     if (ms == null) return 'unknown'
@@ -896,6 +995,132 @@ async function loadHealth(opts?: { silent?: boolean }) {
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Auto throttle logic (based ONLY on metrics you already surface)           */
+/* -------------------------------------------------------------------------- */
+
+function nextHigherFps(cur: number): number {
+    const levels = [2, 4, 8, 15, 30, 60] as const
+
+    const idx = levels.indexOf(cur as any)
+    if (idx === -1) {
+        // pick nearest >= current
+        for (let i = 0; i < levels.length; i++) {
+            const lvl = levels[i]
+            if (lvl !== undefined && cur <= lvl) return lvl
+        }
+        return levels[levels.length - 1] ?? 60
+    }
+
+    const next = levels[Math.min(levels.length - 1, idx + 1)]
+    return next ?? levels[levels.length - 1] ?? 60
+}
+
+
+function suggestFpsFromDiag(d: SidecarStreamDiag | null): number {
+    // If we have no diag, don’t guess — keep current auto cap.
+    if (!d) return autoMaxFps.value
+
+    const backlog = Number.isFinite(d.estBacklogMs as any) ? (d.estBacklogMs as number) : 0
+    const buffered = Number.isFinite(d.maxClientBufferedBytes as any) ? d.maxClientBufferedBytes : 0
+    const ratio = Number.isFinite(d.maxClientBufferedRatio as any) ? d.maxClientBufferedRatio : 0
+
+    // Thresholds are conservative and keyed to the *units you already show*:
+    // - backlog in ms
+    // - buffered in bytes
+    // - ratio ~ writableLength / highWaterMark
+    if (backlog >= 5000 || buffered >= 64 * MB || ratio >= 64) return 2
+    if (backlog >= 3000 || buffered >= 32 * MB || ratio >= 32) return 4
+    if (backlog >= 1500 || buffered >= 16 * MB || ratio >= 16) return 8
+    if (backlog >= 600 || buffered >= 8 * MB || ratio >= 8) return 15
+    if (backlog >= 250 || buffered >= 2 * MB || ratio >= 3) return 30
+    return 60
+}
+
+function maybeAutoAdjust() {
+    if (!enabled.value) return
+    if (fpsMode.value !== 'auto') return
+
+    const d = streamDiag.value
+    if (!d) return
+
+    const suggested = suggestFpsFromDiag(d)
+    const current = autoMaxFps.value
+
+    // If backlog is already high, a resync is the fastest way to get “live now”
+    // because it drops queued bytes in the pipeline.
+    const backlog = typeof d.estBacklogMs === 'number' ? d.estBacklogMs : 0
+    const buffered = typeof d.maxClientBufferedBytes === 'number' ? d.maxClientBufferedBytes : 0
+    if (backlog >= 1000 || buffered >= 8 * MB) {
+        requestStreamResync('backlog_high')
+    }
+
+    // Degrade immediately on pressure.
+    if (suggested < current) {
+        stableImproveTicks.value = 0
+        autoMaxFps.value = suggested
+        requestStreamResync('cap_downshift')
+        return
+    }
+
+    // Improve slowly (needs sustained stability).
+    if (suggested > current) {
+        stableImproveTicks.value += 1
+        if (stableImproveTicks.value >= 5) {
+            stableImproveTicks.value = 0
+            autoMaxFps.value = nextHigherFps(current)
+            requestStreamResync('cap_upshift')
+        }
+        return
+    }
+
+    // Equal: reset “improve” counter so we only upshift on sustained better-than-current conditions.
+    stableImproveTicks.value = 0
+}
+
+// Run auto-throttle whenever health updates.
+watch(
+    () => health.value,
+    () => {
+        maybeAutoAdjust()
+    }
+)
+
+// If user changes fps mode (or if effective cap changes), resync to apply immediately.
+watch(
+    () => fpsMode.value,
+    () => {
+        if (!enabled.value) return
+        requestStreamResync('fps_mode_changed')
+    }
+)
+
+watch(
+    () => effectiveMaxFps.value,
+    (next, prev) => {
+        if (!enabled.value) return
+        if (next === prev) return
+        requestStreamResync('max_fps_changed')
+    }
+)
+
+/* -------------------------------------------------------------------------- */
+/*  Polling control                                                           */
+/* -------------------------------------------------------------------------- */
+
+function setHealthPollingActive(active: boolean) {
+    if (active) {
+        if (healthPollTimer != null) return
+        // Immediate sample (silent unless the panel is open)
+        void loadHealth({ silent: !showControls.value })
+        healthPollTimer = window.setInterval(() => void loadHealth({ silent: true }), 1000)
+        return
+    }
+
+    if (healthPollTimer != null) window.clearInterval(healthPollTimer)
+    healthPollTimer = null
+}
+
 function toggleControls() {
     showControls.value = !showControls.value
 }
@@ -903,20 +1128,27 @@ function toggleControls() {
 watch(
     () => showControls.value,
     (open) => {
-        if (open) {
-            void loadHealth()
-            if (healthPollTimer != null) window.clearInterval(healthPollTimer)
-            healthPollTimer = window.setInterval(() => void loadHealth({ silent: true }), 1000)
-            return
-        }
-        if (healthPollTimer != null) window.clearInterval(healthPollTimer)
-        healthPollTimer = null
+        // When opened, do a non-silent refresh so the UI updates immediately.
+        if (open) void loadHealth({ silent: false })
+        // Polling is handled by enabled/showControls watcher below.
     }
 )
 
+watch(
+    [() => enabled.value, () => showControls.value],
+    ([en, open]) => {
+        // Poll if stream is enabled (for auto throttle) OR panel is open (for visibility).
+        setHealthPollingActive(!!en || !!open)
+    },
+    { immediate: true }
+)
+
 function onEnabledChange() {
-    if (enabled.value) reloadStream()
-    else if (isCapturing.value || armOnNextFocus.value) releaseCapture()
+    if (enabled.value) {
+        reloadStream()
+    } else {
+        if (isCapturing.value || armOnNextFocus.value) releaseCapture()
+    }
 }
 
 function reloadStream() {

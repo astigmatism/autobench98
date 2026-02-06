@@ -29,7 +29,7 @@ const MAX_BUFFER_BYTES =
     ? config.maxCaptureBufferBytes
     : 8 * 1024 * 1024
 
-// Track connected MJPEG clients: Set<{ id, req, res, diag }>
+// Track connected MJPEG clients: Set<{ id, req, res, diag, stream }>
 const streamClients = new Set()
 let nextClientId = 1
 
@@ -92,6 +92,19 @@ function ensureCaptureDiagObject() {
     }
   }
   return state.capture.streamDiag
+}
+
+function normalizeMaxFps(maxFps) {
+  const n = Number(maxFps)
+  if (!Number.isFinite(n) || n <= 0) return null
+  // Sidecar capture is typically 60fps; clamp to a sane range.
+  return Math.max(1, Math.min(60, Math.floor(n)))
+}
+
+function minIntervalMsForMaxFps(maxFps) {
+  if (!maxFps) return 0
+  // e.g. 15fps => ~66.7ms
+  return Math.max(0, Math.round(1000 / maxFps))
 }
 
 /**
@@ -232,21 +245,102 @@ function updateStreamDiag(now, frameBytes) {
   out.updatedAt = new Date(now).toISOString()
 }
 
+function clientCanSendNow(client, now) {
+  const minIntervalMs = client.stream && typeof client.stream.minIntervalMs === 'number'
+    ? client.stream.minIntervalMs
+    : 0
+
+  if (!minIntervalMs || minIntervalMs <= 0) return true
+
+  const lastSentTs =
+    client.stream && typeof client.stream.lastSentTs === 'number'
+      ? client.stream.lastSentTs
+      : null
+
+  if (lastSentTs == null) return true
+
+  return now - lastSentTs >= minIntervalMs
+}
+
+function markClientPendingLatest(client) {
+  // IMPORTANT: use state.capture.lastFrame (a dedicated Buffer copy)
+  // rather than the sliced frameBuffer view, to avoid retaining a larger parent buffer.
+  const lf = state.capture.lastFrame
+  if (lf && Buffer.isBuffer(lf)) {
+    client.stream.pendingFrame = lf
+  }
+}
+
+function tryWritePartToClient(client, frameBuf, now) {
+  const { res } = client
+  if (res.writableEnded || res.destroyed) return false
+
+  // Write a complete multipart part. If any write returns false,
+  // the stream is applying backpressure and we must stop pushing frames
+  // to prevent unbounded buffering / multi-second lag.
+  let ok = true
+  const ok1 = res.write(PART_HEADER)
+  const ok2 = res.write(frameBuf)
+  const ok3 = res.write(PART_FOOTER)
+  ok = ok1 !== false && ok2 !== false && ok3 !== false
+
+  client.stream.lastSentTs = now
+
+  if (!ok) {
+    STREAM_DIAG.backpressureEvents += 1
+    STREAM_DIAG.lastBackpressureTs = now
+    client.stream.backpressured = true
+    // Keep only the latest pending frame while backpressured.
+    markClientPendingLatest(client)
+  }
+
+  return ok
+}
+
+function onClientDrain(client) {
+  // Socket buffer drained enough to accept more writes.
+  // We send at most one "latest" frame and then rely on future broadcasts.
+  if (!client || !client.stream) return
+  if (client.res.writableEnded || client.res.destroyed) return
+
+  client.stream.backpressured = false
+
+  const now = Date.now()
+
+  // If we have a pending "latest", try to send it (respecting maxFps).
+  if (!clientCanSendNow(client, now)) {
+    // Keep pending frame; next broadcast will overwrite or eventually send.
+    return
+  }
+
+  const pending = client.stream.pendingFrame
+  if (pending && Buffer.isBuffer(pending)) {
+    client.stream.pendingFrame = null
+    const ok = tryWritePartToClient(client, pending, now)
+    if (!ok) {
+      // Still backpressured; pending is already refreshed in tryWritePartToClient.
+      return
+    }
+  }
+}
+
 /**
  * Broadcast a single JPEG frame buffer to all connected clients.
  *
  * We:
  * - Update lastFrame / lastFrameTs for screenshot support.
- * - Write the multipart chunk to each connected client.
+ * - Enforce per-client maxFps (drop frames server-side).
+ * - Respect backpressure (no unbounded buffering; keep latest frame only).
  * - Only drop clients on actual errors or if their socket is closed.
  *
- * NOTE: We now also record backpressure/buffering diagnostics.
+ * NOTE: We also record backpressure/buffering diagnostics.
  */
 function broadcastFrame(frameBuffer) {
   const now = Date.now()
   state.capture.lastFrameTs = now
 
   // Cache the most recent frame for screenshot/lastFrame use.
+  // This copy is also the safe source for per-client pending frames.
   state.capture.lastFrame = Buffer.from(frameBuffer)
 
   if (streamClients.size === 0) {
@@ -267,14 +361,33 @@ function broadcastFrame(frameBuffer) {
       continue
     }
 
-    try {
-      const ok1 = res.write(PART_HEADER)
-      const ok2 = res.write(frameBuffer)
-      const ok3 = res.write(PART_FOOTER)
+    // Backpressured: do not write; retain only the latest pending frame.
+    if (client.stream && client.stream.backpressured) {
+      markClientPendingLatest(client)
+      continue
+    }
 
-      if (ok1 === false || ok2 === false || ok3 === false) {
-        STREAM_DIAG.backpressureEvents += 1
-        STREAM_DIAG.lastBackpressureTs = now
+    // FPS throttling: if the client is ahead of its interval, don't write.
+    // Keep only the latest pending frame (overwrite-only).
+    if (!clientCanSendNow(client, now)) {
+      markClientPendingLatest(client)
+      continue
+    }
+
+    try {
+      // Write the most recent frame.
+      // If a client is not backpressured, we can write the current frameBuffer.
+      // This is safe because we are not storing it; storing uses lastFrame copy.
+      const ok = tryWritePartToClient(client, frameBuffer, now)
+      if (!ok) {
+        // Now marked backpressured inside tryWritePartToClient.
+        continue
+      }
+
+      // If we successfully wrote and there was a pending frame (rare; usually overwritten),
+      // clear it so we don’t send stale frames later.
+      if (client.stream && client.stream.pendingFrame) {
+        client.stream.pendingFrame = null
       }
     } catch (err) {
       const msg = String(err && err.message ? err.message : err)
@@ -449,8 +562,11 @@ function stopCapture() {
  * Attach an HTTP response as an MJPEG stream client.
  * Mirrors your proxyRequest header/cleanup behavior, adapted from Node's
  * IncomingMessage/ServerResponse.
+ *
+ * Options:
+ *   - maxFps: number | null (server-side throttling, drop frames to stay live)
  */
-function addStreamClient(req, res) {
+function addStreamClient(req, res, opts) {
   if (config.maxStreamClients > 0 && streamClients.size >= config.maxStreamClients) {
     log.stream.warn(
       `Maximum stream client limit reached; new connection closed maxClients=${config.maxStreamClients} currentClients=${streamClients.size}`
@@ -485,11 +601,21 @@ function addStreamClient(req, res) {
 
   const id = nextClientId++
 
+  const maxFps = normalizeMaxFps(opts && opts.maxFps)
+  const minIntervalMs = minIntervalMsForMaxFps(maxFps)
+
   const client = {
     id,
     req,
     res,
     diag: null,
+    stream: {
+      maxFps,
+      minIntervalMs,
+      lastSentTs: null,
+      backpressured: false,
+      pendingFrame: null, // latest only (Buffer)
+    },
   }
   streamClients.add(client)
 
@@ -510,10 +636,21 @@ function addStreamClient(req, res) {
   const remoteAddress = (req.socket && req.socket.remoteAddress) || 'unknown'
 
   log.stream.info(
-    `New stream client connected clientId=${id} totalClients=${streamClients.size} remoteAddress=${remoteAddress}`
+    `New stream client connected clientId=${id} totalClients=${streamClients.size} remoteAddress=${remoteAddress} maxFps=${maxFps || 'unlimited'}`
   )
 
+  const drainHandler = () => onClientDrain(client)
+
   const removeClient = () => {
+    // Remove drain handler to avoid leaks.
+    try {
+      if (typeof res.removeListener === 'function') {
+        res.removeListener('drain', drainHandler)
+      }
+    } catch (_) {
+      // ignore
+    }
+
     if (streamClients.delete(client)) {
       log.stream.info(
         `Stream client disconnected clientId=${id} totalClients=${streamClients.size}`
@@ -531,6 +668,9 @@ function addStreamClient(req, res) {
   res.on('error', (_err) => {
     removeClient()
   })
+
+  // Backpressure recovery
+  res.on('drain', drainHandler)
 
   // Disable timeouts to keep stream alive as long as needed
   if (typeof res.setTimeout === 'function') res.setTimeout(0)

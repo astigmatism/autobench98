@@ -46,6 +46,27 @@ function getUptimeSec() {
 }
 
 /**
+ * Parse and normalize a maxFps query parameter.
+ * - Accepts any finite number
+ * - Clamps to 1..60
+ * - Returns null when absent/invalid (meaning "unlimited" at the stream layer)
+ */
+function parseMaxFpsParam(url) {
+  if (!url || !url.searchParams) return null
+
+  const raw = url.searchParams.get('maxFps')
+  if (raw == null || String(raw).trim() === '') return null
+
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return null
+
+  const i = Math.floor(n)
+  if (i <= 0) return null
+
+  return Math.max(1, Math.min(60, i))
+}
+
+/**
  * Determine high-level health status based on current state.
  *
  * We consider the service unhealthy if:
@@ -131,13 +152,22 @@ async function handleHealth(_req, res) {
 
 /**
  * Handle /stream MJPEG endpoint.
+ *
+ * Supports optional throttling:
+ *   /stream?maxFps=<N>
+ *
+ * This does NOT change capture throughput; it only affects how frequently
+ * frames are delivered to this specific downstream client connection.
  */
-async function handleStream(req, res) {
+async function handleStream(req, res, url) {
   // Ensure the capture pipeline is running.
   startCapture()
 
-  // Attach this request/response as a stream client.
-  addStreamClient(req, res)
+  const maxFps = parseMaxFpsParam(url)
+
+  // Attach this request/response as a stream client (with optional throttling).
+  // NOTE: Extra args are safe even if addStreamClient currently only accepts (req, res).
+  addStreamClient(req, res, { maxFps })
 }
 
 /**
@@ -372,7 +402,7 @@ async function requestListener(req, res) {
 
   // Stream
   if (req.method === 'GET' && pathname === '/stream') {
-    return handleStream(req, res)
+    return handleStream(req, res, url)
   }
 
   // Screenshot
@@ -414,6 +444,7 @@ async function requestListener(req, res) {
       endpoints: [
         '/health',
         '/stream',
+        '/stream?maxFps=15',
         '/screenshot',
         '/recordings/start',
         '/recordings/clear',

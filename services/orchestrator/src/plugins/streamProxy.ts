@@ -24,6 +24,8 @@ declare module 'fastify' {
  *   GET /api/sidecar/stream  →  GET http://127.0.0.1:SIDECAR_PORT/stream
  *   GET /api/sidecar/health  →  GET http://127.0.0.1:SIDECAR_PORT/health
  *
+ * NOTE: Query params are forwarded for /stream (e.g. ?maxFps=15).
+ *
  * Sidecar is expected to bind to 0.0.0.0 or 127.0.0.1 on SIDECAR_PORT. We
  * always talk to it via 127.0.0.1 here, so the sidecar port does not need
  * to be exposed externally.
@@ -43,13 +45,45 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
      *
      * We stream the sidecar response body directly back to the client,
      * preserving status and most headers.
+     *
+     * Query params are forwarded (e.g. /api/sidecar/stream?maxFps=15).
      */
-    app.get('/api/sidecar/stream', async (_req, reply) => {
-        const target = `${baseUrl}/stream`
+    app.get('/api/sidecar/stream', async (req, reply) => {
+        // Forward query string safely (Fastify raw url includes it).
+        let search = ''
+        try {
+            const u = new URL(req.raw.url ?? '/api/sidecar/stream', 'http://localhost')
+            search = u.search || ''
+        } catch {
+            search = ''
+        }
+
+        const target = `${baseUrl}/stream${search}`
+
+        // Abort upstream request if client disconnects.
+        const ac = new AbortController()
+        const abort = () => {
+            try {
+                ac.abort()
+            } catch {
+                // ignore
+            }
+        }
+
+        // req.raw is IncomingMessage; reply.raw is ServerResponse.
+        try {
+            req.raw.on('aborted', abort)
+            req.raw.on('close', abort)
+            reply.raw.on('close', abort)
+            reply.raw.on('error', abort as any)
+        } catch {
+            // ignore
+        }
 
         try {
             const { statusCode, headers, body } = await request(target, {
                 method: 'GET',
+                signal: ac.signal,
             })
 
             // Pass through content-type and other safe headers.
@@ -58,7 +92,6 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
                 if (!value) continue
                 const lower = name.toLowerCase()
                 if (lower === 'connection' || lower === 'transfer-encoding') continue
-                // undici headers can be string | string[], Fastify is fine with either.
                 reply.header(name, value as any)
             }
 
