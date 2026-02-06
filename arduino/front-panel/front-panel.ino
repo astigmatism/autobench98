@@ -30,10 +30,6 @@
 #define HDD_COOLDOWN_MS 200       // activity "linger" window to prevent serial spam
 #define OLED_MIN_REFRESH_MS 200   // avoid redrawing constantly
 
-// Display-only windows
-#define RST_PULSE_WINDOW_MS 350
-#define PWR_PULSE_WINDOW_MS 350
-
 // Button pulse width (non-blocking)
 #define BUTTON_PULSE_MS 100
 
@@ -63,7 +59,7 @@ bool resetHeld = false; // host RESET_HOLD
 static unsigned long powerHoldUntilMs = 0;
 static unsigned long resetHoldUntilMs = 0;
 
-// Display status flags for auto-release events (persist until next explicit state change)
+// Display status flags for auto-release events (kept, but not shown on PWR_BTN/RST_BTN lines)
 static bool powerAutoReleased = false;
 static bool resetAutoReleased = false;
 
@@ -132,18 +128,19 @@ static void markDisplayDirty(const char* label = nullptr) {
   displayDirty = true;
 }
 
+static void clearPowerAutoState() { powerAutoReleased = false; }
+static void clearResetAutoState() { resetAutoReleased = false; }
+
+// Include overrideDown as a direct contributor to the power output.
+// This makes the physical override switch behave like holding the motherboard power button.
 static void updateButtonOutputs() {
-  const bool powerOut = (powerHeld || powerPulseActive);
+  const bool powerOut = (powerHeld || powerPulseActive || overrideDown);
   const bool resetOut = (resetHeld || resetPulseActive);
 
-  // Inverted logic at the motherboard side is handled by the AQY212EH; here:
   // HIGH = "press" LED on PhotoMOS input, LOW = release.
   digitalWrite(POWER_BUTTON_PIN, powerOut ? HIGH : LOW);
   digitalWrite(RESET_BUTTON_PIN, resetOut ? HIGH : LOW);
 }
-
-static void clearPowerAutoState() { powerAutoReleased = false; }
-static void clearResetAutoState() { resetAutoReleased = false; }
 
 static void schedulePowerPulse() {
   const unsigned long now = millis();
@@ -178,7 +175,7 @@ static void processButtonPulses() {
 
   if (powerPulseActive && (long)(now - powerPulseUntilMs) >= 0) {
     powerPulseActive = false;
-    updateButtonOutputs();
+    updateButtonOutputs(); // will remain ACTIVE if overrideDown is still true
     displayDirty = true;
   }
 
@@ -193,7 +190,6 @@ static void processHoldTimeouts() {
   const unsigned long now = millis();
 
   if (powerHeld && powerHoldUntilMs != 0 && (long)(now - powerHoldUntilMs) >= 0) {
-    // Auto-release POWER
     powerHeld = false;
     powerHoldUntilMs = 0;
     powerAutoReleased = true;
@@ -203,11 +199,10 @@ static void processHoldTimeouts() {
     if (isIdentified) {
       Serial.println("debug: POWER_HOLD auto-released (timeout)");
     }
-    markDisplayDirty("PWR_AUTO");
+    markDisplayDirty("PWR_AUTO"); // visible on LAST line
   }
 
   if (resetHeld && resetHoldUntilMs != 0 && (long)(now - resetHoldUntilMs) >= 0) {
-    // Auto-release RESET
     resetHeld = false;
     resetHoldUntilMs = 0;
     resetAutoReleased = true;
@@ -217,24 +212,19 @@ static void processHoldTimeouts() {
     if (isIdentified) {
       Serial.println("debug: RESET_HOLD auto-released (timeout)");
     }
-    markDisplayDirty("RST_AUTO");
+    markDisplayDirty("RST_AUTO"); // visible on LAST line
   }
 }
 
+// OFF/ACTIVE only (per requirement).
+// ACTIVE means the output is currently asserted.
 static const char* pwrBtnStatus() {
-  const unsigned long now = millis();
-  if (powerHeld) return "HELD";                        // output held by host (lease active)
-  if (overrideDown) return "DOWN";                     // physical button currently down
-  if (lastPowerPulseMs != 0 && (now - lastPowerPulseMs) < PWR_PULSE_WINDOW_MS) return "PULSE";
-  if (powerAutoReleased) return "AUTO";                // released automatically due to timeout
+  if (powerHeld || overrideDown || powerPulseActive) return "ACTIVE";
   return "OFF";
 }
 
 static const char* rstBtnStatus() {
-  const unsigned long now = millis();
-  if (resetHeld) return "HELD";                        // output held by host (lease active)
-  if (lastResetPulseMs != 0 && (now - lastResetPulseMs) < RST_PULSE_WINDOW_MS) return "PULSE";
-  if (resetAutoReleased) return "AUTO";                // released automatically due to timeout
+  if (resetHeld || resetPulseActive) return "ACTIVE";
   return "OFF";
 }
 
@@ -283,7 +273,7 @@ static void drawDisplayPage() {
 
   u8g2.setFont(u8g2_font_6x10_tf);
 
-  // 1) Last command/event label (MOVED TO FIRST ROW)
+  // 1) Last command/event label (first row)
   u8g2.setCursor(0, y1);
   u8g2.print("LAST: ");
   u8g2.print(lastLabel);
@@ -453,7 +443,7 @@ static void handleCommand(const char* cmd) {
 
   if (strcmp(cmd, "POWER_HOLD") == 0) {
     powerHeld = true;
-    powerHoldUntilMs = now + MAX_HOLD_MS;   // start/refresh lease timer
+    powerHoldUntilMs = now + MAX_HOLD_MS;
     clearPowerAutoState();
 
     updateButtonOutputs();
@@ -475,7 +465,7 @@ static void handleCommand(const char* cmd) {
 
   if (strcmp(cmd, "RESET_HOLD") == 0) {
     resetHeld = true;
-    resetHoldUntilMs = now + MAX_HOLD_MS;   // start/refresh lease timer
+    resetHoldUntilMs = now + MAX_HOLD_MS;
     clearResetAutoState();
 
     updateButtonOutputs();
@@ -494,10 +484,6 @@ static void handleCommand(const char* cmd) {
     markDisplayDirty("RESET_RELEASE");
     return;
   }
-
-  // Optional backward-compatible pulses (if you ever want them from host)
-  // if (strcmp(cmd, "POWER_PULSE") == 0) { schedulePowerPulse(); return; }
-  // if (strcmp(cmd, "RESET_PULSE") == 0) { scheduleResetPulse(); return; }
 }
 
 static void processSerial() {
@@ -507,9 +493,7 @@ static void processSerial() {
   while (Serial.available() > 0) {
     const char c = (char)Serial.read();
 
-    if (c == '\r') {
-      continue;
-    }
+    if (c == '\r') continue;
 
     if (c == '\n') {
       buf[len] = '\0';
@@ -543,7 +527,6 @@ void setup() {
   pinMode(OVERRIDE_POWER_BUTTON_PIN, INPUT_PULLUP);
   pinMode(HDD_SENSE_PIN, INPUT_PULLUP);
 
-  // Start safe-low
   digitalWrite(POWER_BUTTON_PIN, LOW);
   digitalWrite(RESET_BUTTON_PIN, LOW);
 
@@ -555,22 +538,20 @@ void setup() {
     Serial.println("debug: HDD_SENSE_PIN has no external interrupt; HDD activity may be missed");
   }
 
-  // OLED init (HW I2C)
   u8g2.begin();
 
-  // Initialize cached power sense immediately for the display
   pcPowerOnCached = (digitalRead(POWER_SENSE_PIN) == LOW);
   powerSenseInit = false;
 
-  // Initialize override state
   overrideDown = (digitalRead(OVERRIDE_POWER_BUTTON_PIN) == LOW);
   overrideDownPrev = overrideDown;
 
-  // Clear safety state
   powerHoldUntilMs = 0;
   resetHoldUntilMs = 0;
   powerAutoReleased = false;
   resetAutoReleased = false;
+
+  updateButtonOutputs();
 
   markDisplayDirty("BOOT");
   maybeUpdateDisplay(true);
@@ -581,44 +562,29 @@ void setup() {
 // =====================
 
 void loop() {
-  // Non-blocking pulse expirations
   processButtonPulses();
 
-  // Always sample override button (for display + edge detection)
+  // Override button: update outputs immediately so holding it truly holds PWR_SW
   overrideDown = (digitalRead(OVERRIDE_POWER_BUTTON_PIN) == LOW);
   if (overrideDown != overrideDownPrev) {
-    displayDirty = true;
     overrideDownPrev = overrideDown;
-  }
 
-  // Serial commands (non-blocking)
-  processSerial();
-
-  // Safety: auto-release holds if they exceed MAX_HOLD_MS
-  processHoldTimeouts();
-
-  // Physical override: one motherboard pulse per press (only when identified)
-  const unsigned long now = millis();
-  const bool commandLocked = (now < commandLockUntilMs);
-
-  if (isIdentified && !commandLocked && !powerHeld) {
-    static bool overrideFiredForThisPress = false;
-
-    if (overrideDown && !overrideFiredForThisPress) {
-      overrideFiredForThisPress = true;
-      schedulePowerPulse();
-      markDisplayDirty("override");
-    } else if (!overrideDown && overrideFiredForThisPress) {
-      overrideFiredForThisPress = false;
+    if (overrideDown) {
+      schedulePowerPulse(); // quick tap still produces at least a pulse
+      markDisplayDirty("override_dn");
+    } else {
+      updateButtonOutputs();
+      markDisplayDirty("override_up");
     }
   }
 
-  // PowerSense (polled + debounced)
+  processSerial();
+
+  processHoldTimeouts();
+
   processPowerSenseTelemetry();
 
-  // HDD telemetry
   processHddActivityTelemetry();
 
-  // OLED refresh (rate-limited)
   maybeUpdateDisplay(false);
 }
