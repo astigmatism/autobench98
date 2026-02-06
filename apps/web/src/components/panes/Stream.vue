@@ -1,6 +1,5 @@
 <template>
     <div class="stream-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
-        <!-- Hotspot region: only hovering here shows the advanced controls button -->
         <div class="stream-advanced-hotspot">
             <button
                 class="gear-btn"
@@ -13,19 +12,16 @@
             </button>
         </div>
 
-        <!-- Settings panel (hidden by default) -->
         <transition name="slide-fade">
             <div v-show="showControls" id="stream-controls-panel" class="controls-panel">
                 <div class="toolbar">
                     <div class="left">
                         <div class="controls">
-                            <!-- Enable / disable stream -->
                             <label class="checkbox panel panel-text">
                                 <input type="checkbox" v-model="enabled" @change="onEnabledChange" />
                                 <span>Show stream</span>
                             </label>
 
-                            <!-- Scale mode -->
                             <label class="select panel-text">
                                 <span>Scale</span>
                                 <select v-model="scaleMode">
@@ -36,7 +32,6 @@
                                 </select>
                             </label>
 
-                            <!-- Background style (for black vs pane background) -->
                             <label class="select panel-text">
                                 <span>Background</span>
                                 <select v-model="bgMode">
@@ -46,12 +41,9 @@
                             </label>
                         </div>
                     </div>
-                    <div class="right">
-                        <!-- Placeholder for future info (resolution/fps, status) -->
-                    </div>
+                    <div class="right"></div>
                 </div>
 
-                <!-- Sidecar / stream health details -->
                 <div class="health-panel">
                     <div class="health-header">
                         <span class="health-title">Sidecar / Stream health</span>
@@ -98,7 +90,6 @@
                             </span>
                         </div>
 
-                        <!-- NEW: capture freshness / lag diagnostic -->
                         <div class="health-row">
                             <span class="label">Capture age</span>
                             <span class="value monospace" :data-age="captureAgeBucket">
@@ -106,7 +97,41 @@
                             </span>
                         </div>
 
-                        <!-- NEW: request timing; helps explain “health is stale” vs “capture is stale” -->
+                        <div class="health-row">
+                            <span class="label">Backlog est</span>
+                            <span class="value monospace" :data-age="backlogBucket">
+                                {{ formattedBacklog }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Buffered</span>
+                            <span class="value monospace">
+                                {{ formattedBuffered }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Downstream</span>
+                            <span class="value monospace">
+                                {{ formattedDownstream }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Backpressure</span>
+                            <span class="value monospace">
+                                {{ formattedBackpressure }}
+                            </span>
+                        </div>
+
+                        <div class="health-row">
+                            <span class="label">Avg frame</span>
+                            <span class="value monospace">
+                                {{ formattedAvgFrame }}
+                            </span>
+                        </div>
+
                         <div class="health-row">
                             <span class="label">Health RTT</span>
                             <span class="value monospace">
@@ -138,24 +163,16 @@
 
                     <div v-else class="health-empty">No health data yet.</div>
 
-                    <!-- Optional: tiny hint so interpretation is in the UI -->
                     <div v-if="health" class="health-note">
-                        Capture age reflects sidecar capture freshness (not necessarily what the browser is
-                        currently displaying). If capture age stays low but the view lags, the stream path
-                        is backlogged.
+                        If Capture age stays low but Backlog est climbs, the stream path is backlogged
+                        (decode/throughput), not capture.
                     </div>
                 </div>
             </div>
         </transition>
 
-        <!-- Main viewport (panel-styled) -->
-        <div
-            class="viewport"
-            :data-bg="bgMode"
-            :data-kb-available="canCapture ? 'true' : 'false'"
-        >
+        <div class="viewport" :data-bg="bgMode" :data-kb-available="canCapture ? 'true' : 'false'">
             <div v-if="enabled" class="viewport-inner">
-                <!-- Capture layer: click the stream view to start capturing -->
                 <div
                     ref="captureRef"
                     class="kb-capture-layer"
@@ -170,7 +187,6 @@
                     @keydown="onKeyDown"
                     @keyup="onKeyUp"
                 >
-                    <!-- Frame box sized per mode so FIT != FILL -->
                     <div class="stream-frame" :data-scale="scaleMode" :style="streamFrameStyle">
                         <img
                             :key="reloadKey"
@@ -181,18 +197,15 @@
                             draggable="false"
                             @load="onStreamLoad"
                         />
-                        <!-- Glow that hugs the image bounds -->
                         <div class="stream-glow kb-glow" aria-hidden="true"></div>
                     </div>
 
-                    <!-- Native-only: glow that hugs the viewport bounds (image may be offscreen in 1:1) -->
                     <div
                         v-if="scaleMode === 'native'"
                         class="capture-glow kb-glow"
                         aria-hidden="true"
                     ></div>
 
-                    <!-- Bottom-center overlay -->
                     <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
                         <div class="kb-overlay-inner">
                             <span class="kb-hint">Press <b>Ctrl+Esc</b> to cancel input capture</span>
@@ -212,7 +225,6 @@
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { getRealtimeClient } from '@/bootstrap'
 
-/** Accept pane context (optional). */
 type Direction = 'row' | 'col'
 type Constraints = {
     widthPx?: number | null
@@ -239,13 +251,6 @@ type PaneInfo = {
     }
 }
 
-/**
- * Per-pane UI prefs (Stream pane)
- * - NOT written to any global store
- * - persisted per pane id in localStorage as a fallback
- *
- * NOTE: App.vue may inject these via leaf.props.__streamPaneUi when saving/loading profiles.
- */
 type StreamPanePrefs = {
     enabled?: boolean
     scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
@@ -259,35 +264,43 @@ function isObject(x: any): x is Record<string, unknown> {
 const props = defineProps<{
     pane?: PaneInfo
     __streamPaneUi?: StreamPanePrefs
-    /** Monotonic "profile load" revision stamped by App.vue to force rehydrate on load. */
     __streamPaneProfileRev?: number
 }>()
 
-/**
- * Endpoint is always the orchestrator proxy.
- * The orchestrator is responsible for talking to the sidecar on localhost.
- */
 const STREAM_ENDPOINT = '/api/sidecar/stream'
 const HEALTH_ENDPOINT = '/api/sidecar/health'
 
-/* -------------------------------------------------------------------------- */
-/*  Sidecar health shape                                                      */
-/* -------------------------------------------------------------------------- */
+type SidecarStreamDiag = {
+    clients: number
+    lastFrameBytes: number
+    avgFrameBytes: number | null
+    backpressureEvents: number
+    lastBackpressureTs: number | null
+    maxClientBufferedBytes: number
+    maxClientBufferedRatio: number
+    downstreamBps: number | null
+    estBacklogMs: number | null
+    updatedAt: string | null
+}
 
 type SidecarHealthMetrics = {
     frame?: string
     fps?: string
     quality?: string
     time?: string
+    size?: string
+    bitrate?: string
 }
 
 type SidecarHealthCapture = {
     running: boolean
     lastFrameTs: number | null
+    lastFrameAgeMs?: number | null
     lastError: string | null
     restartCount: number
     metrics?: SidecarHealthMetrics
     hasLastFrame: boolean
+    streamDiag?: SidecarStreamDiag | null
 }
 
 type SidecarHealthEnv = {
@@ -311,7 +324,6 @@ type SidecarHealth = {
     reasons: string[]
 }
 
-/** Contrast-aware plain-text color from pane background (for non-panel text) */
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
     if (!hex) return null
     const s = hex.trim().replace(/^#/, '')
@@ -344,31 +356,19 @@ const paneFg = computed(() => {
     return contrastWithWhite >= contrastWithBlack ? '#ffffff' : '#111111'
 })
 
-/** Fixed readable text for panel-wrapped areas (dark backgrounds) */
 const panelFg = '#e6e6e6'
 
-/* ------------- local UI state ------------- */
-
 const showControls = ref(false)
-
-/** Whether the stream is actively rendered. */
 const enabled = ref(true)
-
-/** Scaling mode for the image. */
 const scaleMode = ref<'fit' | 'fill' | 'stretch' | 'native'>('fit')
-
-/** Background mode: black (default) or pane background. */
 const bgMode = ref<'black' | 'pane'>('black')
-
-/** Reload key forces <img> to re-request the stream (by remounting it). */
 const reloadKey = ref(0)
 
 /* -------------------------------------------------------------------------- */
-/*  WS access (best-effort)                                                   */
+/*  WS access                                                                 */
 /* -------------------------------------------------------------------------- */
 
 const wsClientRef = ref<any | null>(null)
-
 function refreshWsClient() {
     wsClientRef.value = getRealtimeClient()
 }
@@ -379,7 +379,6 @@ let wsRetryStopTimer: number | null = null
 onMounted(() => {
     refreshWsClient()
 
-    // Best-effort: retry briefly for late connection setup.
     wsRetryTimer = window.setInterval(() => {
         if (wsClientRef.value) {
             if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
@@ -413,22 +412,14 @@ function trySend(obj: any): boolean {
 }
 
 function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: string) {
-    // Strict: capture is UI/UX-driven by the stream view, not WS availability.
-    // Sending is best-effort.
     trySend({
         type: 'ps2-keyboard.command',
-        payload: {
-            kind: 'key',
-            action,
-            code,
-            key,
-            // NOTE: intentionally omit requestedBy to reduce server log noise
-        },
+        payload: { kind: 'key', action, code, key },
     })
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Keyboard capture (click stream to capture; exit with Ctrl+Esc)             */
+/*  Keyboard capture                                                          */
 /* -------------------------------------------------------------------------- */
 
 const captureRef = ref<HTMLElement | null>(null)
@@ -446,11 +437,7 @@ const MODIFIER_CODES = new Set<string>([
     'MetaRight',
 ])
 
-// Track which modifiers we have told the backend are currently held,
-// so we can release them on exit to avoid "stuck modifier" behavior.
 const heldModifiers = new Set<string>()
-
-// IMPORTANT: Capture availability is based on stream visibility only.
 const canCapture = computed(() => enabled.value)
 
 function focusCaptureLayer(): boolean {
@@ -477,9 +464,7 @@ function armCaptureFromMouse() {
     armOnNextFocus.value = false
 
     const focused = focusCaptureLayer()
-    if (!focused) {
-        armOnNextFocus.value = true
-    }
+    if (!focused) armOnNextFocus.value = true
 }
 
 function releaseCapture(opts?: { fromBlur?: boolean }) {
@@ -487,9 +472,7 @@ function releaseCapture(opts?: { fromBlur?: boolean }) {
 
     if (heldModifiers.size > 0) {
         const codes = Array.from(heldModifiers).sort()
-        for (const code of codes) {
-            sendKey('release', code)
-        }
+        for (const code of codes) sendKey('release', code)
     }
     heldModifiers.clear()
 
@@ -586,7 +569,7 @@ watch(
 )
 
 /* -------------------------------------------------------------------------- */
-/*  Stream sizing (fit + native sizing)                                       */
+/*  Stream sizing                                                             */
 /* -------------------------------------------------------------------------- */
 
 type StreamMeta = { w: number; h: number; ar: number }
@@ -647,27 +630,17 @@ function onStreamLoad(e: Event) {
     if (!img) return
     const w = img.naturalWidth
     const h = img.naturalHeight
-    if (w && h) {
-        streamMeta.value = { w, h, ar: w / h }
-    }
+    if (w && h) streamMeta.value = { w, h, ar: w / h }
     updateFrameBox()
 }
 
 const streamFrameStyle = computed(() => {
     const mode = scaleMode.value
-
-    if (mode === 'fit') {
+    if (mode === 'fit' || mode === 'native') {
         const b = frameBox.value
         if (b) return { width: `${b.w}px`, height: `${b.h}px` }
         return { width: '100%', height: '100%' }
     }
-
-    if (mode === 'native') {
-        const b = frameBox.value
-        if (b) return { width: `${b.w}px`, height: `${b.h}px` }
-        return { width: '100%', height: '100%' }
-    }
-
     return { width: '100%', height: '100%' }
 })
 
@@ -688,7 +661,7 @@ watch(
 )
 
 /* -------------------------------------------------------------------------- */
-/*  Per-pane persistence (localStorage + profile round-trip)                   */
+/*  Per-pane persistence                                                      */
 /* -------------------------------------------------------------------------- */
 
 function isValidScaleMode(x: any): x is 'fit' | 'fill' | 'stretch' | 'native' {
@@ -739,11 +712,7 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 }
 
 function exportPanePrefs(): StreamPanePrefs {
-    return {
-        enabled: !!enabled.value,
-        scaleMode: scaleMode.value,
-        bgMode: bgMode.value,
-    }
+    return { enabled: !!enabled.value, scaleMode: scaleMode.value, bgMode: bgMode.value }
 }
 
 const lastHydratedSig = ref<string>('')
@@ -757,7 +726,6 @@ function hydrateForPane() {
         const sig = `nokey|rev:${rev}|embed:${hasEmbed ? 1 : 0}`
         if (lastHydratedSig.value === sig) return
         lastHydratedSig.value = sig
-
         if (hasEmbed) applyPanePrefs(props.__streamPaneUi as StreamPanePrefs)
         return
     }
@@ -773,46 +741,24 @@ function hydrateForPane() {
     }
 
     const stored = readPanePrefs()
-    if (stored) {
-        applyPanePrefs(stored)
-        return
-    }
+    if (stored) applyPanePrefs(stored)
 }
 
-onMounted(() => {
-    hydrateForPane()
-})
+onMounted(() => hydrateForPane())
+watch([paneId, () => props.__streamPaneUi, () => props.__streamPaneProfileRev], () => hydrateForPane())
+watch([() => enabled.value, () => scaleMode.value, () => bgMode.value], () => writePanePrefs(exportPanePrefs()))
 
-watch([paneId, () => props.__streamPaneUi, () => props.__streamPaneProfileRev], () =>
-    hydrateForPane()
-)
-
-watch([() => enabled.value, () => scaleMode.value, () => bgMode.value], () => {
-    writePanePrefs(exportPanePrefs())
-})
-
-/* ------------- health state ------------- */
+/* -------------------------------------------------------------------------- */
+/*  Health state + formatting                                                 */
+/* -------------------------------------------------------------------------- */
 
 const health = ref<SidecarHealth | null>(null)
 const healthLoading = ref(false)
 const healthError = ref<string | null>(null)
 
-/**
- * Diagnostics for "is the capture stale, or is the stream/back-end path backlogged?"
- * - healthRttMs: how long /health took (roughly)
- * - healthClockOffsetMs: estimated (serverNow - clientNow) using midpoint method
- */
 const healthRttMs = ref<number | null>(null)
-const healthClockOffsetMs = ref<number | null>(null)
-
 let healthInFlight = false
 let healthPollTimer: number | null = null
-
-function safeParseIsoMs(iso: string | undefined | null): number | null {
-    if (!iso) return null
-    const ms = Date.parse(iso)
-    return Number.isFinite(ms) ? ms : null
-}
 
 function clampNonNeg(n: number): number {
     if (!Number.isFinite(n)) return 0
@@ -829,21 +775,44 @@ function formatAge(ms: number): string {
     return `${m}m${String(rs).padStart(2, '0')}s`
 }
 
+function formatBytes(n: number): string {
+    const v = Math.max(0, Math.floor(n))
+    if (v < 1024) return `${v}B`
+    const kb = v / 1024
+    if (kb < 1024) return `${kb.toFixed(0)}KB`
+    const mb = kb / 1024
+    return `${mb.toFixed(1)}MB`
+}
+
+function formatBps(bps: number): string {
+    const v = Math.max(0, Math.floor(bps))
+    if (v < 1024) return `${v}B/s`
+    const kb = v / 1024
+    if (kb < 1024) return `${kb.toFixed(0)}KB/s`
+    const mb = kb / 1024
+    return `${mb.toFixed(1)}MB/s`
+}
+
+const formattedUptime = computed(() => {
+    const sec = health.value?.uptimeSec
+    if (sec == null || !Number.isFinite(sec) || sec < 0) return '—'
+    const total = Math.floor(sec)
+    const hours = Math.floor(total / 3600)
+    const minutes = Math.floor((total % 3600) / 60)
+    const seconds = total % 60
+    const parts: string[] = []
+    if (hours > 0) parts.push(`${hours}h`)
+    if (minutes > 0 || hours > 0) parts.push(`${minutes}m`)
+    parts.push(`${seconds}s`)
+    return parts.join(' ')
+})
+
 const captureAgeMs = computed(() => {
-    const last = health.value?.capture?.lastFrameTs
-    if (last == null || !Number.isFinite(last)) return null
-
-    const offset = healthClockOffsetMs.value ?? 0
-    const approxServerNow = Date.now() + offset
-    return clampNonNeg(approxServerNow - last)
+    const ms = health.value?.capture?.lastFrameAgeMs
+    if (ms == null || !Number.isFinite(ms)) return null
+    return clampNonNeg(ms)
 })
-
-const formattedCaptureAge = computed(() => {
-    const ms = captureAgeMs.value
-    if (ms == null) return '—'
-    return formatAge(ms)
-})
-
+const formattedCaptureAge = computed(() => (captureAgeMs.value == null ? '—' : formatAge(captureAgeMs.value)))
 const captureAgeBucket = computed(() => {
     const ms = captureAgeMs.value
     if (ms == null) return 'unknown'
@@ -852,21 +821,47 @@ const captureAgeBucket = computed(() => {
     return 'bad'
 })
 
-const formattedUptime = computed(() => {
-    const sec = health.value?.uptimeSec
-    if (sec == null || !Number.isFinite(sec) || sec < 0) return '—'
+const streamDiag = computed(() => health.value?.capture?.streamDiag ?? null)
 
-    const total = Math.floor(sec)
-    const hours = Math.floor(total / 3600)
-    const minutes = Math.floor((total % 3600) / 60)
-    const seconds = total % 60
+const backlogMs = computed(() => {
+    const ms = streamDiag.value?.estBacklogMs
+    if (ms == null || !Number.isFinite(ms)) return null
+    return clampNonNeg(ms)
+})
+const formattedBacklog = computed(() => (backlogMs.value == null ? '—' : formatAge(backlogMs.value)))
+const backlogBucket = computed(() => {
+    const ms = backlogMs.value
+    if (ms == null) return 'unknown'
+    if (ms <= 250) return 'ok'
+    if (ms <= 1000) return 'warn'
+    return 'bad'
+})
 
-    const parts: string[] = []
-    if (hours > 0) parts.push(`${hours}h`)
-    if (minutes > 0 || hours > 0) parts.push(`${minutes}m`)
-    parts.push(`${seconds}s`)
+const formattedBuffered = computed(() => {
+    const d = streamDiag.value
+    if (!d) return '—'
+    const ratio = Number.isFinite(d.maxClientBufferedRatio) ? d.maxClientBufferedRatio : 0
+    return `${formatBytes(d.maxClientBufferedBytes)} · x${ratio.toFixed(2)}`
+})
 
-    return parts.join(' ')
+const formattedDownstream = computed(() => {
+    const d = streamDiag.value
+    if (!d || d.downstreamBps == null) return '—'
+    return formatBps(d.downstreamBps)
+})
+
+const formattedBackpressure = computed(() => {
+    const d = streamDiag.value
+    if (!d) return '—'
+    return `${d.backpressureEvents}`
+})
+
+const formattedAvgFrame = computed(() => {
+    const d = streamDiag.value
+    if (!d) return '—'
+    const avg = d.avgFrameBytes
+    if (avg == null) return `${formatBytes(d.lastFrameBytes)}`
+    return `${formatBytes(avg)}`
 })
 
 async function loadHealth(opts?: { silent?: boolean }) {
@@ -878,7 +873,6 @@ async function loadHealth(opts?: { silent?: boolean }) {
     healthError.value = null
 
     const t0 = performance.now()
-    const wall0 = Date.now()
 
     try {
         const res = await fetch(HEALTH_ENDPOINT, {
@@ -887,26 +881,15 @@ async function loadHealth(opts?: { silent?: boolean }) {
         })
 
         const t1 = performance.now()
-        const wall1 = Date.now()
         healthRttMs.value = Math.max(0, Math.round(t1 - t0))
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
         const json = (await res.json()) as SidecarHealth
         health.value = json
-
-        // Estimate server clock offset using midpoint method:
-        // serverNow (from json.timestamp) - clientMid (between request start/end).
-        const serverNowMs = safeParseIsoMs(json?.timestamp)
-        if (serverNowMs != null) {
-            const clientMid = (wall0 + wall1) / 2
-            healthClockOffsetMs.value = Math.round(serverNowMs - clientMid)
-        }
     } catch (err: any) {
         health.value = null
-        healthError.value = err?.message
-            ? `Failed to load health: ${err.message}`
-            : 'Failed to load health'
+        healthError.value = err?.message ? `Failed to load health: ${err.message}` : 'Failed to load health'
     } finally {
         healthInFlight = false
         if (!silent) healthLoading.value = false
@@ -920,27 +903,20 @@ function toggleControls() {
 watch(
     () => showControls.value,
     (open) => {
-        // Poll while panel is open so "Capture age" updates during an episode.
         if (open) {
             void loadHealth()
             if (healthPollTimer != null) window.clearInterval(healthPollTimer)
-            healthPollTimer = window.setInterval(() => {
-                void loadHealth({ silent: true })
-            }, 1000)
+            healthPollTimer = window.setInterval(() => void loadHealth({ silent: true }), 1000)
             return
         }
-
         if (healthPollTimer != null) window.clearInterval(healthPollTimer)
         healthPollTimer = null
     }
 )
 
 function onEnabledChange() {
-    if (enabled.value) {
-        reloadStream()
-    } else {
-        if (isCapturing.value || armOnNextFocus.value) releaseCapture()
-    }
+    if (enabled.value) reloadStream()
+    else if (isCapturing.value || armOnNextFocus.value) releaseCapture()
 }
 
 function reloadStream() {
@@ -948,9 +924,7 @@ function reloadStream() {
 }
 
 onBeforeUnmount(() => {
-    if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0) {
-        releaseCapture()
-    }
+    if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0) releaseCapture()
 
     if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
     if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
@@ -966,6 +940,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* unchanged styling from your file, plus note line */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
@@ -1183,16 +1158,6 @@ onBeforeUnmount(() => {
     text-align: right;
 }
 
-.health-row .value[data-age='ok'] {
-    opacity: 0.95;
-}
-.health-row .value[data-age='warn'] {
-    opacity: 0.95;
-}
-.health-row .value[data-age='bad'] {
-    opacity: 0.95;
-}
-
 .health-note {
     opacity: 0.72;
     line-height: 1.35;
@@ -1237,13 +1202,10 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-
     overflow: hidden;
-
     outline: none;
     cursor: pointer;
     user-select: none;
-
     border-radius: 6px;
 }
 
@@ -1253,10 +1215,8 @@ onBeforeUnmount(() => {
     align-items: stretch;
     justify-content: stretch;
     background-color: #000;
-
     border-radius: 6px;
     overflow: hidden;
-
     flex: 0 0 auto;
 }
 
@@ -1264,10 +1224,8 @@ onBeforeUnmount(() => {
     display: block;
     position: relative;
     z-index: 1;
-
     width: 100%;
     height: 100%;
-
     border-radius: inherit;
     image-rendering: auto;
 }
@@ -1290,31 +1248,13 @@ onBeforeUnmount(() => {
     inset: 0;
     border-radius: inherit;
     pointer-events: none;
-
     opacity: 0;
     transition: opacity 120ms ease;
-
     background-image:
-        linear-gradient(
-            to bottom,
-            rgba(var(--kb-accent-rgb), 0.75),
-            rgba(var(--kb-accent-rgb), 0) 15px
-        ),
-        linear-gradient(
-            to top,
-            rgba(var(--kb-accent-rgb), 0.75),
-            rgba(var(--kb-accent-rgb), 0) 15px
-        ),
-        linear-gradient(
-            to right,
-            rgba(var(--kb-accent-rgb), 0.75),
-            rgba(var(--kb-accent-rgb), 0) 15px
-        ),
-        linear-gradient(
-            to left,
-            rgba(var(--kb-accent-rgb), 0.75),
-            rgba(var(--kb-accent-rgb), 0) 15px
-        );
+        linear-gradient(to bottom, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px),
+        linear-gradient(to top, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px),
+        linear-gradient(to right, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px),
+        linear-gradient(to left, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px);
     background-repeat: no-repeat;
     background-size: 100% 15px, 100% 15px, 15px 100%, 15px 100%;
     background-position: top, bottom, left, right;

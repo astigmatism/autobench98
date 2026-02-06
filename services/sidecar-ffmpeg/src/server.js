@@ -6,43 +6,43 @@
 // - /screenshot      : latest frame as JPEG
 // - /recordings/*    : start/stop/status of recordings
 
-const http = require('http');
-const { URL } = require('url');
-const os = require('os');
+const http = require('http')
+const { URL } = require('url')
+const os = require('os')
 
-const { config } = require('./config');
-const { state } = require('./state');
-const { startCapture, addStreamClient } = require('./capture');
+const { config } = require('./config')
+const { state } = require('./state')
+const { startCapture, addStreamClient } = require('./capture')
 const {
   startRecording,
   stopRecording,
   getRecordingStatus,
   clearAllRecordings,
-} = require('./recordings');
+} = require('./recordings')
 
-const { log } = require('./log');
+const { log } = require('./log')
 
-const startedAt = state.service.startedAt;
+const startedAt = state.service.startedAt
 
 /* -------------------------------------------------------------------------- */
 /*  Basic JSON response helper                                                */
 /* -------------------------------------------------------------------------- */
 
 function sendJson(res, statusCode, payload) {
-  const body = JSON.stringify(payload, null, 2);
+  const body = JSON.stringify(payload, null, 2)
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
-  });
-  res.end(body);
+  })
+  res.end(body)
 }
 
 /**
  * Compute service uptime in seconds.
  */
 function getUptimeSec() {
-  const uptimeMs = Date.now() - startedAt;
-  return Math.round(uptimeMs / 1000);
+  const uptimeMs = Date.now() - startedAt
+  return Math.round(uptimeMs / 1000)
 }
 
 /**
@@ -54,40 +54,45 @@ function getUptimeSec() {
  * - We haven't seen a frame in > 5 seconds after we've ever seen one.
  */
 function evaluateHealth() {
-  const reasons = [];
+  const reasons = []
 
   if (!config.ffmpegArgs || !config.ffmpegArgs.trim()) {
-    reasons.push('ffmpeg_args_missing');
+    reasons.push('ffmpeg_args_missing')
   }
 
   if (!state.capture.running) {
-    reasons.push('capture_not_running');
+    reasons.push('capture_not_running')
   } else {
-    const now = Date.now();
-    const lastFrameTs = state.capture.lastFrameTs;
+    const now = Date.now()
+    const lastFrameTs = state.capture.lastFrameTs
     if (lastFrameTs !== null && now - lastFrameTs > 5000) {
-      reasons.push('no_recent_frames');
+      reasons.push('no_recent_frames')
     }
   }
 
-  const ok = reasons.length === 0;
+  const ok = reasons.length === 0
 
   return {
     ok,
     reasons,
-  };
+  }
 }
 
 /**
  * Handles the /health endpoint.
  */
 async function handleHealth(_req, res) {
-  const { ok, reasons } = evaluateHealth();
+  const { ok, reasons } = evaluateHealth()
+
+  const now = Date.now()
+  const lastFrameTs = state.capture.lastFrameTs
+  const lastFrameAgeMs =
+    typeof lastFrameTs === 'number' ? Math.max(0, now - lastFrameTs) : null
 
   const payload = {
     service: config.serviceName,
     status: ok ? 'ok' : 'unhealthy',
-    timestamp: new Date().toISOString(),
+    timestamp: new Date(now).toISOString(),
     uptimeSec: getUptimeSec(),
     hostname: os.hostname(),
     env: {
@@ -102,22 +107,26 @@ async function handleHealth(_req, res) {
     capture: {
       running: state.capture.running,
       lastFrameTs: state.capture.lastFrameTs,
+      lastFrameAgeMs, // NEW: directly usable “capture freshness” number
       lastError: state.capture.lastError,
       restartCount: state.capture.restartCount,
       metrics: state.capture.metrics,
       hasLastFrame: Boolean(state.capture.lastFrame),
+
+      // NEW: delivery pressure diagnostics (populated by capture.js instrumentation)
+      streamDiag: state.capture.streamDiag || null,
     },
     reasons,
-  };
+  }
 
   if (!ok) {
     // Single-line, key=value style
     log.sidecar.warn(
       `health check indicates unhealthy state reasons=${JSON.stringify(reasons)}`
-    );
+    )
   }
 
-  sendJson(res, ok ? 200 : 503, payload);
+  sendJson(res, ok ? 200 : 503, payload)
 }
 
 /**
@@ -125,29 +134,29 @@ async function handleHealth(_req, res) {
  */
 async function handleStream(req, res) {
   // Ensure the capture pipeline is running.
-  startCapture();
+  startCapture()
 
   // Attach this request/response as a stream client.
-  addStreamClient(req, res);
+  addStreamClient(req, res)
 }
 
 /**
  * Handle /screenshot endpoint.
  */
 async function handleScreenshot(_req, res) {
-  const frame = state.capture.lastFrame;
-  const ts = state.capture.lastFrameTs;
+  const frame = state.capture.lastFrame
+  const ts = state.capture.lastFrameTs
 
   if (!frame || !Buffer.isBuffer(frame)) {
     return sendJson(res, 503, {
       status: 'error',
       error: 'NoScreenshotAvailable',
       message: 'No captured frame is currently available.',
-    });
+    })
   }
 
-  const now = Date.now();
-  const ageMs = typeof ts === 'number' ? now - ts : null;
+  const now = Date.now()
+  const ageMs = typeof ts === 'number' ? now - ts : null
 
   const headers = {
     'Content-Type': 'image/jpeg',
@@ -155,14 +164,14 @@ async function handleScreenshot(_req, res) {
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     Pragma: 'no-cache',
     Expires: '0',
-  };
-
-  if (ageMs !== null) {
-    headers['X-Frame-Age-Ms'] = String(ageMs);
   }
 
-  res.writeHead(200, headers);
-  res.end(frame);
+  if (ageMs !== null) {
+    headers['X-Frame-Age-Ms'] = String(ageMs)
+  }
+
+  res.writeHead(200, headers)
+  res.end(frame)
 }
 
 /**
@@ -170,32 +179,32 @@ async function handleScreenshot(_req, res) {
  */
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
-    let data = '';
-    const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB cap
+    let data = ''
+    const MAX_BODY_BYTES = 1024 * 1024 // 1 MiB cap
 
     req.on('data', (chunk) => {
-      data += chunk.toString('utf8');
+      data += chunk.toString('utf8')
       if (Buffer.byteLength(data, 'utf8') > MAX_BODY_BYTES) {
-        reject(new Error('Request body too large'));
+        reject(new Error('Request body too large'))
       }
-    });
+    })
 
     req.on('end', () => {
       if (!data.trim()) {
-        return resolve({});
+        return resolve({})
       }
       try {
-        const parsed = JSON.parse(data);
-        resolve(parsed);
+        const parsed = JSON.parse(data)
+        resolve(parsed)
       } catch (_err) {
-        reject(new Error('Invalid JSON body'));
+        reject(new Error('Invalid JSON body'))
       }
-    });
+    })
 
     req.on('error', (err) => {
-      reject(err);
-    });
-  });
+      reject(err)
+    })
+  })
 }
 
 /**
@@ -207,40 +216,40 @@ function readJsonBody(req) {
  * - subdir              : optional explicit subdir override (rarely needed)
  */
 async function handleStartRecording(req, res) {
-  let body;
+  let body
   try {
-    body = await readJsonBody(req);
+    body = await readJsonBody(req)
   } catch (err) {
     return sendJson(res, 400, {
       status: 'error',
       error: 'BadRequest',
       message: err.message || 'Failed to parse request body',
-    });
+    })
   }
 
   const label =
-    typeof body.label === 'string' && body.label.trim() ? body.label : undefined;
+    typeof body.label === 'string' && body.label.trim() ? body.label : undefined
 
   // Allow orchestrator to send either "referenceId" or "runId"
   const referenceIdRaw =
     (typeof body.referenceId === 'string' && body.referenceId.trim()
       ? body.referenceId
       : null) ||
-    (typeof body.runId === 'string' && body.runId.trim() ? body.runId : null);
+    (typeof body.runId === 'string' && body.runId.trim() ? body.runId : null)
 
   const subdir =
-    typeof body.subdir === 'string' && body.subdir.trim() ? body.subdir : undefined;
+    typeof body.subdir === 'string' && body.subdir.trim() ? body.subdir : undefined
 
   try {
     const rec = await startRecording({
       label,
       referenceId: referenceIdRaw || undefined,
       subdir,
-    });
+    })
     return sendJson(res, 201, {
       status: 'ok',
       recording: rec,
-    });
+    })
   } catch (err) {
     // Concurrency limit exceeded
     if (err && err.code === 'EMAXREC') {
@@ -251,14 +260,14 @@ async function handleStartRecording(req, res) {
           err.message ||
           `Maximum concurrent recordings (${config.maxRecordings}) reached.`,
         maxRecordings: config.maxRecordings,
-      });
+      })
     }
 
     return sendJson(res, 500, {
       status: 'error',
       error: 'RecordingStartFailed',
       message: err && err.message ? err.message : String(err),
-    });
+    })
   }
 }
 
@@ -267,24 +276,24 @@ async function handleStartRecording(req, res) {
  */
 async function handleStopRecording(_req, res, recordingId) {
   try {
-    const rec = await stopRecording(recordingId);
+    const rec = await stopRecording(recordingId)
     return sendJson(res, 200, {
       status: 'ok',
       recording: rec,
-    });
+    })
   } catch (err) {
     if (err && err.code === 'ENOENT') {
       return sendJson(res, 404, {
         status: 'error',
         error: 'RecordingNotFound',
         message: `Recording not found: ${recordingId}`,
-      });
+      })
     }
     return sendJson(res, 500, {
       status: 'error',
       error: 'RecordingStopFailed',
       message: err && err.message ? err.message : String(err),
-    });
+    })
   }
 }
 
@@ -292,19 +301,19 @@ async function handleStopRecording(_req, res, recordingId) {
  * Handle GET /recordings/:id/status
  */
 async function handleRecordingStatus(_req, res, recordingId) {
-  const rec = getRecordingStatus(recordingId);
+  const rec = getRecordingStatus(recordingId)
   if (!rec) {
     return sendJson(res, 404, {
       status: 'error',
       error: 'RecordingNotFound',
       message: `Recording not found: ${recordingId}`,
-    });
+    })
   }
 
   return sendJson(res, 200, {
     status: 'ok',
     recording: rec,
-  });
+  })
 }
 
 /**
@@ -314,12 +323,12 @@ async function handleRecordingStatus(_req, res, recordingId) {
  */
 async function handleClearRecordings(_req, res) {
   try {
-    const result = await clearAllRecordings();
+    const result = await clearAllRecordings()
     return sendJson(res, 200, {
       status: 'ok',
       root: result.root,
       deletedEntries: result.deletedEntries,
-    });
+    })
   } catch (err) {
     if (err && err.code === 'EACTIVE') {
       return sendJson(res, 409, {
@@ -328,14 +337,14 @@ async function handleClearRecordings(_req, res) {
         message:
           err.message ||
           'Cannot clear recordings while one or more recordings are active.',
-      });
+      })
     }
 
     return sendJson(res, 500, {
       status: 'error',
       error: 'RecordingClearFailed',
       message: err && err.message ? err.message : String(err),
-    });
+    })
   }
 }
 
@@ -343,55 +352,55 @@ async function handleClearRecordings(_req, res) {
  * Request router.
  */
 async function requestListener(req, res) {
-  let url;
+  let url
   try {
-    url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
   } catch (_err) {
     return sendJson(res, 400, {
       status: 'error',
       error: 'BadRequest',
       message: 'Malformed URL',
-    });
+    })
   }
 
-  const { pathname } = url;
+  const { pathname } = url
 
   // Health
   if (req.method === 'GET' && pathname === '/health') {
-    return handleHealth(req, res);
+    return handleHealth(req, res)
   }
 
   // Stream
   if (req.method === 'GET' && pathname === '/stream') {
-    return handleStream(req, res);
+    return handleStream(req, res)
   }
 
   // Screenshot
   if (req.method === 'GET' && pathname === '/screenshot') {
-    return handleScreenshot(req, res);
+    return handleScreenshot(req, res)
   }
 
   // Recordings
   if (pathname === '/recordings/start' && req.method === 'POST') {
-    return handleStartRecording(req, res);
+    return handleStartRecording(req, res)
   }
 
   if (pathname === '/recordings/clear' && req.method === 'POST') {
-    return handleClearRecordings(req, res);
+    return handleClearRecordings(req, res)
   }
 
   if (pathname.startsWith('/recordings/') && pathname !== '/recordings/start') {
-    const parts = pathname.split('/').filter(Boolean); // e.g. ["recordings", "<id>", "stop"|"status"]
+    const parts = pathname.split('/').filter(Boolean) // e.g. ["recordings", "<id>", "stop"|"status"]
     if (parts.length === 3 && parts[0] === 'recordings') {
-      const recordingId = parts[1];
-      const action = parts[2];
+      const recordingId = parts[1]
+      const action = parts[2]
 
       if (action === 'stop' && req.method === 'POST') {
-        return handleStopRecording(req, res, recordingId);
+        return handleStopRecording(req, res, recordingId)
       }
 
       if (action === 'status' && req.method === 'GET') {
-        return handleRecordingStatus(req, res, recordingId);
+        return handleRecordingStatus(req, res, recordingId)
       }
     }
   }
@@ -411,7 +420,7 @@ async function requestListener(req, res) {
         '/recordings/:id/stop',
         '/recordings/:id/status',
       ],
-    });
+    })
   }
 
   // Fallback 404
@@ -419,30 +428,30 @@ async function requestListener(req, res) {
     status: 'error',
     error: 'NotFound',
     path: pathname,
-  });
+  })
 }
 
 // Create and start the HTTP server
 const server = http.createServer((req, res) => {
   // Wrap in a catch-all in case async handlers throw
   Promise.resolve(requestListener(req, res)).catch((err) => {
-    const msg = String(err && err.message ? err.message : err);
-    log.sidecar.error(`Unexpected error while handling request error="${msg}"`);
+    const msg = String(err && err.message ? err.message : err)
+    log.sidecar.error(`Unexpected error while handling request error="${msg}"`)
     if (!res.headersSent) {
       sendJson(res, 500, {
         status: 'error',
         error: 'InternalServerError',
-      });
+      })
     } else {
-      res.destroy();
+      res.destroy()
     }
-  });
-});
+  })
+})
 
 server.listen(config.port, config.host, () => {
-  const enabled = !!(config.logIngestEnabled && config.logIngestUrl);
-  const ingestUrl = enabled ? config.logIngestUrl : 'disabled';
+  const enabled = !!(config.logIngestEnabled && config.logIngestUrl)
+  const ingestUrl = enabled ? config.logIngestUrl : 'disabled'
   log.sidecar.info(
     `sidecar listening host=${config.host} port=${config.port} env=${config.env} logIngestEnabled=${enabled} logIngestUrl=${ingestUrl}`
-  );
-});
+  )
+})
