@@ -1,5 +1,3 @@
-// services/orchestrator/src/devices/ps2-keyboard/PS2KeyboardService.ts
-
 /* -------------------------------------------------------------------------- */
 /*  PS2KeyboardService                                                        */
 /*                                                                            */
@@ -36,9 +34,8 @@ import type {
 import { lookupScanCode } from './scancodes'
 import { sleep, now, makeOpId, formatWireScanCode } from './utils'
 
-// AppState (server-owned) — read-only usage for service-to-service coordination.
-import { getSnapshot, stateEvents } from '../../core/state.js'
-import type { AppState } from '../../core/state.js'
+// AppState (server-owned) — read-only subscription for frontpanel power sense
+import { getSnapshot, stateEvents, type AppState } from '../../core/state.js'
 
 /* -------------------------------------------------------------------------- */
 /*  Internal operation model                                                   */
@@ -61,6 +58,22 @@ interface QueuedOp {
 type DisconnectReason = 'io-error' | 'explicit-close' | 'unknown' | 'device-lost'
 
 /* -------------------------------------------------------------------------- */
+/*  Front panel power (from AppState)                                          */
+/* -------------------------------------------------------------------------- */
+
+type FrontPanelPowerSense = 'on' | 'off' | 'unknown'
+
+function normalizeFrontPanelPowerSense(v: unknown): FrontPanelPowerSense {
+  return v === 'on' || v === 'off' || v === 'unknown' ? v : 'unknown'
+}
+
+function toKeyboardPowerState(s: FrontPanelPowerSense): KeyboardPowerState {
+  if (s === 'on') return 'on'
+  if (s === 'off') return 'off'
+  return 'unknown'
+}
+
+/* -------------------------------------------------------------------------- */
 
 export class PS2KeyboardService {
   private readonly cfg: PS2KeyboardConfig
@@ -71,16 +84,7 @@ export class PS2KeyboardService {
 
   private port: SerialPort | null = null
   private phase: KeyboardDevicePhase = 'disconnected'
-
-  /**
-   * `power` here is the **keyboard device output permission state**.
-   * It is driven by AppState (frontPanel.powerSense) and only becomes 'on'
-   * after we successfully issue `power_on` to the Arduino.
-   *
-   * Safety: fail-closed by default.
-   */
   private power: KeyboardPowerState = 'unknown'
-
   private identified = false
 
   private queue: QueuedOp[] = []
@@ -107,10 +111,9 @@ export class PS2KeyboardService {
   private closingPort: SerialPort | null = null
   // --------------------------------------------------------------------------
 
-  // AppState subscription + pending power truth (state is authoritative; we cache last seen).
-  private stateSubAttached = false
-  private lastSeenPcPower: KeyboardPowerState = 'unknown'
-  private pendingPcPower: KeyboardPowerState | null = null
+  // AppState subscription + pending frontpanel power sense
+  private appStateAttached = false
+  private pendingPowerFromFrontPanel: FrontPanelPowerSense | null = null
 
   // Modifier identification is intentionally explicit and conservative.
   private static readonly MODIFIER_CODES = new Set<string>([
@@ -135,19 +138,15 @@ export class PS2KeyboardService {
 
   public async start(): Promise<void> {
     this.stopping = false
-    this.attachPcPowerSubscription()
-
-    // Pull an initial snapshot immediately (so we don't wait for a later patch).
-    // If the frontPanel slice is still at its default, this remains fail-closed.
-    this.syncPcPowerFromState('startup')
+    this.attachFrontPanelPowerWatcher()
   }
 
   public async stop(): Promise<void> {
     this.stopping = true
     this.clearReconnectTimer()
 
-    // Stop reacting to AppState updates during teardown.
-    this.detachPcPowerSubscription()
+    // Stop reacting to AppState during teardown
+    this.detachFrontPanelPowerWatcher()
 
     // If an open attempt is in flight, wait for it to settle before closing.
     try {
@@ -163,8 +162,7 @@ export class PS2KeyboardService {
     this.phase = 'disconnected'
     this.identified = false
     this.power = 'unknown'
-    this.pendingPcPower = null
-    this.lastSeenPcPower = 'unknown'
+    this.pendingPowerFromFrontPanel = null
     this.heldModifiers.clear()
     this.readBuffer = ''
   }
@@ -509,8 +507,8 @@ export class PS2KeyboardService {
       try {
         await this.identify()
 
-        // After identify success, apply any pending PC power truth.
-        this.applyPendingPcPower('post-identify')
+        // After identify success, apply any pending frontpanel power state.
+        this.applyPendingFrontPanelPower()
       } catch {
         await this.closePort('unknown')
         this.scheduleReconnect()
@@ -531,9 +529,6 @@ export class PS2KeyboardService {
     this.phase = 'disconnected'
     this.heldModifiers.clear()
     this.readBuffer = ''
-
-    // Fail-closed: a disconnected keyboard device should not accept output.
-    this.power = 'unknown'
 
     if (port && port.isOpen) {
       this.closingPort = port
@@ -746,106 +741,108 @@ export class PS2KeyboardService {
   }
 
   /* ---------------------------------------------------------------------- */
-  /*  AppState coordination (read-only)                                      */
+  /*  AppState integration (frontpanel powerSense -> internal power gating)  */
   /* ---------------------------------------------------------------------- */
 
-  private readonly onStateSnapshot = (snap: AppState): void => {
-    if (this.stopping) return
-
-    const next = this.selectPcPowerFromAppState(snap)
-
-    // Only react on changes.
-    if (next === this.lastSeenPcPower) return
-    this.lastSeenPcPower = next
-    this.pendingPcPower = next
-
-    this.onPcPowerChanged(next, 'state-change')
+  private onAppStateSnapshot = (snap: AppState): void => {
+    this.syncFrontPanelPowerFromSnapshot(snap, 'appstate:snapshot')
   }
 
-  private attachPcPowerSubscription(): void {
-    if (this.stateSubAttached) return
-    this.stateSubAttached = true
-    stateEvents.on('snapshot', this.onStateSnapshot)
-  }
+  private attachFrontPanelPowerWatcher(): void {
+    if (this.appStateAttached) return
+    this.appStateAttached = true
 
-  private detachPcPowerSubscription(): void {
-    if (!this.stateSubAttached) return
-    this.stateSubAttached = false
-    stateEvents.off('snapshot', this.onStateSnapshot)
-  }
-
-  private syncPcPowerFromState(reason: string): void {
-    let snap: AppState | null = null
+    // Sync immediately at start so we have a value right away.
     try {
-      snap = getSnapshot()
+      const snap = getSnapshot()
+      this.syncFrontPanelPowerFromSnapshot(snap, 'appstate:start')
     } catch {
-      // Fail-closed: treat as unknown and do not attempt output.
-      snap = null
+      // Fail-closed: if snapshot read fails at start, treat as unknown.
+      this.syncFrontPanelPowerChanged('unknown', 'appstate:start:read-failed', null)
     }
 
-    const next = snap ? this.selectPcPowerFromAppState(snap) : 'unknown'
-
-    // Even if unchanged, record as pending so identify can apply it later.
-    this.pendingPcPower = next
-
-    if (next === this.lastSeenPcPower) {
-      // If we are already ready and pending is 'on' but we haven't powered on yet,
-      // applyPendingPcPower() will still do the right thing.
-      if (this.isDeviceReady()) {
-        this.applyPendingPcPower(`sync:${reason}`)
-      }
-      return
-    }
-
-    this.lastSeenPcPower = next
-    this.onPcPowerChanged(next, `sync:${reason}`)
+    stateEvents.on('snapshot', this.onAppStateSnapshot)
   }
 
-  private selectPcPowerFromAppState(snap: AppState): KeyboardPowerState {
-    // Source-of-truth: frontPanel slice.
-    const v = (snap as any)?.frontPanel?.powerSense
-    if (v === 'on' || v === 'off' || v === 'unknown') return v
-    return 'unknown'
+  private detachFrontPanelPowerWatcher(): void {
+    if (!this.appStateAttached) return
+    this.appStateAttached = false
+    stateEvents.off('snapshot', this.onAppStateSnapshot)
   }
 
-  private onPcPowerChanged(next: KeyboardPowerState, source: string): void {
-    // Always store latest desired power truth (applied when device becomes ready).
-    this.pendingPcPower = next
+  private syncFrontPanelPowerFromSnapshot(snap: AppState, reason: string): void {
+    const next = normalizeFrontPanelPowerSense((snap as any)?.frontPanel?.powerSense)
+    const updatedAt =
+      typeof (snap as any)?.frontPanel?.updatedAt === 'number'
+        ? ((snap as any).frontPanel.updatedAt as number)
+        : null
+    this.syncFrontPanelPowerChanged(next, reason, updatedAt)
+  }
 
-    const requestedBy = `frontpanel:appstate:${source}`
+  private syncFrontPanelPowerChanged(
+    next: FrontPanelPowerSense,
+    reason: string,
+    frontPanelUpdatedAt: number | null
+  ): void {
+    const prev = this.pendingPowerFromFrontPanel
 
-    if (next === 'on') {
+    // Only act/log when the value actually changes.
+    if (prev === next) return
+
+    this.pendingPowerFromFrontPanel = next
+
+    // ✅ This is the log line you asked for: appears in server logs (keyboard channel)
+    // because the plugin logger already logs keyboard-debug-line.
+    this.events.publish({
+      kind: 'keyboard-debug-line',
+      at: now(),
+      line:
+        `appstate frontPanel.powerSense changed prev=${prev ?? 'null'} next=${next}` +
+        ` reason=${reason}` +
+        (frontPanelUpdatedAt != null ? ` frontPanelUpdatedAt=${frontPanelUpdatedAt}` : ''),
+    })
+
+    // Apply behavior equivalent to the prior bus-based coordination.
+    this.onFrontPanelPowerChanged(next, reason)
+  }
+
+  private onFrontPanelPowerChanged(state: FrontPanelPowerSense, reason: string): void {
+    const requestedBy = `frontpanel:${reason}`
+
+    if (state === 'on') {
       // If device not yet ready, defer until after identify.
-      if (!this.isDeviceReady()) return
-
-      // Avoid redundant power-on requests.
-      if (this.power === 'on') return
-
+      if (!this.port || !this.port.isOpen || !this.identified) return
       void this.powerOn(requestedBy).done.catch(() => {})
       return
     }
 
     // OFF or UNKNOWN: fail closed immediately.
-    this.power = next
+    this.power = toKeyboardPowerState(state)
     this.cancelAll('power-gated')
     this.heldModifiers.clear()
 
     // If device is ready, explicitly command firmware power-off.
-    if (this.isDeviceReady()) {
+    if (this.port && this.port.isOpen && this.identified) {
       void this.powerOff(requestedBy).done.catch(() => {})
     }
   }
 
-  private applyPendingPcPower(source: string): void {
-    const pending = this.pendingPcPower ?? 'unknown'
-    if (!this.isDeviceReady()) return
+  private applyPendingFrontPanelPower(): void {
+    if (!this.pendingPowerFromFrontPanel) return
+    if (!this.port || !this.port.isOpen || !this.identified) return
 
-    // Apply even if lastSeen didn't change (e.g., pending 'on' arrived pre-identify).
-    this.onPcPowerChanged(pending, `pending:${source}`)
-  }
+    const state = this.pendingPowerFromFrontPanel
+    const requestedBy = 'frontpanel:pending'
 
-  private isDeviceReady(): boolean {
-    return !!this.port && this.port.isOpen && this.identified
+    if (state === 'on') {
+      void this.powerOn(requestedBy).done.catch(() => {})
+    } else {
+      // unknown/off => fail closed
+      this.power = toKeyboardPowerState(state)
+      this.cancelAll('power-gated')
+      this.heldModifiers.clear()
+      void this.powerOff(requestedBy).done.catch(() => {})
+    }
   }
 
   /* ---------------------------------------------------------------------- */
