@@ -435,6 +435,7 @@ const streamSrc = computed(() => {
 })
 
 function requestStreamResync(reason: string) {
+    void reason
     if (!enabled.value) return
     const now = Date.now()
 
