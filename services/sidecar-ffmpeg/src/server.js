@@ -46,31 +46,15 @@ function getUptimeSec() {
 }
 
 /**
- * Parse and normalize a maxFps hint.
- *
- * Sources (in priority order):
- *  1) Query param: /stream?maxFps=<N>
- *  2) Header: x-stream-max-fps: <N>   (fallback for proxies)
- *
- * Rules:
- * - Accept any finite number
- * - Clamp to 1..60
- * - Return null when absent/invalid (meaning "unlimited" at the stream layer)
+ * Parse and normalize a maxFps query parameter.
+ * - Accepts any finite number
+ * - Clamps to 1..60
+ * - Returns null when absent/invalid (meaning "unlimited" at the stream layer)
  */
-function parseMaxFpsHint(req, url) {
-  let raw = null
+function parseMaxFpsParam(url) {
+  if (!url || !url.searchParams) return null
 
-  if (url && url.searchParams) {
-    const q = url.searchParams.get('maxFps')
-    if (q != null && String(q).trim() !== '') raw = q
-  }
-
-  if (raw == null && req && req.headers) {
-    const h = req.headers['x-stream-max-fps']
-    if (Array.isArray(h)) raw = h[0] ?? null
-    else if (typeof h === 'string') raw = h
-  }
-
+  const raw = url.searchParams.get('maxFps')
   if (raw == null || String(raw).trim() === '') return null
 
   const n = Number(raw)
@@ -179,9 +163,10 @@ async function handleStream(req, res, url) {
   // Ensure the capture pipeline is running.
   startCapture()
 
-  const maxFps = parseMaxFpsHint(req, url)
+  const maxFps = parseMaxFpsParam(url)
 
   // Attach this request/response as a stream client (with optional throttling).
+  // NOTE: Extra args are safe even if addStreamClient currently only accepts (req, res).
   addStreamClient(req, res, { maxFps })
 }
 

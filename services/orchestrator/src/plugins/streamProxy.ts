@@ -40,33 +40,6 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
 
     log.info(`sidecar proxy configured baseUrl=${baseUrl}`)
 
-    function clampMaxFps(raw: unknown): number | null {
-        if (raw == null) return null
-        const n = Number(raw)
-        if (!Number.isFinite(n)) return null
-        const i = Math.floor(n)
-        if (i <= 0) return null
-        return Math.max(1, Math.min(60, i))
-    }
-
-    function extractMaxFps(req: any): number | null {
-        // Prefer query param, fallback to header.
-        try {
-            const u = new URL(req?.raw?.url ?? '/api/sidecar/stream', 'http://localhost')
-            const q = u.searchParams.get('maxFps')
-            const fromQuery = clampMaxFps(q)
-            if (fromQuery != null) return fromQuery
-        } catch {
-            // ignore
-        }
-
-        // Header fallback (string | string[] | undefined)
-        const h = req?.headers?.['x-stream-max-fps']
-        if (Array.isArray(h)) return clampMaxFps(h[0])
-        if (typeof h === 'string') return clampMaxFps(h)
-        return null
-    }
-
     /**
      * MJPEG stream proxy.
      *
@@ -107,15 +80,10 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
             // ignore
         }
 
-        // If client requested maxFps, forward it in a controlled way.
-        // (We still forward the query string too; this is redundant but robust.)
-        const maxFps = extractMaxFps(req)
-
         try {
             const { statusCode, headers, body } = await request(target, {
                 method: 'GET',
                 signal: ac.signal,
-                headers: maxFps != null ? { 'x-stream-max-fps': String(maxFps) } : undefined,
             })
 
             // Pass through content-type and other safe headers.
