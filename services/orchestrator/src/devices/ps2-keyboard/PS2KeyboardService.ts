@@ -159,6 +159,7 @@ export class PS2KeyboardService {
 
     this.queue.length = 0
     this.activeOp = null
+    this.cancelled = false
     this.phase = 'disconnected'
     this.identified = false
     this.power = 'unknown'
@@ -311,19 +312,31 @@ export class PS2KeyboardService {
   }
 
   public cancelAll(reason = 'cancelled'): void {
-    this.cancelled = true
+    const hadActive = !!this.activeOp
 
-    if (this.activeOp) {
+    // Only set the cancel flag if there is an operation to actually cancel.
+    // If there is no active op, "cancelled=true" can poison lifecycle actions
+    // (like identify) and future ops by making writeLine() fail immediately.
+    if (hadActive) {
+      this.cancelled = true
+
       this.events.publish({
         kind: 'keyboard-operation-cancelled',
         at: now(),
-        opId: this.activeOp.id,
+        opId: this.activeOp!.id,
         reason,
       })
     }
 
+    // Drop queued work immediately.
     this.queue.length = 0
-    this.activeOp = null
+
+    // IMPORTANT:
+    // Do not null out activeOp here. Let the running op unwind; processQueue()
+    // will clear activeOp and reset cancelled=false in its finally{} block.
+    if (!hadActive) {
+      this.cancelled = false
+    }
   }
 
   /* ---------------------------------------------------------------------- */
@@ -505,6 +518,11 @@ export class PS2KeyboardService {
       port.on('close', () => this.handlePortClose(port))
 
       try {
+        // Defensive: don't let a "no-active-op" cancellation state break identify.
+        if (!this.activeOp) {
+          this.cancelled = false
+        }
+
         await this.identify()
 
         // After identify success, apply any pending frontpanel power state.
@@ -758,7 +776,11 @@ export class PS2KeyboardService {
       this.syncFrontPanelPowerFromSnapshot(snap, 'appstate:start')
     } catch {
       // Fail-closed: if snapshot read fails at start, treat as unknown.
-      this.syncFrontPanelPowerChanged('unknown', 'appstate:start:read-failed', null)
+      this.syncFrontPanelPowerChanged(
+        'unknown',
+        'appstate:start:read-failed',
+        null
+      )
     }
 
     stateEvents.on('snapshot', this.onAppStateSnapshot)
@@ -791,18 +813,18 @@ export class PS2KeyboardService {
 
     this.pendingPowerFromFrontPanel = next
 
-    // ✅ This is the log line you asked for: appears in server logs (keyboard channel)
-    // because the plugin logger already logs keyboard-debug-line.
+    // Log power-sense updates at the service level (shows in server logs).
     this.events.publish({
       kind: 'keyboard-debug-line',
       at: now(),
       line:
         `appstate frontPanel.powerSense changed prev=${prev ?? 'null'} next=${next}` +
         ` reason=${reason}` +
-        (frontPanelUpdatedAt != null ? ` frontPanelUpdatedAt=${frontPanelUpdatedAt}` : ''),
+        (frontPanelUpdatedAt != null
+          ? ` frontPanelUpdatedAt=${frontPanelUpdatedAt}`
+          : ''),
     })
 
-    // Apply behavior equivalent to the prior bus-based coordination.
     this.onFrontPanelPowerChanged(next, reason)
   }
 
