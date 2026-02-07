@@ -3,7 +3,11 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
 
-import { createLogger, LogChannel, type ClientLogBuffer } from '@autobench98/logging'
+import {
+  createLogger,
+  LogChannel,
+  type ClientLogBuffer,
+} from '@autobench98/logging'
 
 import { FrontPanelService } from '../devices/front-panel/FrontPanelService.js'
 import type { FrontPanelEvent } from '../devices/front-panel/types.js'
@@ -176,7 +180,8 @@ const frontPanelPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     }
   )
 
-  const svc = new FrontPanelService(cfg, { events })
+  // Construct the service without any message bus dependency.
+  const svc = new FrontPanelService(cfg, { events } as any)
 
   app.decorate('frontPanel', svc)
 

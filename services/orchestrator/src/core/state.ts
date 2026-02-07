@@ -203,6 +203,74 @@ export type PatchEvent = {
     patch: jsonpatch.Operation[]
 }
 
+/**
+ * Returns true if any operation in a JSON Patch touches (or sources from) a JSON pointer prefix.
+ *
+ * Examples:
+ * - prefix "/frontPanel" will match "/frontPanel/powerSense"
+ * - prefix "frontPanel" is normalized to "/frontPanel"
+ *
+ * Note:
+ * - For move/copy operations, both `path` and `from` are considered.
+ */
+export function patchTouches(
+    patch: jsonpatch.Operation[],
+    pointerPrefix: string
+): boolean {
+    const prefix = pointerPrefix.startsWith('/')
+        ? pointerPrefix
+        : `/${pointerPrefix}`
+
+    for (const op of patch) {
+        const p = (op as any).path
+        if (typeof p === 'string' && p.startsWith(prefix)) return true
+
+        const from = (op as any).from
+        if (typeof from === 'string' && from.startsWith(prefix)) return true
+    }
+
+    return false
+}
+
+/**
+ * Convenience subscription: notify when a single top-level slice changes.
+ *
+ * This is the intended pattern for service-to-service coordination:
+ * - A service publishes events
+ * - Its adapter updates AppState
+ * - Other services subscribe to the relevant slice and react
+ *
+ * Safety note:
+ * - Listener exceptions are swallowed so one bad subscriber cannot break state emission.
+ */
+export function subscribeSlice<K extends keyof AppState>(
+    key: K,
+    onChange: (slice: Readonly<AppState[K]>, evt: PatchEvent) => void,
+    opts?: { emitInitial?: boolean }
+): () => void {
+    const prefix = `/${String(key)}`
+
+    if (opts?.emitInitial) {
+        try {
+            onChange(peekSlice(key), { from: state.version, to: state.version, patch: [] })
+        } catch {
+            // swallow
+        }
+    }
+
+    const handler = (evt: PatchEvent) => {
+        if (!patchTouches(evt.patch, prefix)) return
+        try {
+            onChange(peekSlice(key), evt)
+        } catch {
+            // swallow
+        }
+    }
+
+    stateEvents.on('patch', handler)
+    return () => stateEvents.off('patch', handler)
+}
+
 /* ENV helpers */
 function num(v: unknown, def: number): number {
     const n = Number(v)
@@ -226,13 +294,49 @@ function csv(v: unknown): string[] {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Immutability helpers                                                      */
+/* -------------------------------------------------------------------------- */
+
+function isObjectLike(v: unknown): v is object {
+    return typeof v === 'object' && v !== null
+}
+
+/**
+ * Deep-freeze an object tree to prevent accidental mutation of the internal
+ * authoritative state. This is used on the *internal* `state` only.
+ *
+ * Safety note:
+ * - We clone inputs before storing them, and freeze after storing.
+ * - Consumers should continue to use `getSnapshot()` for a mutable copy,
+ *   or `peek()`/`peekSlice()` for a read-only frozen view.
+ */
+function deepFreeze<T>(obj: T, seen = new WeakSet<object>()): T {
+    if (!isObjectLike(obj)) return obj
+
+    const o = obj as unknown as object
+    if (seen.has(o)) return obj
+    seen.add(o)
+
+    // Freeze children first (handles arrays and plain objects).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyObj: any = obj as any
+    for (const key of Object.keys(anyObj)) {
+        deepFreeze(anyObj[key], seen)
+    }
+
+    Object.freeze(o)
+    return obj
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initial configuration                                                     */
 /* -------------------------------------------------------------------------- */
 
 const LOGS_SNAPSHOT = num(process.env.CLIENT_LOGS_SNAPSHOT, 200)
 const LOGS_CAPACITY = num(process.env.CLIENT_LOGS_CAPACITY, 500)
 const LOG_ALLOWED = csv(process.env.LOG_CHANNEL_ALLOWLIST)
-const LOG_MIN = (process.env.LOG_LEVEL_MIN ?? 'debug').toLowerCase() as ServerConfig['logs']['minLevel']
+const LOG_MIN = (process.env.LOG_LEVEL_MIN ?? 'debug')
+    .toLowerCase() as ServerConfig['logs']['minLevel']
 
 const WS_HEARTBEAT_INTERVAL_MS = num(process.env.VITE_WS_HEARTBEAT_INTERVAL_MS, 10_000)
 const WS_HEARTBEAT_TIMEOUT_MS = num(process.env.VITE_WS_HEARTBEAT_TIMEOUT_MS, 5_000)
@@ -429,6 +533,9 @@ let state: AppState = {
     sidecar: initialSidecar,
 }
 
+// Freeze the initial authoritative state.
+state = deepFreeze(state)
+
 /* -------------------------------------------------------------------------- */
 /*  Internal event emission helpers                                           */
 /* -------------------------------------------------------------------------- */
@@ -452,19 +559,47 @@ function emitChanges(prev: AppState, next: AppState) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Public state update wrappers                                              */
+/*  Public read APIs                                                          */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Returns a deep-cloned, mutable copy of AppState.
+ * Use this when callers need to freely manipulate the returned object.
+ */
 export function getSnapshot(): AppState {
     return clone(state)
 }
 
+/**
+ * Returns the current authoritative state by reference.
+ * The returned object is deep-frozen to prevent mutation.
+ *
+ * Use this for efficient read-only access (selectors, gating checks, etc.)
+ * without the overhead of cloning the full AppState.
+ */
+export function peek(): Readonly<AppState> {
+    return state
+}
+
+/**
+ * Returns a read-only view of a top-level slice.
+ * The returned value is a reference into the frozen authoritative state.
+ */
+export function peekSlice<K extends keyof AppState>(key: K): Readonly<AppState[K]> {
+    return state[key]
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public state update wrappers                                              */
+/* -------------------------------------------------------------------------- */
+
 export function replaceState(next: Omit<AppState, 'version'> & { version?: number }) {
     const prev = clone(state)
-    const version = (typeof next.version === 'number' ? next.version : state.version) + 1
+    const version =
+        (typeof next.version === 'number' ? next.version : state.version) + 1
     const updated: AppState = { ...next, version }
-    state = updated
-    emitChanges(prev, updated)
+    state = deepFreeze(updated)
+    emitChanges(prev, state)
 }
 
 export function set<K extends keyof AppState>(key: K, value: AppState[K]) {
@@ -474,8 +609,8 @@ export function set<K extends keyof AppState>(key: K, value: AppState[K]) {
         [key]: clone(value),
         version: state.version + 1,
     } as AppState
-    state = nextShallow
-    emitChanges(prev, nextShallow)
+    state = deepFreeze(nextShallow)
+    emitChanges(prev, state)
 }
 
 export function setMessage(text: string) {

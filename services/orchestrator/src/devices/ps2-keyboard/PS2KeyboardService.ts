@@ -1,3 +1,5 @@
+// services/orchestrator/src/devices/ps2-keyboard/PS2KeyboardService.ts
+
 /* -------------------------------------------------------------------------- */
 /*  PS2KeyboardService                                                        */
 /*                                                                            */
@@ -34,17 +36,15 @@ import type {
 import { lookupScanCode } from './scancodes'
 import { sleep, now, makeOpId, formatWireScanCode } from './utils'
 
-// AppState (server-owned) — read-only subscription for frontpanel power sense
-import { getSnapshot, stateEvents, type AppState } from '../../core/state.js'
-
 /* -------------------------------------------------------------------------- */
-/*  Internal operation model                                                   */
+/*  Internal operation model                                                  */
 /* -------------------------------------------------------------------------- */
 
 interface QueuedOp {
   id: string
   kind: KeyboardOperationKind
   createdAt: number
+  startedAt?: number
   requestedBy?: string
   label?: string
   tuning?: Partial<KeyboardInvokeTuning>
@@ -58,34 +58,15 @@ interface QueuedOp {
 type DisconnectReason = 'io-error' | 'explicit-close' | 'unknown' | 'device-lost'
 
 /* -------------------------------------------------------------------------- */
-/*  Front panel power (from AppState)                                          */
+/*  Cancellation                                                              */
 /* -------------------------------------------------------------------------- */
 
-type FrontPanelPowerSense = 'on' | 'off' | 'unknown'
-
-function normalizeFrontPanelPowerSense(v: unknown): FrontPanelPowerSense {
-  return v === 'on' || v === 'off' || v === 'unknown' ? v : 'unknown'
-}
-
-function toKeyboardPowerState(s: FrontPanelPowerSense): KeyboardPowerState {
-  if (s === 'on') return 'on'
-  if (s === 'off') return 'off'
-  return 'unknown'
-}
-
-function readFrontPanelPowerFromSnapshot(snap: AppState): {
-  powerSense: FrontPanelPowerSense
-  updatedAt: number | null
-} {
-  const raw = (snap as any)?.frontPanel?.powerSense
-  const updatedAt =
-    typeof (snap as any)?.frontPanel?.updatedAt === 'number'
-      ? ((snap as any).frontPanel.updatedAt as number)
-      : null
-
-  return {
-    powerSense: normalizeFrontPanelPowerSense(raw),
-    updatedAt,
+class CancelledError extends Error {
+  public readonly reason: string
+  constructor(reason: string) {
+    super(reason)
+    this.name = 'CancelledError'
+    this.reason = reason
   }
 }
 
@@ -100,12 +81,26 @@ export class PS2KeyboardService {
 
   private port: SerialPort | null = null
   private phase: KeyboardDevicePhase = 'disconnected'
+
+  /**
+   * "power" here represents keyboard-side power control (Arduino command),
+   * NOT the host PC power sense. Host power is tracked separately via hostPower.
+   */
   private power: KeyboardPowerState = 'unknown'
+
+  /**
+   * Host PC power state (sourced from frontPanel powerSense by the plugin).
+   *
+   * Decisions you made:
+   * - hostPower='unknown' => fail-open for key ops
+   * - hostPower='off' => drop (cancel) queued key ops
+   */
+  private hostPower: KeyboardPowerState = 'unknown'
+
   private identified = false
 
   private queue: QueuedOp[] = []
   private activeOp: QueuedOp | null = null
-  private cancelled = false
 
   private reconnectAttempts = 0
   private reconnectTimer: NodeJS.Timeout | null = null
@@ -127,10 +122,11 @@ export class PS2KeyboardService {
   private closingPort: SerialPort | null = null
   // --------------------------------------------------------------------------
 
-  // AppState subscription + last-seen frontpanel power sense
-  private appStateAttached = false
-  private lastFrontPanelPowerSense: FrontPanelPowerSense | null = null
-  private lastFrontPanelUpdatedAt: number | null = null
+  /**
+   * Active-op cancellation is modeled as a precise (opId, reason) pair
+   * so we do not accidentally cancel future operations.
+   */
+  private activeCancel: { opId: string; reason: string } | null = null
 
   // Modifier identification is intentionally explicit and conservative.
   private static readonly MODIFIER_CODES = new Set<string>([
@@ -150,20 +146,51 @@ export class PS2KeyboardService {
   }
 
   /* ---------------------------------------------------------------------- */
+  /*  Host power integration (called by plugin)                              */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Update host power state as observed by the front panel service.
+   *
+   * Semantics:
+   * - 'unknown' => do not block key ops (fail-open)
+   * - 'off' => cancel queued key operations; active key op is cancelled best-effort
+   */
+  public setHostPower(power: KeyboardPowerState): void {
+    if (power === this.hostPower) return
+
+    const prev = this.hostPower
+    this.hostPower = power
+
+    // On transition into a known OFF state: drop queued key ops.
+    if (power === 'off' && prev !== 'off') {
+      this.cancelQueuedKeyOps('host-power-off')
+      // If a key op is currently active, request cancellation.
+      if (this.activeOp && this.isKeyOpKind(this.activeOp.kind)) {
+        this.requestCancelActiveOp('host-power-off')
+      }
+    }
+  }
+
+  public getHostPower(): KeyboardPowerState {
+    return this.hostPower
+  }
+
+  /* ---------------------------------------------------------------------- */
   /*  Lifecycle (called by Fastify plugin)                                   */
   /* ---------------------------------------------------------------------- */
 
   public async start(): Promise<void> {
+    // No-op; lifecycle is discovery-driven
     this.stopping = false
-    this.ensureFrontPanelPowerWatcherAttached('start')
   }
 
   public async stop(): Promise<void> {
     this.stopping = true
     this.clearReconnectTimer()
 
-    // Stop reacting to AppState during teardown
-    this.detachFrontPanelPowerWatcher()
+    // Cancel everything (key or non-key) to avoid hanging "done" promises.
+    this.cancelAll('service-stopping')
 
     // If an open attempt is in flight, wait for it to settle before closing.
     try {
@@ -176,14 +203,13 @@ export class PS2KeyboardService {
 
     this.queue.length = 0
     this.activeOp = null
-    this.cancelled = false
     this.phase = 'disconnected'
     this.identified = false
     this.power = 'unknown'
-    this.lastFrontPanelPowerSense = null
-    this.lastFrontPanelUpdatedAt = null
+    this.hostPower = 'unknown'
     this.heldModifiers.clear()
     this.readBuffer = ''
+    this.activeCancel = null
   }
 
   /* ---------------------------------------------------------------------- */
@@ -195,10 +221,6 @@ export class PS2KeyboardService {
     path: string
     baudRate?: number
   }): Promise<void> {
-    // CRITICAL: do not rely on plugin lifecycle calling start().
-    // Attach AppState watcher here as well, idempotently.
-    this.ensureFrontPanelPowerWatcherAttached('onDeviceIdentified')
-
     this.deviceId = args.id
     this.devicePath = args.path
 
@@ -240,23 +262,9 @@ export class PS2KeyboardService {
   /* ---------------------------------------------------------------------- */
 
   public enqueueKeyEvent(evt: ClientKeyboardEvent): KeyboardOperationHandle {
-    // Gate key events on power state (do not emit when off/unknown)
-    if (this.power !== 'on') {
-      const kind: KeyboardOperationKind =
-        evt.action === 'press'
-          ? 'press'
-          : evt.action === 'hold'
-          ? 'hold'
-          : 'release'
-
-      return this.failFastHandle(
-        kind,
-        `PC power state is ${this.power}; refusing key event`
-      )
-    }
-
     const scan = this.resolveScanCode(evt)
     if (!scan) {
+      // Surface as a recoverable error for observability (and UI error history).
       this.events.publish({
         kind: 'recoverable-error',
         at: now(),
@@ -286,8 +294,9 @@ export class PS2KeyboardService {
       tuning: evt.overrides,
       label: `${evt.action} ${evt.code ?? evt.key ?? ''}`,
       execute: async () => {
-        await this.ensureConnected()
-        await this.ensurePoweredOn()
+        await this.ensureReady()
+        // Enforce host-power policy at the lowest level that sends key bytes.
+        this.assertKeyOpsAllowed()
         await this.sendAction(evt.action, scan, {
           code: evt.code,
           key: evt.key,
@@ -302,7 +311,8 @@ export class PS2KeyboardService {
       requestedBy,
       label: 'power on',
       execute: async () => {
-        await this.ensureConnected()
+        await this.ensureReady()
+        // Note: this is keyboard-side power control; not gated on host power.
         await this.writeLine('power_on')
         this.power = 'on'
         this.events.publish({
@@ -320,7 +330,8 @@ export class PS2KeyboardService {
       requestedBy,
       label: 'power off',
       execute: async () => {
-        await this.ensureConnected()
+        await this.ensureReady()
+        // Note: this is keyboard-side power control; not gated on host power.
         await this.writeLine('power_off')
         this.power = 'off'
         this.events.publish({
@@ -333,31 +344,22 @@ export class PS2KeyboardService {
     })
   }
 
+  /**
+   * Cancel all queued + active operations (any kind), settling their promises.
+   * This is used for explicit user cancels and service shutdown.
+   */
   public cancelAll(reason = 'cancelled'): void {
-    const hadActive = !!this.activeOp
-
-    // Only set the cancel flag if there is an operation to actually cancel.
-    // If there is no active op, "cancelled=true" can poison lifecycle actions
-    // (like identify) and future ops by making writeLine() fail immediately.
-    if (hadActive) {
-      this.cancelled = true
-
-      this.events.publish({
-        kind: 'keyboard-operation-cancelled',
-        at: now(),
-        opId: this.activeOp!.id,
-        reason,
-      })
+    // Cancel queued ops and settle their promises immediately.
+    const queued = this.queue.splice(0, this.queue.length)
+    for (const op of queued) {
+      this.publishCancelled(op, reason)
+      op.resolve(this.makeCancellationResult(op, reason))
     }
 
-    // Drop queued work immediately.
-    this.queue.length = 0
-
-    // IMPORTANT:
-    // Do not null out activeOp here. Let the running op unwind; processQueue()
-    // will clear activeOp and reset cancelled=false in its finally{} block.
-    if (!hadActive) {
-      this.cancelled = false
+    // Request cancellation for the active op (best-effort).
+    // (Do not publish here; processQueue will publish exactly once when the op aborts.)
+    if (this.activeOp) {
+      this.requestCancelActiveOp(reason)
     }
   }
 
@@ -397,6 +399,18 @@ export class PS2KeyboardService {
       reject,
     }
 
+    // If host is *known* off, cancel key ops immediately (fail-open for 'unknown').
+    if (this.isKeyOpKind(kind) && this.hostPower === 'off') {
+      this.events.publish({
+        kind: 'keyboard-operation-queued',
+        at: createdAt,
+        op: this.summarize(op, 'queued'),
+      })
+      this.publishCancelled(op, 'host-power-off')
+      resolve(this.makeCancellationResult(op, 'host-power-off'))
+      return { id, kind, createdAt, done }
+    }
+
     this.queue.push(op)
 
     this.events.publish({
@@ -418,9 +432,20 @@ export class PS2KeyboardService {
     const op = this.queue.shift()!
     this.activeOp = op
 
+    // If host is *known* off at start time, cancel key ops without executing.
+    if (this.isKeyOpKind(op.kind) && this.hostPower === 'off') {
+      this.publishCancelled(op, 'host-power-off')
+      op.resolve(this.makeCancellationResult(op, 'host-power-off'))
+      this.activeOp = null
+      void this.processQueue()
+      return
+    }
+
+    op.startedAt = now()
+
     this.events.publish({
       kind: 'keyboard-operation-started',
-      at: now(),
+      at: op.startedAt,
       opId: op.id,
     })
 
@@ -431,7 +456,7 @@ export class PS2KeyboardService {
         id: op.id,
         kind: op.kind,
         status: 'completed',
-        startedAt: op.createdAt,
+        startedAt: op.startedAt,
         endedAt: now(),
       }
 
@@ -443,27 +468,37 @@ export class PS2KeyboardService {
         result,
       })
     } catch (err) {
-      const error = this.toErrorWithScope('unknown', err)
+      // Treat explicit cancellations as cancellations (not failures).
+      if (err instanceof CancelledError) {
+        this.publishCancelled(op, err.reason)
+        op.resolve(this.makeCancellationResult(op, err.reason))
+      } else {
+        const error = this.toErrorWithScope('unknown', err)
 
-      const result: KeyboardOperationResult = {
-        id: op.id,
-        kind: op.kind,
-        status: 'failed',
-        startedAt: op.createdAt,
-        endedAt: now(),
-        error,
+        const result: KeyboardOperationResult = {
+          id: op.id,
+          kind: op.kind,
+          status: 'failed',
+          startedAt: op.startedAt,
+          endedAt: now(),
+          error,
+        }
+
+        op.reject(result)
+
+        this.events.publish({
+          kind: 'keyboard-operation-failed',
+          at: now(),
+          result,
+        })
+      }
+    } finally {
+      // Clear cancellation request once the active op is done.
+      if (this.activeCancel?.opId === op.id) {
+        this.activeCancel = null
       }
 
-      op.reject(result)
-
-      this.events.publish({
-        kind: 'keyboard-operation-failed',
-        at: now(),
-        result,
-      })
-    } finally {
       this.activeOp = null
-      this.cancelled = false
       await sleep(this.cfg.tuning.interCommandDelayMs)
       void this.processQueue()
     }
@@ -478,11 +513,14 @@ export class PS2KeyboardService {
     if (!devicePath) return
     if (this.stopping) return
 
+    // Ensure only one open attempt runs at a time.
     if (this.openInFlight) return this.openInFlight
 
+    // Any explicit open attempt should cancel pending reconnect timers.
     this.clearReconnectTimer()
 
     this.openInFlight = (async () => {
+      // If we still have a port object around, close it first to avoid lock races.
       if (this.port?.isOpen) {
         await this.closePort('unknown')
       }
@@ -540,18 +578,7 @@ export class PS2KeyboardService {
       port.on('close', () => this.handlePortClose(port))
 
       try {
-        // Defensive: don't let a "no-active-op" cancellation state break identify.
-        if (!this.activeOp) {
-          this.cancelled = false
-        }
-
         await this.identify()
-
-        // After identify, resync from AppState once (covers start-order issues).
-        this.syncFrontPanelPowerFromSnapshot(getSnapshot(), 'appstate:after-identify')
-
-        // Apply power command to firmware if required by current AppState.
-        this.applyFrontPanelPowerToFirmware('after-identify')
       } catch {
         await this.closePort('unknown')
         this.scheduleReconnect()
@@ -631,9 +658,9 @@ export class PS2KeyboardService {
   }
 
   private async writeLine(line: string): Promise<void> {
-    if (this.cancelled) {
-      throw new Error('operation cancelled')
-    }
+    // Best-effort: if the active op has been cancelled, abort before writing.
+    this.assertActiveOpNotCancelled()
+
     if (!this.port || !this.port.isOpen) {
       throw new Error('port not open')
     }
@@ -750,11 +777,7 @@ export class PS2KeyboardService {
       this.events.publish({
         kind: 'fatal-error',
         at: now(),
-        error: this.toErrorWithScope(
-          'open',
-          'reconnect attempts exhausted',
-          false
-        ),
+        error: this.toErrorWithScope('open', 'reconnect attempts exhausted', false),
       })
       return
     }
@@ -768,10 +791,7 @@ export class PS2KeyboardService {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (this.stopping) return
-
-      const devicePath = this.devicePath
-      if (!devicePath) return
-
+      if (!this.devicePath) return
       void this.openPort(this.cfg.baudRate)
     }, delay)
   }
@@ -784,152 +804,17 @@ export class PS2KeyboardService {
   }
 
   /* ---------------------------------------------------------------------- */
-  /*  AppState integration (frontPanel.powerSense -> internal power gating)  */
-  /* ---------------------------------------------------------------------- */
-
-  private onAppStateSnapshot = (snap: AppState): void => {
-    this.syncFrontPanelPowerFromSnapshot(snap, 'appstate:snapshot')
-    this.applyFrontPanelPowerToFirmware('snapshot')
-  }
-
-  private onAppStatePatch = (): void => {
-    // Patch is emitted before snapshot in core/state.ts, but we always read
-    // the latest snapshot to avoid patch parsing.
-    try {
-      const snap = getSnapshot()
-      this.syncFrontPanelPowerFromSnapshot(snap, 'appstate:patch')
-      this.applyFrontPanelPowerToFirmware('patch')
-    } catch {
-      // fail-closed: keep existing state
-    }
-  }
-
-  private ensureFrontPanelPowerWatcherAttached(caller: string): void {
-    if (this.appStateAttached) return
-    this.attachFrontPanelPowerWatcher(caller)
-  }
-
-  private attachFrontPanelPowerWatcher(caller: string): void {
-    this.appStateAttached = true
-
-    // Prove in logs that keyboard is actually watching AppState.
-    let snap: AppState | null = null
-    try {
-      snap = getSnapshot()
-    } catch {
-      snap = null
-    }
-
-    const metaStartedAt = snap ? (snap as any)?.meta?.startedAt : 'unavailable'
-    const version = snap ? (snap as any)?.version : 'unavailable'
-    const { powerSense, updatedAt } = snap
-      ? readFrontPanelPowerFromSnapshot(snap)
-      : { powerSense: 'unknown' as const, updatedAt: null }
-
-    this.events.publish({
-      kind: 'keyboard-debug-line',
-      at: now(),
-      line:
-        `debug: appstate watcher attached caller=${caller} ` +
-        `state.version=${String(version)} meta.startedAt=${String(metaStartedAt)} ` +
-        `frontPanel.powerSense=${powerSense}` +
-        (updatedAt != null ? ` frontPanel.updatedAt=${updatedAt}` : ''),
-    })
-
-    // Sync immediately at attach time (this updates this.power).
-    if (snap) {
-      this.syncFrontPanelPowerFromSnapshot(snap, `appstate:attach:${caller}`)
-    }
-
-    // Attach listeners.
-    stateEvents.on('snapshot', this.onAppStateSnapshot)
-    stateEvents.on('patch', this.onAppStatePatch)
-  }
-
-  private detachFrontPanelPowerWatcher(): void {
-    if (!this.appStateAttached) return
-    this.appStateAttached = false
-    stateEvents.off('snapshot', this.onAppStateSnapshot)
-    stateEvents.off('patch', this.onAppStatePatch)
-  }
-
-  private syncFrontPanelPowerFromSnapshot(snap: AppState, reason: string): void {
-    const { powerSense, updatedAt } = readFrontPanelPowerFromSnapshot(snap)
-    this.syncFrontPanelPowerChanged(powerSense, updatedAt, reason)
-  }
-
-  private syncFrontPanelPowerChanged(
-    next: FrontPanelPowerSense,
-    updatedAt: number | null,
-    reason: string
-  ): void {
-    const prev = this.lastFrontPanelPowerSense
-
-    // Only act/log when the value actually changes.
-    if (prev === next) return
-
-    this.lastFrontPanelPowerSense = next
-    this.lastFrontPanelUpdatedAt = updatedAt
-
-    // Update internal gating immediately from AppState.
-    this.power = toKeyboardPowerState(next)
-
-    this.events.publish({
-      kind: 'keyboard-debug-line',
-      at: now(),
-      line:
-        `debug: appstate frontPanel.powerSense changed prev=${prev ?? 'null'} next=${next}` +
-        (updatedAt != null ? ` frontPanel.updatedAt=${updatedAt}` : '') +
-        ` reason=${reason} => keyboard.power=${this.power}`,
-    })
-
-    // Cancel queued work when power is not definitively on.
-    if (next !== 'on') {
-      this.cancelAll('power-gated')
-      this.heldModifiers.clear()
-    }
-  }
-
-  private applyFrontPanelPowerToFirmware(source: string): void {
-    const s = this.lastFrontPanelPowerSense
-    if (!s) return
-
-    // Only send firmware commands when device is ready.
-    if (!this.port || !this.port.isOpen || !this.identified) return
-
-    const requestedBy = `frontpanel:${source}`
-
-    if (s === 'on') {
-      void this.powerOn(requestedBy).done.catch(() => {})
-      return
-    }
-
-    if (s === 'off') {
-      void this.powerOff(requestedBy).done.catch(() => {})
-      return
-    }
-
-    // unknown => do not force firmware off (we simply don't know)
-  }
-
-  /* ---------------------------------------------------------------------- */
   /*  Helpers                                                                */
   /* ---------------------------------------------------------------------- */
 
-  private async ensureConnected(): Promise<void> {
+  private async ensureReady(): Promise<void> {
     if (!this.port || !this.port.isOpen) throw new Error('port not open')
     if (!this.identified) throw new Error('device not identified')
-  }
-
-  private async ensurePoweredOn(): Promise<void> {
-    // Refuse keyboard output unless AppState says power is on.
-    if (this.power !== 'on') throw new Error(`pc power is ${this.power}`)
+    this.assertActiveOpNotCancelled()
   }
 
   private resolveScanCode(evt: ClientKeyboardEvent): PS2ScanCode | null {
-    if (evt.code) {
-      return lookupScanCode(evt.code)
-    }
+    if (evt.code) return lookupScanCode(evt.code)
     return null
   }
 
@@ -954,6 +839,8 @@ export class PS2KeyboardService {
     scan: PS2ScanCode,
     meta?: { code?: string; key?: string; requestedBy?: string }
   ): Promise<void> {
+    this.assertActiveOpNotCancelled()
+
     const wire = `${action} ${formatWireScanCode(scan.prefix, scan.code)}`
     await this.writeLine(wire)
 
@@ -978,9 +865,7 @@ export class PS2KeyboardService {
       return
     }
 
-    if (action === 'release') {
-      return
-    }
+    if (action === 'release') return
 
     const logicalAction: KeyboardAction = action === 'hold' ? 'press' : action
 
@@ -1031,7 +916,7 @@ export class PS2KeyboardService {
       createdAt,
       endedAt: now(),
       error,
-    })
+    } as unknown as KeyboardOperationResult)
 
     return { id, kind, createdAt, done }
   }
@@ -1041,12 +926,73 @@ export class PS2KeyboardService {
     err: unknown,
     retryable?: boolean
   ): KeyboardError {
-    if (typeof err === 'string') {
-      return { at: now(), scope, message: err, retryable }
-    }
-    if (err instanceof Error) {
-      return { at: now(), scope, message: err.message, retryable }
-    }
+    if (typeof err === 'string') return { at: now(), scope, message: err, retryable }
+    if (err instanceof Error) return { at: now(), scope, message: err.message, retryable }
     return { at: now(), scope, message: 'unknown error', retryable }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*  Host-power policy helpers                                              */
+  /* ---------------------------------------------------------------------- */
+
+  private isKeyOpKind(kind: KeyboardOperationKind): boolean {
+    return kind === 'press' || kind === 'hold' || kind === 'release'
+  }
+
+  private assertKeyOpsAllowed(): void {
+    // Fail-open for 'unknown' is implemented by only blocking on exact 'off'.
+    if (this.hostPower === 'off') throw new CancelledError('host-power-off')
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*  Cancellation helpers                                                   */
+  /* ---------------------------------------------------------------------- */
+
+  private requestCancelActiveOp(reason: string): void {
+    if (!this.activeOp) return
+    this.activeCancel = { opId: this.activeOp.id, reason }
+  }
+
+  private assertActiveOpNotCancelled(): void {
+    const active = this.activeOp
+    const cancel = this.activeCancel
+    if (!active || !cancel) return
+    if (cancel.opId !== active.id) return
+    throw new CancelledError(cancel.reason)
+  }
+
+  private cancelQueuedKeyOps(reason: string): void {
+    if (this.queue.length === 0) return
+
+    const keep: QueuedOp[] = []
+    for (const op of this.queue) {
+      if (this.isKeyOpKind(op.kind)) {
+        this.publishCancelled(op, reason)
+        op.resolve(this.makeCancellationResult(op, reason))
+      } else {
+        keep.push(op)
+      }
+    }
+    this.queue = keep
+  }
+
+  private publishCancelled(op: QueuedOp, reason: string): void {
+    this.events.publish({
+      kind: 'keyboard-operation-cancelled',
+      at: now(),
+      opId: op.id,
+      reason,
+    })
+  }
+
+  private makeCancellationResult(op: QueuedOp, reason: string): KeyboardOperationResult {
+    return {
+      id: op.id,
+      kind: op.kind,
+      status: 'cancelled',
+      startedAt: op.startedAt,
+      endedAt: now(),
+      reason,
+    }
   }
 }

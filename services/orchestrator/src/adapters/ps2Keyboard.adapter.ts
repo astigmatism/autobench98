@@ -51,8 +51,7 @@ export class PS2KeyboardStateAdapter {
       }
 
       case 'keyboard-device-disconnected': {
-        this.state.phase =
-          evt.reason === 'device-lost' ? 'disconnected' : 'error'
+        this.state.phase = evt.reason === 'device-lost' ? 'disconnected' : 'error'
         this.state.identified = false
         this.state.busy = false
         this.state.queueDepth = 0
@@ -105,6 +104,7 @@ export class PS2KeyboardStateAdapter {
 
       /* ---------------- Queue + operations ------------------------------- */
       case 'keyboard-queue-depth': {
+        // If the service emits this, treat it as authoritative.
         this.state.queueDepth = evt.depth
         this.state.busy = evt.depth > 0 || !!this.state.currentOp
         this.touch()
@@ -112,6 +112,7 @@ export class PS2KeyboardStateAdapter {
       }
 
       case 'keyboard-operation-queued': {
+        // Track outstanding work count (queued + running) as best-effort.
         this.state.queueDepth += 1
         this.state.busy = true
         this.pushOperation(evt.op)
@@ -140,8 +141,8 @@ export class PS2KeyboardStateAdapter {
       case 'keyboard-operation-completed': {
         this.finalizeOperation(evt.result)
         this.state.queueDepth = Math.max(0, this.state.queueDepth - 1)
-        this.state.busy = this.state.queueDepth > 0
         this.state.currentOp = null
+        this.state.busy = this.state.queueDepth > 0 || !!this.state.currentOp
         this.touch()
         break
       }
@@ -150,10 +151,17 @@ export class PS2KeyboardStateAdapter {
         const op = this.findOperation(evt.opId)
         if (op) {
           op.status = 'cancelled'
+          op.meta = { ...(op.meta ?? {}), cancelReason: evt.reason }
         }
-        this.state.busy = false
-        this.state.queueDepth = 0
-        this.state.currentOp = null
+
+        // If the cancelled op was the active one, clear it; otherwise leave currentOp intact.
+        if (this.state.currentOp?.id === evt.opId) {
+          this.state.currentOp = null
+        }
+
+        // Cancellation is per-op; do NOT zero the entire queue.
+        this.state.queueDepth = Math.max(0, this.state.queueDepth - 1)
+        this.state.busy = this.state.queueDepth > 0 || !!this.state.currentOp
         this.touch()
         break
       }
@@ -162,8 +170,8 @@ export class PS2KeyboardStateAdapter {
         this.finalizeOperation(evt.result)
         this.pushError(evt.result.error)
         this.state.queueDepth = Math.max(0, this.state.queueDepth - 1)
-        this.state.busy = false
         this.state.currentOp = null
+        this.state.busy = this.state.queueDepth > 0 || !!this.state.currentOp
         this.touch()
         break
       }
@@ -265,10 +273,7 @@ export class PS2KeyboardStateAdapter {
     return this.state.operationHistory.find((o) => o.id === id)
   }
 
-  private finalizeOperation(result: {
-    id: string
-    status: string
-  }): void {
+  private finalizeOperation(result: { id: string; status: string }): void {
     const op = this.findOperation(result.id)
     if (op) {
       op.status = result.status as any

@@ -148,6 +148,13 @@ export interface KeyboardOperationResult<T = void> {
   status: KeyboardOperationStatus
   startedAt?: number
   endedAt?: number
+
+  /**
+   * Present when status === 'cancelled' (or when a consumer wants the reason).
+   * This is intentionally lightweight; detailed traces belong in logs.
+   */
+  reason?: string
+
   error?: KeyboardError
   value?: T
 }
@@ -228,7 +235,9 @@ export interface PS2KeyboardConfig {
   queue: PS2KeyboardQueueConfig
 
   /** Default pacing/tuning for operations. */
-  tuning: Required<Pick<KeyboardInvokeTuning, 'interCommandDelayMs' | 'waitBetweenKeysFactor'>> & {
+  tuning: Required<
+    Pick<KeyboardInvokeTuning, 'interCommandDelayMs' | 'waitBetweenKeysFactor'>
+  > & {
     /** Optional extra hold time at service-level for synthesized press actions. */
     pressHoldMs: number
   }
