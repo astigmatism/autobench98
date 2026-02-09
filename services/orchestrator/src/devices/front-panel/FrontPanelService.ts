@@ -202,7 +202,15 @@ export class FrontPanelService {
       label: 'reset press',
       execute: async () => {
         await this.ensureConnected()
+
+        // Firmware supports RESET_RELEASE and has a MAX_HOLD_MS safety leash.
+        // We send an explicit pulse here to avoid holding reset for up to MAX_HOLD_MS.
+        // Use a conservative pulse width (100ms), matching the sketch's BUTTON_PULSE_MS.
+        const holdMs = 100
+
         await this.writeLine('RESET_HOLD')
+        await sleep(holdMs)
+        await this.writeLine('RESET_RELEASE')
       },
     })
   }
