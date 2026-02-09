@@ -196,6 +196,33 @@ export class FrontPanelService {
     })
   }
 
+  // NEW: reset hold (momentary, released by resetRelease)
+  public resetHold(requestedBy?: string): FrontPanelOperationHandle {
+    // FrontPanelOperationKind may not yet include resetHold in types; cast to keep runtime correct.
+    const kind = 'resetHold' as unknown as FrontPanelOperationKind
+    return this.enqueueOperation(kind, {
+      requestedBy,
+      label: 'reset hold',
+      execute: async () => {
+        await this.ensureConnected()
+        await this.writeLine('RESET_HOLD')
+      },
+    })
+  }
+
+  // NEW: reset release (paired with resetHold)
+  public resetRelease(requestedBy?: string): FrontPanelOperationHandle {
+    const kind = 'resetRelease' as unknown as FrontPanelOperationKind
+    return this.enqueueOperation(kind, {
+      requestedBy,
+      label: 'reset release',
+      execute: async () => {
+        await this.ensureConnected()
+        await this.writeLine('RESET_RELEASE')
+      },
+    })
+  }
+
   public resetPress(requestedBy?: string): FrontPanelOperationHandle {
     return this.enqueueOperation('resetPress', {
       requestedBy,
