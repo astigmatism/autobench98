@@ -1787,23 +1787,18 @@ onBeforeUnmount(() => {
     backdrop-filter: blur(2px);
 }
 
-.frontpanel-controls--overlay[data-pos='bottom-right'] {
-    left: auto;
-    right: 10px;
+.frontpanel-controls--overlay {
+    padding: 5px;
+    gap: 6px;
+    border-radius: 9px;
 }
 
 .fp-btn {
-    height: 30px;
-    padding: 0 12px;
-    border-radius: 8px;
-    border: 1px solid #374151;
-    background: #020617;
-    color: var(--panel-fg);
-    cursor: pointer;
-    font-size: 0.86rem;
+    height: 24px;
+    padding: 0 10px;
+    border-radius: 7px;
+    font-size: 0.78rem;
     font-weight: 700;
-    transition: background 120ms ease, border-color 120ms ease, transform 60ms ease, box-shadow 120ms ease;
-    user-select: none;
 }
 .fp-btn:hover:not(:disabled) {
     background: #030712;
