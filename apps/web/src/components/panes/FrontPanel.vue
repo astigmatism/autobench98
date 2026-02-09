@@ -11,29 +11,14 @@
         </span>
       </div>
 
-      <div class="meta-row">
-        <div class="meta">
-          <div class="k">Device</div>
-          <div class="v mono">{{ fp.devicePath ?? '—' }}</div>
-        </div>
-        <div class="meta">
-          <div class="k">Baud</div>
-          <div class="v mono">{{ fp.baudRate ?? '—' }}</div>
-        </div>
-        <div class="meta">
-          <div class="k">Queue</div>
-          <div class="v mono">{{ fp.queueDepth }}</div>
-        </div>
-      </div>
-
       <div class="telemetry">
         <div class="tile">
-          <div class="k">PWR Sense</div>
+          <div class="k">Power Sense</div>
           <div class="v" :data-tone="powerSenseTone">{{ powerSenseLabel }}</div>
         </div>
 
         <div class="tile">
-          <div class="k">HDD</div>
+          <div class="k">Hard Drive Activity</div>
           <div class="v" :data-tone="fp.hddActive ? 'on' : 'off'">
             <span class="dot-sm" :data-on="fp.hddActive ? 'true' : 'false'"></span>
             {{ fp.hddActive ? 'ACTIVE' : 'IDLE' }}
@@ -41,16 +26,16 @@
         </div>
 
         <div class="tile">
-          <div class="k">PWR Btn</div>
-          <div class="v" :data-tone="fp.powerButtonHeld ? 'on' : 'off'">
-            {{ fp.powerButtonHeld ? 'ACTIVE' : 'OFF' }}
+          <div class="k">Power Button</div>
+          <div class="v" :data-tone="powerButtonActive ? 'on' : 'off'">
+            {{ powerButtonActive ? 'ACTIVE' : 'OFF' }}
           </div>
         </div>
 
-        <div class="tile" v-if="fp.lastError">
-          <div class="k">Last Error</div>
-          <div class="v err">
-            {{ fp.lastError.scope }}: {{ fp.lastError.message }}
+        <div class="tile">
+          <div class="k">Reset Button</div>
+          <div class="v" :data-tone="resetButtonActive ? 'on' : 'off'">
+            {{ resetButtonActive ? 'ACTIVE' : 'OFF' }}
           </div>
         </div>
       </div>
@@ -72,7 +57,7 @@
         </button>
 
         <button
-          class="btn danger"
+          class="btn"
           :data-held="resetHeldByClient ? 'true' : 'false'"
           :disabled="!canInteract"
           @mousedown.prevent="onResetHoldStart"
@@ -84,15 +69,11 @@
         >
           Reset
         </button>
-
-        <button class="btn subtle" :disabled="!canInteract" @click="onCancelAll">
-          Cancel All
-        </button>
       </div>
 
-      <!-- Recent ops (compact, last 5) -->
+      <!-- Recent operations (compact, last 5) -->
       <div class="ops" v-if="recentOps.length > 0">
-        <div class="ops-head">Recent Ops</div>
+        <div class="ops-head">Recent Operations</div>
         <div class="ops-list">
           <div class="op" v-for="op in recentOps" :key="op.id">
             <span class="op-kind mono">{{ op.kind }}</span>
@@ -315,6 +296,22 @@ watch(
   { immediate: true }
 )
 
+/**
+ * Power button status uses the mirrored state if available, but also reflects
+ * the local held-state immediately for responsiveness.
+ */
+const powerButtonActive = computed(() => fp.value.powerButtonHeld || powerHeldByClient.value)
+
+/**
+ * Reset button status: prefer mirrored state if the backend publishes it;
+ * otherwise fall back to local held-state so the tile stays useful.
+ */
+const resetButtonActive = computed(() => {
+  const v = (fp.value as any)?.resetButtonHeld
+  const fromState = typeof v === 'boolean' ? v : false
+  return fromState || resetHeldByClient.value
+})
+
 /* -------------------------------------------------------------------------- */
 /*  WS send                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -327,8 +324,8 @@ function sendFrontPanel(kind: string, payload: Record<string, unknown> = {}) {
     payload: {
       kind,
       requestedBy: 'frontpanel-pane',
-      ...payload
-    }
+      ...payload,
+    },
   })
 }
 
@@ -364,11 +361,6 @@ function onResetHoldEnd() {
   if (!canInteract.value) return
   if (!wasHeld) return
   sendFrontPanel('resetRelease')
-}
-
-function onCancelAll() {
-  if (!canInteract.value) return
-  sendFrontPanel('cancelAll', { reason: 'cancelled-by-ui' })
 }
 
 onBeforeUnmount(() => {
@@ -474,33 +466,9 @@ onBeforeUnmount(() => {
   background: #ef4444;
 }
 
-.meta-row {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-.meta {
-  border: 1px solid #1f2933;
-  background: #020617;
-  border-radius: 8px;
-  padding: 6px 8px;
-  min-width: 0;
-}
-.meta .k {
-  font-size: 0.7rem;
-  color: #9ca3af;
-}
-.meta .v {
-  font-size: 0.8rem;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .telemetry {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 .tile {
@@ -531,11 +499,6 @@ onBeforeUnmount(() => {
 .tile .v[data-tone='unknown'] {
   color: #facc15;
 }
-.tile .v.err {
-  color: #fecaca;
-  font-weight: 500;
-  font-size: 0.8rem;
-}
 
 .dot-sm {
   width: 8px;
@@ -550,7 +513,7 @@ onBeforeUnmount(() => {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -583,16 +546,6 @@ onBeforeUnmount(() => {
   border-color: #22c55e;
   background: #064e3b;
   box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25);
-}
-.btn.danger {
-  border-color: #7f1d1d;
-}
-.btn.danger:hover:not(:disabled) {
-  border-color: #ef4444;
-}
-.btn.subtle {
-  border-color: #334155;
-  color: #cbd5e1;
 }
 
 .ops {
@@ -649,9 +602,6 @@ onBeforeUnmount(() => {
 
 /* Responsive */
 @media (max-width: 720px) {
-  .meta-row {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .telemetry {
     grid-template-columns: minmax(0, 1fr);
   }
