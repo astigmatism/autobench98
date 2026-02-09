@@ -1773,44 +1773,59 @@ onBeforeUnmount(() => {
         'Courier New', monospace;
 }
 
-/* UPDATED: front panel controls overlay INSIDE the viewport background area */
-.frontpanel-controls--overlay {
-    position: absolute;
-    left: 10px;
-    bottom: 10px;
-    z-index: 20;
+/* Front panel buttons: match CF pane ".btn" */
+
+.frontpanel-controls {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px;
-    background: rgba(2, 6, 23, 0.55);
-    backdrop-filter: blur(2px);
+    justify-content: flex-start;
+    min-height: 0;
 }
-
-.frontpanel-controls--overlay {
-    padding: 5px;
-    gap: 6px;
-    border-radius: 9px;
+.frontpanel-controls[data-pos='bottom-right'] {
+    justify-content: flex-end;
 }
 
 .fp-btn {
-    height: 24px;
+    --control-h: 28px;
+
+    height: var(--control-h);
+    line-height: var(--control-h);
     padding: 0 10px;
-    border-radius: 7px;
-    font-size: 0.78rem;
-    font-weight: 700;
+    border-radius: 6px;
+    border: 1px solid #374151;
+    background: #020617;
+    color: var(--panel-fg);
+    cursor: pointer;
+    font-size: 0.76rem;
+    font-weight: 500;
+    text-align: center;
+    transition:
+        background 120ms ease,
+        border-color 120ms ease,
+        transform 60ms ease,
+        box-shadow 120ms ease,
+        opacity 120ms ease;
+    user-select: none;
+    white-space: nowrap;
 }
+
 .fp-btn:hover:not(:disabled) {
     background: #030712;
+    border-color: #4b5563;
     transform: translateY(-1px);
 }
+
 .fp-btn:disabled {
     opacity: 0.5;
     cursor: default;
 }
+
+/* Optional: subtle “active/held” state that still fits the btn style */
 .fp-btn[data-held='true'] {
-    border-color: #22c55e;
-    background: #064e3b;
-    box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25);
+    border-color: #4b5563;
+    background: #0b1120;
+    box-shadow: none;
 }
+
 </style>
