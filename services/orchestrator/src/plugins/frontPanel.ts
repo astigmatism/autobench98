@@ -96,7 +96,8 @@ class FrontPanelLoggerEventSink implements FrontPanelEventSink {
         break
       }
       case 'frontpanel-hdd-activity-changed': {
-        this.logFp.info(`kind=${evt.kind} hddActive=${evt.active ? 'on' : 'off'}`)
+        // kinda spammy in the logs, silenced for now
+        // this.logFp.info(`kind=${evt.kind} hddActive=${evt.active ? 'on' : 'off'}`)
         break
       }
       case 'frontpanel-power-button-held-changed': {
