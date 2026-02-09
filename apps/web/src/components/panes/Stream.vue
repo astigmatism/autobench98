@@ -1737,7 +1737,8 @@ onBeforeUnmount(() => {
 .kb-overlay {
     position: absolute;
     left: 50%;
-    bottom: 5px;
+    top: 5px;
+    bottom: auto;
     transform: translateX(-50%);
     pointer-events: none;
     z-index: 5;
