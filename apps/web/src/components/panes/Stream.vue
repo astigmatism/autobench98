@@ -272,7 +272,7 @@
                     <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
                 </div>
 
-                <!-- UPDATED: Front panel controls are INSIDE the viewport area (overlay) -->
+                <!-- Front panel controls: overlay + position control (bottom-left / bottom-right) -->
                 <div
                     v-show="fpButtonsShouldShow"
                     class="frontpanel-controls frontpanel-controls--overlay"
@@ -1627,7 +1627,7 @@ onBeforeUnmount(() => {
 
 /* viewport owns the background/border area */
 .viewport {
-    position: relative; /* <- overlay anchor */
+    position: relative; /* overlay anchor */
     flex: 1;
     min-height: 0;
     background: #000;
@@ -1773,7 +1773,9 @@ onBeforeUnmount(() => {
         'Courier New', monospace;
 }
 
-/* Front panel buttons: match CF pane ".btn" */
+/* -------------------------------------------------------------------------- */
+/* Front panel overlay controls                                               */
+/* -------------------------------------------------------------------------- */
 
 .frontpanel-controls {
     display: flex;
@@ -1784,6 +1786,22 @@ onBeforeUnmount(() => {
 }
 .frontpanel-controls[data-pos='bottom-right'] {
     justify-content: flex-end;
+}
+
+/* THIS is the missing piece: actually anchor the controls to the viewport bottom,
+   while still letting the select drive left vs right alignment. */
+.frontpanel-controls--overlay {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    z-index: 6;
+
+    /* Don’t steal mouse events from the capture layer except on the buttons themselves. */
+    pointer-events: none;
+}
+.frontpanel-controls--overlay .fp-btn {
+    pointer-events: auto;
 }
 
 .fp-btn {
@@ -1827,5 +1845,4 @@ onBeforeUnmount(() => {
     background: #0b1120;
     box-shadow: none;
 }
-
 </style>
