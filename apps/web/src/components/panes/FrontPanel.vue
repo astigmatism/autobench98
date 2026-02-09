@@ -1,4 +1,4 @@
-<!-- apps/web/src/components/panes/FrontPanelPane.vue (adjust path to match your pane folder) -->
+<!-- apps/web/src/components/panes/FrontPanelPane.vue -->
 <template>
   <div class="frontpanel-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
     <div class="panel">
@@ -55,9 +55,8 @@
         </div>
       </div>
 
-      <!-- Controls -->
+      <!-- Controls: ONE power button + ONE reset button (hold-down semantics) -->
       <div class="controls">
-        <!-- Power Hold (momentary) -->
         <button
           class="btn"
           :data-held="powerHeldByClient ? 'true' : 'false'"
@@ -69,30 +68,21 @@
           @touchend.prevent="onPowerHoldEnd"
           @touchcancel.prevent="onPowerHoldEnd"
         >
-          Power Hold
+          Power
         </button>
 
-        <div class="press">
-          <button class="btn" :disabled="!canInteract || powerHeldByClient" @click="onPowerPress">
-            Power Press
-          </button>
-
-          <div class="press-ms">
-            <span class="k">ms</span>
-            <input
-              class="ms-input"
-              type="number"
-              min="50"
-              max="10000"
-              step="50"
-              v-model.number="powerPressMs"
-              :disabled="!canInteract"
-            />
-          </div>
-        </div>
-
-        <button class="btn danger" :disabled="!canInteract" @click="onResetPress">
-          Reset Press
+        <button
+          class="btn danger"
+          :data-held="resetHeldByClient ? 'true' : 'false'"
+          :disabled="!canInteract"
+          @mousedown.prevent="onResetHoldStart"
+          @mouseup.prevent="onResetHoldEnd"
+          @mouseleave.prevent="onResetHoldEnd"
+          @touchstart.prevent="onResetHoldStart"
+          @touchend.prevent="onResetHoldEnd"
+          @touchcancel.prevent="onResetHoldEnd"
+        >
+          Reset
         </button>
 
         <button class="btn subtle" :disabled="!canInteract" @click="onCancelAll">
@@ -119,7 +109,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { useMirror } from '@/stores/mirror'
 import { getRealtimeClient } from '@/bootstrap'
 
@@ -312,6 +302,18 @@ const recentOps = computed(() => (fp.value.operationHistory ?? []).slice(0, 5))
 /* -------------------------------------------------------------------------- */
 
 const powerHeldByClient = ref(false)
+const resetHeldByClient = ref(false)
+
+watch(
+  canInteract,
+  (ok) => {
+    if (!ok) {
+      powerHeldByClient.value = false
+      resetHeldByClient.value = false
+    }
+  },
+  { immediate: true }
+)
 
 /* -------------------------------------------------------------------------- */
 /*  WS send                                                                   */
@@ -324,6 +326,7 @@ function sendFrontPanel(kind: string, payload: Record<string, unknown> = {}) {
     type: 'frontpanel.command',
     payload: {
       kind,
+      requestedBy: 'frontpanel-pane',
       ...payload
     }
   })
@@ -332,8 +335,6 @@ function sendFrontPanel(kind: string, payload: Record<string, unknown> = {}) {
 /* -------------------------------------------------------------------------- */
 /*  Controls                                                                  */
 /* -------------------------------------------------------------------------- */
-
-const powerPressMs = ref(150)
 
 function onPowerHoldStart() {
   if (!canInteract.value) return
@@ -350,22 +351,37 @@ function onPowerHoldEnd() {
   sendFrontPanel('powerRelease')
 }
 
-function onPowerPress() {
+function onResetHoldStart() {
   if (!canInteract.value) return
-  if (powerHeldByClient.value) return
-  const ms = typeof powerPressMs.value === 'number' ? powerPressMs.value : 150
-  sendFrontPanel('powerPress', { durationMs: ms })
+  if (resetHeldByClient.value) return
+  resetHeldByClient.value = true
+  sendFrontPanel('resetHold')
 }
 
-function onResetPress() {
+function onResetHoldEnd() {
+  const wasHeld = resetHeldByClient.value
+  resetHeldByClient.value = false
   if (!canInteract.value) return
-  sendFrontPanel('resetPress')
+  if (!wasHeld) return
+  sendFrontPanel('resetRelease')
 }
 
 function onCancelAll() {
   if (!canInteract.value) return
   sendFrontPanel('cancelAll', { reason: 'cancelled-by-ui' })
 }
+
+onBeforeUnmount(() => {
+  // Best-effort release to avoid “stuck hold” if the pane unmounts mid-hold.
+  if (powerHeldByClient.value) {
+    powerHeldByClient.value = false
+    sendFrontPanel('powerRelease')
+  }
+  if (resetHeldByClient.value) {
+    resetHeldByClient.value = false
+    sendFrontPanel('resetRelease')
+  }
+})
 </script>
 
 <style scoped>
@@ -534,7 +550,7 @@ function onCancelAll() {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -577,35 +593,6 @@ function onCancelAll() {
 .btn.subtle {
   border-color: #334155;
   color: #cbd5e1;
-}
-
-.press {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-}
-.press-ms {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid #334155;
-  background: #020617;
-  border-radius: 8px;
-  padding: 6px 8px;
-}
-.press-ms .k {
-  font-size: 0.75rem;
-  color: #94a3b8;
-}
-.ms-input {
-  width: 76px;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: #e5e7eb;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
-  font-size: 0.85rem;
 }
 
 .ops {
@@ -669,9 +656,6 @@ function onCancelAll() {
     grid-template-columns: minmax(0, 1fr);
   }
   .controls {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .press {
     grid-template-columns: minmax(0, 1fr);
   }
 }

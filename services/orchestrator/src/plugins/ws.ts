@@ -1,3 +1,4 @@
+// services/orchestrator/src/plugins/ws.ts
 import fp from 'fastify-plugin'
 import websocket from '@fastify/websocket'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
@@ -145,8 +146,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
     // Helper: handle Atlona commands from a WS message
     async function handleAtlonaCommand(msg: any) {
-        // 🔑 IMPORTANT: look up the controller lazily so we don't capture
-        // an undefined reference before the plugin decorates the app.
         const atlonaController = (app as unknown as {
             atlonaController?: AtlonaControllerService
         }).atlonaController
@@ -545,10 +544,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 : 'ws-client'
 
         try {
-            // Contract:
-            // - { kind: 'key', action: 'press'|'hold'|'release', code: 'KeyA'|'Enter'|..., requestedBy?, overrides? }
-            // - { kind: 'power', state: 'on'|'off', requestedBy? }
-            // - { kind: 'cancelAll', reason?, requestedBy? }
             if (kind === 'key') {
                 const action =
                     typeof payload.action === 'string' ? payload.action.trim() : ''
@@ -562,7 +557,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const key =
                     typeof payload.key === 'string' ? payload.key.trim() : undefined
 
-                // The service resolves scan codes primarily via evt.code; allow fallback key if you extend resolveScanCode later.
                 if (!code && !key) {
                     logWs.warn('ps2-keyboard.command key: missing code/key')
                     return
@@ -611,11 +605,101 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
         }
     }
 
+    // NEW: Front panel WS ingress
+    async function handleFrontPanelCommand(msg: any) {
+        const svc = (app as any)?.frontPanel as any
+        if (!svc) {
+            logWs.warn('received frontpanel.command but frontPanel service is not attached')
+            return
+        }
+
+        const payload = msg?.payload ?? {}
+        const kind = typeof payload.kind === 'string' ? payload.kind.trim() : ''
+        if (!kind) {
+            logWs.warn('frontpanel.command: missing kind')
+            return
+        }
+
+        const requestedBy =
+            typeof payload.requestedBy === 'string' && payload.requestedBy.trim()
+                ? payload.requestedBy.trim()
+                : 'ws-client'
+
+        try {
+            if (kind === 'powerHold') {
+                const h = svc.powerHold?.(requestedBy)
+                h?.done?.catch?.(() => {})
+                return
+            }
+            if (kind === 'powerRelease') {
+                const h = svc.powerRelease?.(requestedBy)
+                h?.done?.catch?.(() => {})
+                return
+            }
+            if (kind === 'powerPress') {
+                const durationMs = payload.durationMs
+                const ms =
+                    typeof durationMs === 'number' && Number.isFinite(durationMs)
+                        ? durationMs
+                        : undefined
+                const h = svc.powerPress?.(ms, requestedBy)
+                h?.done?.catch?.(() => {})
+                return
+            }
+
+            if (kind === 'resetHold') {
+                if (typeof svc.resetHold === 'function') {
+                    const h = svc.resetHold(requestedBy)
+                    h?.done?.catch?.(() => {})
+                } else if (typeof svc.resetPress === 'function') {
+                    // fallback if service doesn't implement resetHold
+                    const h = svc.resetPress(requestedBy)
+                    h?.done?.catch?.(() => {})
+                } else {
+                    logWs.warn('frontpanel.command resetHold: service missing resetHold/resetPress')
+                }
+                return
+            }
+
+            if (kind === 'resetRelease') {
+                if (typeof svc.resetRelease === 'function') {
+                    const h = svc.resetRelease(requestedBy)
+                    h?.done?.catch?.(() => {})
+                } else {
+                    // No safe fallback here; release should exist if you support holds.
+                    logWs.warn('frontpanel.command resetRelease: service missing resetRelease')
+                }
+                return
+            }
+
+            if (kind === 'resetPress') {
+                const h = svc.resetPress?.(requestedBy)
+                h?.done?.catch?.(() => {})
+                return
+            }
+
+            if (kind === 'cancelAll') {
+                const reason =
+                    typeof payload.reason === 'string' && payload.reason.trim()
+                        ? payload.reason.trim()
+                        : 'cancelled'
+                svc.cancelAll?.(reason)
+                return
+            }
+
+            logWs.warn('frontpanel.command: unknown kind', { kind })
+        } catch (e) {
+            logWs.warn('frontpanel.command failed', {
+                kind,
+                err: (e as Error).message
+            })
+        }
+    }
+
     // Handler signature: (socket, request)
     app.get('/ws', { websocket: true }, (socket: WSSocket, _req: FastifyRequest) => {
         sockets.add(socket)
 
-        // Per-socket snapshot ticker: keep the mirror fresh even if patch wiring misbehaves.
         let snapshotTimer: NodeJS.Timeout | null = null
 
         const startSnapshotTimer = () => {
@@ -636,7 +720,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                         err: (e as Error).message
                     })
                 }
-            }, 1000) // 1s cadence for live-ish power meter updates
+            }, 1000)
         }
 
         const stopSnapshotTimer = () => {
@@ -654,7 +738,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 })
             )
 
-            // Send an immediate state snapshot
             const snap = getSnapshot()
             socket.send(
                 JSON.stringify({
@@ -664,10 +747,8 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 })
             )
 
-            // Start periodic snapshots so the client mirror stays updated.
             startSnapshotTimer()
 
-            // Send bounded, filtered log history snapshot
             const snapshotCount = Math.max(
                 0,
                 Number(
@@ -705,7 +786,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     return
                 }
 
-                // 💓 heartbeat: reply and (optionally) log a heartbeat entry
                 if (msg?.type === 'ping') {
                     socket.send(JSON.stringify({ type: 'pong', ts: Date.now() }))
                     if (HB_LOG) {
@@ -748,26 +828,28 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                         }
                     }
 
-                    // Ensure the snapshot timer is running once client subscribes
                     startSnapshotTimer()
                     return
                 }
 
-                // --- Atlona front-end commands --------------------------------
                 if (msg?.type === 'atlona.command') {
                     void handleAtlonaCommand(msg)
                     return
                 }
 
-                // --- CF imager front-end commands -----------------------------
                 if (msg?.type === 'cf-imager.command') {
                     void handleCfImagerCommand(msg)
                     return
                 }
 
-                // --- PS2 keyboard front-end commands --------------------------
                 if (msg?.type === 'ps2-keyboard.command') {
                     void handlePs2KeyboardCommand(msg)
+                    return
+                }
+
+                // NEW: Front panel commands
+                if (msg?.type === 'frontpanel.command') {
+                    void handleFrontPanelCommand(msg)
                     return
                 }
             } catch {
