@@ -61,7 +61,7 @@
                                 </select>
                             </label>
 
-                            <!-- NEW: Power/Reset overlay settings -->
+                            <!-- Power/Reset overlay settings -->
                             <label class="select panel-text">
                                 <span>Power/Reset</span>
                                 <select v-model="fpButtonsPosition">
@@ -271,41 +271,41 @@
                 <div v-else class="viewport-placeholder">
                     <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
                 </div>
-            </div>
 
-            <!-- NEW: Front panel controls under stream (positioned + visibility-configurable) -->
-            <div
-                v-show="fpButtonsShouldShow"
-                class="frontpanel-controls"
-                :data-pos="fpButtonsPosition"
-            >
-                <button
-                    class="fp-btn"
-                    :data-held="powerHeldByClient ? 'true' : 'false'"
-                    :disabled="!fpCanInteract"
-                    @mousedown.prevent="onPowerHoldStart"
-                    @mouseup.prevent="onPowerHoldEnd"
-                    @mouseleave.prevent="onPowerHoldEnd"
-                    @touchstart.prevent="onPowerHoldStart"
-                    @touchend.prevent="onPowerHoldEnd"
-                    @touchcancel.prevent="onPowerHoldEnd"
+                <!-- UPDATED: Front panel controls are INSIDE the viewport area (overlay) -->
+                <div
+                    v-show="fpButtonsShouldShow"
+                    class="frontpanel-controls frontpanel-controls--overlay"
+                    :data-pos="fpButtonsPosition"
                 >
-                    Power
-                </button>
+                    <button
+                        class="fp-btn"
+                        :data-held="powerHeldByClient ? 'true' : 'false'"
+                        :disabled="!fpCanInteract"
+                        @mousedown.prevent="onPowerHoldStart"
+                        @mouseup.prevent="onPowerHoldEnd"
+                        @mouseleave.prevent="onPowerHoldEnd"
+                        @touchstart.prevent="onPowerHoldStart"
+                        @touchend.prevent="onPowerHoldEnd"
+                        @touchcancel.prevent="onPowerHoldEnd"
+                    >
+                        Power
+                    </button>
 
-                <button
-                    class="fp-btn"
-                    :data-held="resetHeldByClient ? 'true' : 'false'"
-                    :disabled="!fpCanInteract"
-                    @mousedown.prevent="onResetHoldStart"
-                    @mouseup.prevent="onResetHoldEnd"
-                    @mouseleave.prevent="onResetHoldEnd"
-                    @touchstart.prevent="onResetHoldStart"
-                    @touchend.prevent="onResetHoldEnd"
-                    @touchcancel.prevent="onResetHoldEnd"
-                >
-                    Reset
-                </button>
+                    <button
+                        class="fp-btn"
+                        :data-held="resetHeldByClient ? 'true' : 'false'"
+                        :disabled="!fpCanInteract"
+                        @mousedown.prevent="onResetHoldStart"
+                        @mouseup.prevent="onResetHoldEnd"
+                        @mouseleave.prevent="onResetHoldEnd"
+                        @touchstart.prevent="onResetHoldStart"
+                        @touchend.prevent="onResetHoldEnd"
+                        @touchcancel.prevent="onResetHoldEnd"
+                    >
+                        Reset
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -353,7 +353,6 @@ type StreamPanePrefs = {
     bgMode?: 'black' | 'pane'
     fpsMode?: StreamFpsMode
 
-    // NEW
     fpButtonsPosition?: FrontPanelButtonsPosition
     fpButtonsVisibility?: FrontPanelButtonsVisibility
 }
@@ -466,7 +465,7 @@ const bgMode = ref<'black' | 'pane'>('black')
 const reloadKey = ref(0)
 
 /* -------------------------------------------------------------------------- */
-/*  NEW: Front panel buttons state (visibility + position + hover)             */
+/*  Front panel buttons state (visibility + position + hover)                 */
 /* -------------------------------------------------------------------------- */
 
 const fpButtonsPosition = ref<FrontPanelButtonsPosition>('bottom-left')
@@ -515,7 +514,6 @@ const resetHeldByClient = ref(false)
 const fpsMode = ref<StreamFpsMode>('auto')
 
 // Auto-selected cap (only used when fpsMode === 'auto')
-// Default to 30 (your preference).
 const autoMaxFps = ref<number>(30)
 
 const resyncCount = ref(0)
@@ -609,7 +607,7 @@ function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: strin
 }
 
 /* -------------------------------------------------------------------------- */
-/*  NEW: Front panel WS send + controls                                       */
+/*  Front panel WS send + controls                                            */
 /* -------------------------------------------------------------------------- */
 
 function sendFrontPanel(kind: string, payload: Record<string, unknown> = {}) {
@@ -647,7 +645,6 @@ function onPowerHoldEnd() {
     const wasHeld = powerHeldByClient.value
     powerHeldByClient.value = false
     if (!wasHeld) return
-    // best-effort release (even if fpCanInteract flipped mid-hold)
     sendFrontPanel('powerRelease')
 }
 
@@ -662,7 +659,6 @@ function onResetHoldEnd() {
     const wasHeld = resetHeldByClient.value
     resetHeldByClient.value = false
     if (!wasHeld) return
-    // best-effort release (even if fpCanInteract flipped mid-hold)
     sendFrontPanel('resetRelease')
 }
 
@@ -670,7 +666,6 @@ watch(
     () => fpCanInteract.value,
     (ok, prev) => {
         if (ok) return
-        // If we were previously interactive and lose it mid-hold, try to release.
         if (prev) {
             if (powerHeldByClient.value) {
                 powerHeldByClient.value = false
@@ -941,7 +936,16 @@ function isValidBgMode(x: any): x is 'black' | 'pane' {
     return x === 'black' || x === 'pane'
 }
 function isValidFpsMode(x: any): x is StreamFpsMode {
-    return x === 'auto' || x === '60' || x === '30' || x === '20' || x === '15' || x === '8' || x === '4' || x === '2'
+    return (
+        x === 'auto' ||
+        x === '60' ||
+        x === '30' ||
+        x === '20' ||
+        x === '15' ||
+        x === '8' ||
+        x === '4' ||
+        x === '2'
+    )
 }
 function isValidFpPos(x: any): x is FrontPanelButtonsPosition {
     return x === 'bottom-left' || x === 'bottom-right'
@@ -971,7 +975,8 @@ function writePanePrefs(p: StreamPanePrefs) {
     const key = storageKey.value
     if (!key) return
     try {
-        localStorage.setItem(key, JSON.stringify(p))
+        const raw = JSON.stringify(p)
+        localStorage.setItem(key, raw)
     } catch {
         // ignore
     }
@@ -1384,7 +1389,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* (existing styling + additions) */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
@@ -1612,18 +1616,18 @@ onBeforeUnmount(() => {
     opacity: 0.7;
 }
 
-/* NEW: stack so controls can sit just under the viewport */
+/* stack wrapper */
 .viewport-stack {
     position: relative;
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
 }
 
+/* viewport owns the background/border area */
 .viewport {
-    position: relative;
+    position: relative; /* <- overlay anchor */
     flex: 1;
     min-height: 0;
     background: #000;
@@ -1769,16 +1773,26 @@ onBeforeUnmount(() => {
         'Courier New', monospace;
 }
 
-/* NEW: front panel button row under stream */
-.frontpanel-controls {
+/* UPDATED: front panel controls overlay INSIDE the viewport background area */
+.frontpanel-controls--overlay {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    z-index: 20;
     display: flex;
     align-items: center;
     gap: 8px;
-    justify-content: flex-start;
-    min-height: 0;
+
+    padding: 6px;
+    border-radius: 10px;
+    background: rgba(2, 6, 23, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(2px);
 }
-.frontpanel-controls[data-pos='bottom-right'] {
-    justify-content: flex-end;
+
+.frontpanel-controls--overlay[data-pos='bottom-right'] {
+    left: auto;
+    right: 10px;
 }
 
 .fp-btn {
