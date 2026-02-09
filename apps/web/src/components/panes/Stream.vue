@@ -1,5 +1,11 @@
+<!-- apps/web/src/components/panes/StreamPane.vue -->
 <template>
-    <div class="stream-pane" :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }">
+    <div
+        class="stream-pane"
+        :style="{ '--pane-fg': paneFg, '--panel-fg': panelFg }"
+        @mouseenter="onPaneEnter"
+        @mouseleave="onPaneLeave"
+    >
         <div class="stream-advanced-hotspot">
             <button
                 class="gear-btn"
@@ -52,6 +58,24 @@
                                     <option value="8">8</option>
                                     <option value="4">4</option>
                                     <option value="2">2</option>
+                                </select>
+                            </label>
+
+                            <!-- NEW: Power/Reset overlay settings -->
+                            <label class="select panel-text">
+                                <span>Power/Reset</span>
+                                <select v-model="fpButtonsPosition">
+                                    <option value="bottom-left">Bottom left</option>
+                                    <option value="bottom-right">Bottom right</option>
+                                </select>
+                            </label>
+
+                            <label class="select panel-text">
+                                <span>Visibility</span>
+                                <select v-model="fpButtonsVisibility">
+                                    <option value="always">Always visible</option>
+                                    <option value="hover">Visible on mouse over</option>
+                                    <option value="hidden">Not visible</option>
                                 </select>
                             </label>
                         </div>
@@ -200,51 +224,88 @@
             </div>
         </transition>
 
-        <div class="viewport" :data-bg="bgMode" :data-kb-available="canCapture ? 'true' : 'false'">
-            <div v-if="enabled" class="viewport-inner">
-                <div
-                    ref="captureRef"
-                    class="kb-capture-layer"
-                    tabindex="0"
-                    role="button"
-                    :aria-pressed="isCapturing ? 'true' : 'false'"
-                    :data-capturing="isCapturing ? 'true' : 'false'"
-                    :data-scale="scaleMode"
-                    @mousedown.prevent="armCaptureFromMouse"
-                    @focus="onFocusCapture"
-                    @blur="onBlurCapture"
-                    @keydown="onKeyDown"
-                    @keyup="onKeyUp"
-                >
-                    <div class="stream-frame" :data-scale="scaleMode" :style="streamFrameStyle">
-                        <img
-                            :key="reloadKey"
-                            class="stream-img"
-                            :data-scale="scaleMode"
-                            :src="streamSrc"
-                            alt="Test machine stream"
-                            draggable="false"
-                            @load="onStreamLoad"
-                        />
-                        <div class="stream-glow kb-glow" aria-hidden="true"></div>
-                    </div>
-
+        <div class="viewport-stack">
+            <div class="viewport" :data-bg="bgMode" :data-kb-available="canCapture ? 'true' : 'false'">
+                <div v-if="enabled" class="viewport-inner">
                     <div
-                        v-if="scaleMode === 'native'"
-                        class="capture-glow kb-glow"
-                        aria-hidden="true"
-                    ></div>
+                        ref="captureRef"
+                        class="kb-capture-layer"
+                        tabindex="0"
+                        role="button"
+                        :aria-pressed="isCapturing ? 'true' : 'false'"
+                        :data-capturing="isCapturing ? 'true' : 'false'"
+                        :data-scale="scaleMode"
+                        @mousedown.prevent="armCaptureFromMouse"
+                        @focus="onFocusCapture"
+                        @blur="onBlurCapture"
+                        @keydown="onKeyDown"
+                        @keyup="onKeyUp"
+                    >
+                        <div class="stream-frame" :data-scale="scaleMode" :style="streamFrameStyle">
+                            <img
+                                :key="reloadKey"
+                                class="stream-img"
+                                :data-scale="scaleMode"
+                                :src="streamSrc"
+                                alt="Test machine stream"
+                                draggable="false"
+                                @load="onStreamLoad"
+                            />
+                            <div class="stream-glow kb-glow" aria-hidden="true"></div>
+                        </div>
 
-                    <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
-                        <div class="kb-overlay-inner">
-                            <span class="kb-hint">Press <b>Ctrl+Esc</b> to cancel input capture</span>
+                        <div
+                            v-if="scaleMode === 'native'"
+                            class="capture-glow kb-glow"
+                            aria-hidden="true"
+                        ></div>
+
+                        <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
+                            <div class="kb-overlay-inner">
+                                <span class="kb-hint">Press <b>Ctrl+Esc</b> to cancel input capture</span>
+                            </div>
                         </div>
                     </div>
                 </div>
+
+                <div v-else class="viewport-placeholder">
+                    <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
+                </div>
             </div>
 
-            <div v-else class="viewport-placeholder">
-                <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
+            <!-- NEW: Front panel controls under stream (positioned + visibility-configurable) -->
+            <div
+                v-show="fpButtonsShouldShow"
+                class="frontpanel-controls"
+                :data-pos="fpButtonsPosition"
+            >
+                <button
+                    class="fp-btn"
+                    :data-held="powerHeldByClient ? 'true' : 'false'"
+                    :disabled="!fpCanInteract"
+                    @mousedown.prevent="onPowerHoldStart"
+                    @mouseup.prevent="onPowerHoldEnd"
+                    @mouseleave.prevent="onPowerHoldEnd"
+                    @touchstart.prevent="onPowerHoldStart"
+                    @touchend.prevent="onPowerHoldEnd"
+                    @touchcancel.prevent="onPowerHoldEnd"
+                >
+                    Power
+                </button>
+
+                <button
+                    class="fp-btn"
+                    :data-held="resetHeldByClient ? 'true' : 'false'"
+                    :disabled="!fpCanInteract"
+                    @mousedown.prevent="onResetHoldStart"
+                    @mouseup.prevent="onResetHoldEnd"
+                    @mouseleave.prevent="onResetHoldEnd"
+                    @touchstart.prevent="onResetHoldStart"
+                    @touchend.prevent="onResetHoldEnd"
+                    @touchcancel.prevent="onResetHoldEnd"
+                >
+                    Reset
+                </button>
             </div>
         </div>
     </div>
@@ -253,6 +314,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { getRealtimeClient } from '@/bootstrap'
+import { useMirror } from '@/stores/mirror'
 
 type Direction = 'row' | 'col'
 type Constraints = {
@@ -282,11 +344,18 @@ type PaneInfo = {
 
 type StreamFpsMode = 'auto' | '60' | '30' | '20' | '15' | '8' | '4' | '2'
 
+type FrontPanelButtonsPosition = 'bottom-left' | 'bottom-right'
+type FrontPanelButtonsVisibility = 'always' | 'hover' | 'hidden'
+
 type StreamPanePrefs = {
     enabled?: boolean
     scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
     bgMode?: 'black' | 'pane'
     fpsMode?: StreamFpsMode
+
+    // NEW
+    fpButtonsPosition?: FrontPanelButtonsPosition
+    fpButtonsVisibility?: FrontPanelButtonsVisibility
 }
 
 function isObject(x: any): x is Record<string, unknown> {
@@ -397,6 +466,49 @@ const bgMode = ref<'black' | 'pane'>('black')
 const reloadKey = ref(0)
 
 /* -------------------------------------------------------------------------- */
+/*  NEW: Front panel buttons state (visibility + position + hover)             */
+/* -------------------------------------------------------------------------- */
+
+const fpButtonsPosition = ref<FrontPanelButtonsPosition>('bottom-left')
+const fpButtonsVisibility = ref<FrontPanelButtonsVisibility>('hover')
+
+const isHoveringPane = ref(false)
+function onPaneEnter() {
+    isHoveringPane.value = true
+}
+function onPaneLeave() {
+    isHoveringPane.value = false
+}
+
+const fpButtonsShouldShow = computed(() => {
+    if (fpButtonsVisibility.value === 'hidden') return false
+    if (fpButtonsVisibility.value === 'always') return true
+    return isHoveringPane.value
+})
+
+/* -------------------------------------------------------------------------- */
+/*  Front panel readiness (from mirror)                                       */
+/* -------------------------------------------------------------------------- */
+
+type FrontPanelPhase = 'disconnected' | 'connecting' | 'identifying' | 'ready' | 'error'
+type FrontPanelSnapshot = {
+    phase: FrontPanelPhase
+    identified: boolean
+}
+
+const mirror = useMirror()
+const fp = computed<FrontPanelSnapshot>(() => {
+    const root = mirror.data as any
+    const slice = root?.frontPanel as FrontPanelSnapshot | undefined
+    return slice ?? { phase: 'disconnected', identified: false }
+})
+
+const fpCanInteract = computed(() => fp.value.phase === 'ready' && fp.value.identified)
+
+const powerHeldByClient = ref(false)
+const resetHeldByClient = ref(false)
+
+/* -------------------------------------------------------------------------- */
 /*  Viewer FPS cap (adaptive)                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -495,6 +607,86 @@ function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: strin
         payload: { kind: 'key', action, code, key },
     })
 }
+
+/* -------------------------------------------------------------------------- */
+/*  NEW: Front panel WS send + controls                                       */
+/* -------------------------------------------------------------------------- */
+
+function sendFrontPanel(kind: string, payload: Record<string, unknown> = {}) {
+    refreshWsClient()
+    const ws = wsClientRef.value
+    if (!ws) return
+
+    const body = {
+        kind,
+        requestedBy: 'stream-pane',
+        ...payload,
+    }
+
+    if (typeof ws.sendFrontPanelCommand === 'function') {
+        ws.sendFrontPanelCommand(body)
+        return
+    }
+
+    if (typeof ws.send === 'function') {
+        ws.send({
+            type: 'frontpanel.command',
+            payload: body,
+        })
+    }
+}
+
+function onPowerHoldStart() {
+    if (!fpCanInteract.value) return
+    if (powerHeldByClient.value) return
+    powerHeldByClient.value = true
+    sendFrontPanel('powerHold')
+}
+
+function onPowerHoldEnd() {
+    const wasHeld = powerHeldByClient.value
+    powerHeldByClient.value = false
+    if (!wasHeld) return
+    // best-effort release (even if fpCanInteract flipped mid-hold)
+    sendFrontPanel('powerRelease')
+}
+
+function onResetHoldStart() {
+    if (!fpCanInteract.value) return
+    if (resetHeldByClient.value) return
+    resetHeldByClient.value = true
+    sendFrontPanel('resetHold')
+}
+
+function onResetHoldEnd() {
+    const wasHeld = resetHeldByClient.value
+    resetHeldByClient.value = false
+    if (!wasHeld) return
+    // best-effort release (even if fpCanInteract flipped mid-hold)
+    sendFrontPanel('resetRelease')
+}
+
+watch(
+    () => fpCanInteract.value,
+    (ok, prev) => {
+        if (ok) return
+        // If we were previously interactive and lose it mid-hold, try to release.
+        if (prev) {
+            if (powerHeldByClient.value) {
+                powerHeldByClient.value = false
+                sendFrontPanel('powerRelease')
+            }
+            if (resetHeldByClient.value) {
+                resetHeldByClient.value = false
+                sendFrontPanel('resetRelease')
+            }
+        } else {
+            powerHeldByClient.value = false
+            resetHeldByClient.value = false
+        }
+    },
+    { immediate: true }
+)
 
 /* -------------------------------------------------------------------------- */
 /*  Keyboard capture                                                          */
@@ -751,6 +943,12 @@ function isValidBgMode(x: any): x is 'black' | 'pane' {
 function isValidFpsMode(x: any): x is StreamFpsMode {
     return x === 'auto' || x === '60' || x === '30' || x === '20' || x === '15' || x === '8' || x === '4' || x === '2'
 }
+function isValidFpPos(x: any): x is FrontPanelButtonsPosition {
+    return x === 'bottom-left' || x === 'bottom-right'
+}
+function isValidFpVis(x: any): x is FrontPanelButtonsVisibility {
+    return x === 'always' || x === 'hover' || x === 'hidden'
+}
 
 const paneId = computed(() => String(props.pane?.id ?? '').trim())
 const STORAGE_PREFIX = 'stream:pane:ui:'
@@ -793,6 +991,12 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 
     const nextFps = (prefs as any).fpsMode
     if (isValidFpsMode(nextFps)) fpsMode.value = nextFps
+
+    const nextFpPos = (prefs as any).fpButtonsPosition
+    if (isValidFpPos(nextFpPos)) fpButtonsPosition.value = nextFpPos
+
+    const nextFpVis = (prefs as any).fpButtonsVisibility
+    if (isValidFpVis(nextFpVis)) fpButtonsVisibility.value = nextFpVis
 }
 
 function exportPanePrefs(): StreamPanePrefs {
@@ -801,6 +1005,8 @@ function exportPanePrefs(): StreamPanePrefs {
         scaleMode: scaleMode.value,
         bgMode: bgMode.value,
         fpsMode: fpsMode.value,
+        fpButtonsPosition: fpButtonsPosition.value,
+        fpButtonsVisibility: fpButtonsVisibility.value,
     }
 }
 
@@ -835,8 +1041,16 @@ function hydrateForPane() {
 
 onMounted(() => hydrateForPane())
 watch([paneId, () => props.__streamPaneUi, () => props.__streamPaneProfileRev], () => hydrateForPane())
-watch([() => enabled.value, () => scaleMode.value, () => bgMode.value, () => fpsMode.value], () =>
-    writePanePrefs(exportPanePrefs())
+watch(
+    [
+        () => enabled.value,
+        () => scaleMode.value,
+        () => bgMode.value,
+        () => fpsMode.value,
+        () => fpButtonsPosition.value,
+        () => fpButtonsVisibility.value,
+    ],
+    () => writePanePrefs(exportPanePrefs())
 )
 
 /* -------------------------------------------------------------------------- */
@@ -976,7 +1190,6 @@ async function loadHealth(opts?: { silent?: boolean }) {
         const t1 = performance.now()
         healthRttMs.value = Math.max(0, Math.round(t1 - t0))
 
-        // Parse JSON even for non-2xx so we can still show "unhealthy" details.
         let json: unknown = null
         try {
             json = await res.json()
@@ -995,12 +1208,10 @@ async function loadHealth(opts?: { silent?: boolean }) {
             return
         }
 
-        // OK
         healthError.value = null
         return
     } catch (err: any) {
         healthError.value = err?.message ? `Failed to load health: ${err.message}` : 'Failed to load health'
-        // Keep last known health if we have one; don’t force-clear it here.
         return
     } finally {
         healthInFlight = false
@@ -1149,6 +1360,16 @@ function reloadStream() {
 onBeforeUnmount(() => {
     if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0) releaseCapture()
 
+    // best-effort: release front panel holds if pane unmounts mid-hold
+    if (powerHeldByClient.value) {
+        powerHeldByClient.value = false
+        sendFrontPanel('powerRelease')
+    }
+    if (resetHeldByClient.value) {
+        resetHeldByClient.value = false
+        sendFrontPanel('resetRelease')
+    }
+
     if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
     if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
     wsRetryTimer = null
@@ -1163,7 +1384,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* (unchanged styling from your file) */
+/* (existing styling + additions) */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
@@ -1391,6 +1612,16 @@ onBeforeUnmount(() => {
     opacity: 0.7;
 }
 
+/* NEW: stack so controls can sit just under the viewport */
+.viewport-stack {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
 .viewport {
     position: relative;
     flex: 1;
@@ -1536,5 +1767,44 @@ onBeforeUnmount(() => {
 .monospace {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
         'Courier New', monospace;
+}
+
+/* NEW: front panel button row under stream */
+.frontpanel-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: flex-start;
+    min-height: 0;
+}
+.frontpanel-controls[data-pos='bottom-right'] {
+    justify-content: flex-end;
+}
+
+.fp-btn {
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid #374151;
+    background: #020617;
+    color: var(--panel-fg);
+    cursor: pointer;
+    font-size: 0.86rem;
+    font-weight: 700;
+    transition: background 120ms ease, border-color 120ms ease, transform 60ms ease, box-shadow 120ms ease;
+    user-select: none;
+}
+.fp-btn:hover:not(:disabled) {
+    background: #030712;
+    transform: translateY(-1px);
+}
+.fp-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.fp-btn[data-held='true'] {
+    border-color: #22c55e;
+    background: #064e3b;
+    box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25);
 }
 </style>
