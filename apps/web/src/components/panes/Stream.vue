@@ -79,7 +79,7 @@
                                 </select>
                             </label>
 
-                            <!-- LED indicator overlay settings -->
+                            <!-- LED indicator overlay settings (position/visibility only) -->
                             <label class="select panel-text">
                                 <span>LEDs</span>
                                 <select v-model="fpLedsPosition">
@@ -515,7 +515,7 @@ const fpButtonsVisibility = ref<FrontPanelButtonsVisibility>('hover')
 
 /* -------------------------------------------------------------------------- */
 /*  Front panel LED indicators (visibility + position)                        */
-/*  LED mode is derived from the front-panel adapter state (mirror).          */
+/*  LED state is derived STRICTLY from frontPanel.powerSense / frontPanel.hddActive */
 /* -------------------------------------------------------------------------- */
 
 const fpLedsPosition = ref<FrontPanelLedsPosition>('top-left')
@@ -549,71 +549,24 @@ type FrontPanelPhase = 'disconnected' | 'connecting' | 'identifying' | 'ready' |
 type FrontPanelSnapshot = {
     phase: FrontPanelPhase
     identified: boolean
-    // The adapter may provide LED state in one of several shapes. We do not assume exact schema here.
-    leds?: unknown
-    powerLed?: unknown
-    hddLed?: unknown
-    powerLedMode?: unknown
-    hddLedMode?: unknown
+
+    // These are the ONLY fields used for the LED indicators.
+    powerSense?: boolean
+    hddActive?: boolean
 }
 
 const mirror = useMirror()
 const fp = computed<FrontPanelSnapshot>(() => {
     const root = mirror.data as any
     const slice = root?.frontPanel as FrontPanelSnapshot | undefined
-    return slice ?? { phase: 'disconnected', identified: false }
+    return slice ?? { phase: 'disconnected', identified: false, powerSense: false, hddActive: false }
 })
 
 const fpCanInteract = computed(() => fp.value.phase === 'ready' && fp.value.identified)
 
-function isValidFpLedMode(x: any): x is FrontPanelLedMode {
-    return x === 'off' || x === 'on' || x === 'blink' || x === 'blink-fast' || x === 'pulse'
-}
-
-function coerceLedMode(v: unknown): FrontPanelLedMode {
-    if (typeof v === 'boolean') return v ? 'on' : 'off'
-    if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? 'on' : 'off'
-    if (typeof v === 'string') {
-        const s = v.trim()
-        if (isValidFpLedMode(s)) return s
-        if (s.toLowerCase() === 'true') return 'on'
-        if (s.toLowerCase() === 'false') return 'off'
-    }
-    return 'off'
-}
-
-function pickLedCandidate(slice: FrontPanelSnapshot, which: 'power' | 'hdd'): unknown {
-    // Prefer nested object if present: frontPanel.leds.power / frontPanel.leds.hdd
-    const leds = (slice as any)?.leds
-    if (leds && typeof leds === 'object') {
-        const v = (leds as any)?.[which]
-        if (v !== undefined) return v
-        // common alternates
-        if (which === 'power') {
-            const alt = (leds as any)?.pwr ?? (leds as any)?.powerLed
-            if (alt !== undefined) return alt
-        } else {
-            const alt = (leds as any)?.disk ?? (leds as any)?.drive ?? (leds as any)?.hddLed
-            if (alt !== undefined) return alt
-        }
-    }
-
-    // Fallbacks: frontPanel.powerLed / frontPanel.hddLed, or *Mode keys if the adapter uses them.
-    if (which === 'power') {
-        const v =
-            (slice as any)?.powerLed ??
-            (slice as any)?.powerLedMode ??
-            (slice as any)?.powerLedState ??
-            undefined
-        return v
-    }
-
-    const v = (slice as any)?.hddLed ?? (slice as any)?.hddLedMode ?? (slice as any)?.hddLedState ?? undefined
-    return v
-}
-
-const fpPowerLedMode = computed<FrontPanelLedMode>(() => coerceLedMode(pickLedCandidate(fp.value, 'power')))
-const fpHddLedMode = computed<FrontPanelLedMode>(() => coerceLedMode(pickLedCandidate(fp.value, 'hdd')))
+// Hard binding as requested:
+const fpPowerLedMode = computed<FrontPanelLedMode>(() => (fp.value.powerSense ? 'on' : 'off'))
+const fpHddLedMode = computed<FrontPanelLedMode>(() => (fp.value.hddActive ? 'on' : 'off'))
 
 const powerHeldByClient = ref(false)
 const resetHeldByClient = ref(false)
@@ -1517,6 +1470,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* (styles unchanged from your provided file) */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
