@@ -96,28 +96,6 @@
                                     <option value="hidden">Not visible</option>
                                 </select>
                             </label>
-
-                            <label class="select panel-text">
-                                <span>Power LED</span>
-                                <select v-model="fpPowerLedMode">
-                                    <option value="off">Off</option>
-                                    <option value="on">On</option>
-                                    <option value="blink">Blink</option>
-                                    <option value="blink-fast">Blink (fast)</option>
-                                    <option value="pulse">Pulse</option>
-                                </select>
-                            </label>
-
-                            <label class="select panel-text">
-                                <span>HDD LED</span>
-                                <select v-model="fpHddLedMode">
-                                    <option value="off">Off</option>
-                                    <option value="on">On</option>
-                                    <option value="blink">Blink</option>
-                                    <option value="blink-fast">Blink (fast)</option>
-                                    <option value="pulse">Pulse</option>
-                                </select>
-                            </label>
                         </div>
                     </div>
                     <div class="right"></div>
@@ -419,8 +397,6 @@ type StreamPanePrefs = {
 
     fpLedsPosition?: FrontPanelLedsPosition
     fpLedsVisibility?: FrontPanelLedsVisibility
-    fpPowerLedMode?: FrontPanelLedMode
-    fpHddLedMode?: FrontPanelLedMode
 }
 
 function isObject(x: any): x is Record<string, unknown> {
@@ -538,13 +514,12 @@ const fpButtonsPosition = ref<FrontPanelButtonsPosition>('bottom-left')
 const fpButtonsVisibility = ref<FrontPanelButtonsVisibility>('hover')
 
 /* -------------------------------------------------------------------------- */
-/*  Front panel LED indicators (visibility + position + mode)                 */
+/*  Front panel LED indicators (visibility + position)                        */
+/*  LED mode is derived from the front-panel adapter state (mirror).          */
 /* -------------------------------------------------------------------------- */
 
 const fpLedsPosition = ref<FrontPanelLedsPosition>('top-left')
 const fpLedsVisibility = ref<FrontPanelLedsVisibility>('hover')
-const fpPowerLedMode = ref<FrontPanelLedMode>('off')
-const fpHddLedMode = ref<FrontPanelLedMode>('off')
 
 const isHoveringPane = ref(false)
 function onPaneEnter() {
@@ -567,13 +542,19 @@ const fpLedsShouldShow = computed(() => {
 })
 
 /* -------------------------------------------------------------------------- */
-/*  Front panel readiness (from mirror)                                       */
+/*  Front panel readiness + LED state (from mirror)                           */
 /* -------------------------------------------------------------------------- */
 
 type FrontPanelPhase = 'disconnected' | 'connecting' | 'identifying' | 'ready' | 'error'
 type FrontPanelSnapshot = {
     phase: FrontPanelPhase
     identified: boolean
+    // The adapter may provide LED state in one of several shapes. We do not assume exact schema here.
+    leds?: unknown
+    powerLed?: unknown
+    hddLed?: unknown
+    powerLedMode?: unknown
+    hddLedMode?: unknown
 }
 
 const mirror = useMirror()
@@ -584,6 +565,55 @@ const fp = computed<FrontPanelSnapshot>(() => {
 })
 
 const fpCanInteract = computed(() => fp.value.phase === 'ready' && fp.value.identified)
+
+function isValidFpLedMode(x: any): x is FrontPanelLedMode {
+    return x === 'off' || x === 'on' || x === 'blink' || x === 'blink-fast' || x === 'pulse'
+}
+
+function coerceLedMode(v: unknown): FrontPanelLedMode {
+    if (typeof v === 'boolean') return v ? 'on' : 'off'
+    if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? 'on' : 'off'
+    if (typeof v === 'string') {
+        const s = v.trim()
+        if (isValidFpLedMode(s)) return s
+        if (s.toLowerCase() === 'true') return 'on'
+        if (s.toLowerCase() === 'false') return 'off'
+    }
+    return 'off'
+}
+
+function pickLedCandidate(slice: FrontPanelSnapshot, which: 'power' | 'hdd'): unknown {
+    // Prefer nested object if present: frontPanel.leds.power / frontPanel.leds.hdd
+    const leds = (slice as any)?.leds
+    if (leds && typeof leds === 'object') {
+        const v = (leds as any)?.[which]
+        if (v !== undefined) return v
+        // common alternates
+        if (which === 'power') {
+            const alt = (leds as any)?.pwr ?? (leds as any)?.powerLed
+            if (alt !== undefined) return alt
+        } else {
+            const alt = (leds as any)?.disk ?? (leds as any)?.drive ?? (leds as any)?.hddLed
+            if (alt !== undefined) return alt
+        }
+    }
+
+    // Fallbacks: frontPanel.powerLed / frontPanel.hddLed, or *Mode keys if the adapter uses them.
+    if (which === 'power') {
+        const v =
+            (slice as any)?.powerLed ??
+            (slice as any)?.powerLedMode ??
+            (slice as any)?.powerLedState ??
+            undefined
+        return v
+    }
+
+    const v = (slice as any)?.hddLed ?? (slice as any)?.hddLedMode ?? (slice as any)?.hddLedState ?? undefined
+    return v
+}
+
+const fpPowerLedMode = computed<FrontPanelLedMode>(() => coerceLedMode(pickLedCandidate(fp.value, 'power')))
+const fpHddLedMode = computed<FrontPanelLedMode>(() => coerceLedMode(pickLedCandidate(fp.value, 'hdd')))
 
 const powerHeldByClient = ref(false)
 const resetHeldByClient = ref(false)
@@ -1041,9 +1071,6 @@ function isValidFpLedsPos(x: any): x is FrontPanelLedsPosition {
 function isValidFpLedsVis(x: any): x is FrontPanelLedsVisibility {
     return x === 'always' || x === 'hover' || x === 'hidden'
 }
-function isValidFpLedMode(x: any): x is FrontPanelLedMode {
-    return x === 'off' || x === 'on' || x === 'blink' || x === 'blink-fast' || x === 'pulse'
-}
 
 const paneId = computed(() => String(props.pane?.id ?? '').trim())
 const STORAGE_PREFIX = 'stream:pane:ui:'
@@ -1099,12 +1126,6 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 
     const nextLedsVis = (prefs as any).fpLedsVisibility
     if (isValidFpLedsVis(nextLedsVis)) fpLedsVisibility.value = nextLedsVis
-
-    const nextPowerLed = (prefs as any).fpPowerLedMode
-    if (isValidFpLedMode(nextPowerLed)) fpPowerLedMode.value = nextPowerLed
-
-    const nextHddLed = (prefs as any).fpHddLedMode
-    if (isValidFpLedMode(nextHddLed)) fpHddLedMode.value = nextHddLed
 }
 
 function exportPanePrefs(): StreamPanePrefs {
@@ -1115,11 +1136,8 @@ function exportPanePrefs(): StreamPanePrefs {
         fpsMode: fpsMode.value,
         fpButtonsPosition: fpButtonsPosition.value,
         fpButtonsVisibility: fpButtonsVisibility.value,
-
         fpLedsPosition: fpLedsPosition.value,
         fpLedsVisibility: fpLedsVisibility.value,
-        fpPowerLedMode: fpPowerLedMode.value,
-        fpHddLedMode: fpHddLedMode.value,
     }
 }
 
@@ -1164,8 +1182,6 @@ watch(
         () => fpButtonsVisibility.value,
         () => fpLedsPosition.value,
         () => fpLedsVisibility.value,
-        () => fpPowerLedMode.value,
-        () => fpHddLedMode.value,
     ],
     () => writePanePrefs(exportPanePrefs())
 )
