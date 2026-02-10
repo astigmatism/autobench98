@@ -546,26 +546,41 @@ const fpLedsShouldShow = computed(() => {
 /* -------------------------------------------------------------------------- */
 
 type FrontPanelPhase = 'disconnected' | 'connecting' | 'identifying' | 'ready' | 'error'
+type FrontPanelPowerSense = 'on' | 'off' | 'unknown'
+
 type FrontPanelSnapshot = {
     phase: FrontPanelPhase
     identified: boolean
+    powerSense: FrontPanelPowerSense
+    hddActive: boolean
+}
 
-    // These are the ONLY fields used for the LED indicators.
-    powerSense?: boolean
-    hddActive?: boolean
+function isFrontPanelPhase(x: any): x is FrontPanelPhase {
+    return x === 'disconnected' || x === 'connecting' || x === 'identifying' || x === 'ready' || x === 'error'
+}
+
+function isPowerSense(x: any): x is FrontPanelPowerSense {
+    return x === 'on' || x === 'off' || x === 'unknown'
 }
 
 const mirror = useMirror()
 const fp = computed<FrontPanelSnapshot>(() => {
     const root = mirror.data as any
-    const slice = root?.frontPanel as FrontPanelSnapshot | undefined
-    return slice ?? { phase: 'disconnected', identified: false, powerSense: false, hddActive: false }
+    const slice = root?.frontPanel as any
+
+    const phase: FrontPanelPhase = isFrontPanelPhase(slice?.phase) ? slice.phase : 'disconnected'
+    const powerSense: FrontPanelPowerSense = isPowerSense(slice?.powerSense) ? slice.powerSense : 'unknown'
+    const identified = !!slice?.identified
+    const hddActive = !!slice?.hddActive
+
+    return { phase, identified, powerSense, hddActive }
 })
 
 const fpCanInteract = computed(() => fp.value.phase === 'ready' && fp.value.identified)
 
 // Hard binding as requested:
-const fpPowerLedMode = computed<FrontPanelLedMode>(() => (fp.value.powerSense ? 'on' : 'off'))
+const fpPowerLedMode = computed<FrontPanelLedMode>(() => (fp.value.powerSense === 'on' ? 'on' : 'off'))
+
 const fpHddLedMode = computed<FrontPanelLedMode>(() => (fp.value.hddActive ? 'on' : 'off'))
 
 const powerHeldByClient = ref(false)
