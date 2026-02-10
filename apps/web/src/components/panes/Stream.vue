@@ -296,14 +296,14 @@
                     class="frontpanel-leds frontpanel-leds--overlay"
                     :data-pos="fpLedsPosition"
                 >
-                    <span class="fp-led-badge" data-kind="hdd" :data-mode="fpHddLedMode">
+                    <span class="fp-led-badge" data-kind="power" :data-mode="fpPowerLedMode">
+                        <span class="label">PWR</span>
                         <span class="dot" aria-hidden="true"></span>
-                        <span class="label">HDD</span>
                     </span>
 
-                    <span class="fp-led-badge" data-kind="power" :data-mode="fpPowerLedMode">
+                    <span class="fp-led-badge" data-kind="hdd" :data-mode="fpHddLedMode">
+                        <span class="label">HDD</span>
                         <span class="dot" aria-hidden="true"></span>
-                        <span class="label">power</span>
                     </span>
                 </div>
 
