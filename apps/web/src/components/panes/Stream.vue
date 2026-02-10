@@ -78,6 +78,46 @@
                                     <option value="hidden">Not visible</option>
                                 </select>
                             </label>
+
+                            <!-- LED indicator overlay settings -->
+                            <label class="select panel-text">
+                                <span>LEDs</span>
+                                <select v-model="fpLedsPosition">
+                                    <option value="top-left">Top left</option>
+                                    <option value="top-right">Top right</option>
+                                </select>
+                            </label>
+
+                            <label class="select panel-text">
+                                <span>LED visibility</span>
+                                <select v-model="fpLedsVisibility">
+                                    <option value="always">Always visible</option>
+                                    <option value="hover">Visible on mouse over</option>
+                                    <option value="hidden">Not visible</option>
+                                </select>
+                            </label>
+
+                            <label class="select panel-text">
+                                <span>Power LED</span>
+                                <select v-model="fpPowerLedMode">
+                                    <option value="off">Off</option>
+                                    <option value="on">On</option>
+                                    <option value="blink">Blink</option>
+                                    <option value="blink-fast">Blink (fast)</option>
+                                    <option value="pulse">Pulse</option>
+                                </select>
+                            </label>
+
+                            <label class="select panel-text">
+                                <span>HDD LED</span>
+                                <select v-model="fpHddLedMode">
+                                    <option value="off">Off</option>
+                                    <option value="on">On</option>
+                                    <option value="blink">Blink</option>
+                                    <option value="blink-fast">Blink (fast)</option>
+                                    <option value="pulse">Pulse</option>
+                                </select>
+                            </label>
                         </div>
                     </div>
                     <div class="right"></div>
@@ -272,6 +312,23 @@
                     <span class="placeholder-text">Stream is hidden (use ⚙️ to show)</span>
                 </div>
 
+                <!-- Front panel LED indicators (overlay + position control: top-left / top-right) -->
+                <div
+                    v-show="fpLedsShouldShow"
+                    class="frontpanel-leds frontpanel-leds--overlay"
+                    :data-pos="fpLedsPosition"
+                >
+                    <span class="fp-led-badge" data-kind="hdd" :data-mode="fpHddLedMode">
+                        <span class="dot" aria-hidden="true"></span>
+                        <span class="label">HDD</span>
+                    </span>
+
+                    <span class="fp-led-badge" data-kind="power" :data-mode="fpPowerLedMode">
+                        <span class="dot" aria-hidden="true"></span>
+                        <span class="label">power</span>
+                    </span>
+                </div>
+
                 <!-- Front panel controls: overlay + position control (bottom-left / bottom-right) -->
                 <div
                     v-show="fpButtonsShouldShow"
@@ -347,6 +404,10 @@ type StreamFpsMode = 'auto' | '60' | '30' | '20' | '15' | '8' | '4' | '2'
 type FrontPanelButtonsPosition = 'bottom-left' | 'bottom-right'
 type FrontPanelButtonsVisibility = 'always' | 'hover' | 'hidden'
 
+type FrontPanelLedsPosition = 'top-left' | 'top-right'
+type FrontPanelLedsVisibility = 'always' | 'hover' | 'hidden'
+type FrontPanelLedMode = 'off' | 'on' | 'blink' | 'blink-fast' | 'pulse'
+
 type StreamPanePrefs = {
     enabled?: boolean
     scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
@@ -355,6 +416,11 @@ type StreamPanePrefs = {
 
     fpButtonsPosition?: FrontPanelButtonsPosition
     fpButtonsVisibility?: FrontPanelButtonsVisibility
+
+    fpLedsPosition?: FrontPanelLedsPosition
+    fpLedsVisibility?: FrontPanelLedsVisibility
+    fpPowerLedMode?: FrontPanelLedMode
+    fpHddLedMode?: FrontPanelLedMode
 }
 
 function isObject(x: any): x is Record<string, unknown> {
@@ -471,6 +537,15 @@ const reloadKey = ref(0)
 const fpButtonsPosition = ref<FrontPanelButtonsPosition>('bottom-left')
 const fpButtonsVisibility = ref<FrontPanelButtonsVisibility>('hover')
 
+/* -------------------------------------------------------------------------- */
+/*  Front panel LED indicators (visibility + position + mode)                 */
+/* -------------------------------------------------------------------------- */
+
+const fpLedsPosition = ref<FrontPanelLedsPosition>('top-left')
+const fpLedsVisibility = ref<FrontPanelLedsVisibility>('hover')
+const fpPowerLedMode = ref<FrontPanelLedMode>('off')
+const fpHddLedMode = ref<FrontPanelLedMode>('off')
+
 const isHoveringPane = ref(false)
 function onPaneEnter() {
     isHoveringPane.value = true
@@ -482,6 +557,12 @@ function onPaneLeave() {
 const fpButtonsShouldShow = computed(() => {
     if (fpButtonsVisibility.value === 'hidden') return false
     if (fpButtonsVisibility.value === 'always') return true
+    return isHoveringPane.value
+})
+
+const fpLedsShouldShow = computed(() => {
+    if (fpLedsVisibility.value === 'hidden') return false
+    if (fpLedsVisibility.value === 'always') return true
     return isHoveringPane.value
 })
 
@@ -954,6 +1035,16 @@ function isValidFpVis(x: any): x is FrontPanelButtonsVisibility {
     return x === 'always' || x === 'hover' || x === 'hidden'
 }
 
+function isValidFpLedsPos(x: any): x is FrontPanelLedsPosition {
+    return x === 'top-left' || x === 'top-right'
+}
+function isValidFpLedsVis(x: any): x is FrontPanelLedsVisibility {
+    return x === 'always' || x === 'hover' || x === 'hidden'
+}
+function isValidFpLedMode(x: any): x is FrontPanelLedMode {
+    return x === 'off' || x === 'on' || x === 'blink' || x === 'blink-fast' || x === 'pulse'
+}
+
 const paneId = computed(() => String(props.pane?.id ?? '').trim())
 const STORAGE_PREFIX = 'stream:pane:ui:'
 const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
@@ -1002,6 +1093,18 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 
     const nextFpVis = (prefs as any).fpButtonsVisibility
     if (isValidFpVis(nextFpVis)) fpButtonsVisibility.value = nextFpVis
+
+    const nextLedsPos = (prefs as any).fpLedsPosition
+    if (isValidFpLedsPos(nextLedsPos)) fpLedsPosition.value = nextLedsPos
+
+    const nextLedsVis = (prefs as any).fpLedsVisibility
+    if (isValidFpLedsVis(nextLedsVis)) fpLedsVisibility.value = nextLedsVis
+
+    const nextPowerLed = (prefs as any).fpPowerLedMode
+    if (isValidFpLedMode(nextPowerLed)) fpPowerLedMode.value = nextPowerLed
+
+    const nextHddLed = (prefs as any).fpHddLedMode
+    if (isValidFpLedMode(nextHddLed)) fpHddLedMode.value = nextHddLed
 }
 
 function exportPanePrefs(): StreamPanePrefs {
@@ -1012,6 +1115,11 @@ function exportPanePrefs(): StreamPanePrefs {
         fpsMode: fpsMode.value,
         fpButtonsPosition: fpButtonsPosition.value,
         fpButtonsVisibility: fpButtonsVisibility.value,
+
+        fpLedsPosition: fpLedsPosition.value,
+        fpLedsVisibility: fpLedsVisibility.value,
+        fpPowerLedMode: fpPowerLedMode.value,
+        fpHddLedMode: fpHddLedMode.value,
     }
 }
 
@@ -1054,6 +1162,10 @@ watch(
         () => fpsMode.value,
         () => fpButtonsPosition.value,
         () => fpButtonsVisibility.value,
+        () => fpLedsPosition.value,
+        () => fpLedsVisibility.value,
+        () => fpPowerLedMode.value,
+        () => fpHddLedMode.value,
     ],
     () => writePanePrefs(exportPanePrefs())
 )
@@ -1772,6 +1884,119 @@ onBeforeUnmount(() => {
 .monospace {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
         'Courier New', monospace;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Front panel LED overlay indicators                                         */
+/* -------------------------------------------------------------------------- */
+
+.frontpanel-leds {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: flex-start;
+    min-height: 0;
+}
+
+.frontpanel-leds[data-pos='top-right'] {
+    justify-content: flex-end;
+}
+
+.frontpanel-leds--overlay {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    top: 8px;
+    z-index: 6;
+    pointer-events: none; /* indicators only */
+}
+
+.fp-led-badge {
+    --fp-led-rgb: 156, 163, 175; /* fallback gray */
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid #374151;
+    background: rgba(2, 6, 23, 0.72);
+    color: var(--panel-fg);
+    font-size: 0.74rem;
+    line-height: 1.3;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+    backdrop-filter: blur(2px);
+}
+
+.fp-led-badge[data-kind='power'] {
+    --fp-led-rgb: 34, 197, 94; /* green */
+}
+
+.fp-led-badge[data-kind='hdd'] {
+    --fp-led-rgb: 249, 115, 22; /* orange */
+}
+
+.fp-led-badge .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    display: inline-block;
+    background: rgba(148, 163, 184, 0.25);
+    opacity: 0.55;
+    box-shadow: none;
+    transform-origin: center;
+}
+
+/* On */
+.fp-led-badge[data-mode='on'] .dot {
+    background: rgb(var(--fp-led-rgb));
+    opacity: 1;
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.9), 0 0 10px rgba(var(--fp-led-rgb), 0.35);
+}
+
+/* Blink */
+@keyframes fp-led-blink {
+    0%,
+    49% {
+        opacity: 1;
+    }
+    50%,
+    100% {
+        opacity: 0.15;
+    }
+}
+
+.fp-led-badge[data-mode='blink'] .dot,
+.fp-led-badge[data-mode='blink-fast'] .dot {
+    background: rgb(var(--fp-led-rgb));
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.9), 0 0 10px rgba(var(--fp-led-rgb), 0.35);
+    animation: fp-led-blink 1s steps(2, end) infinite;
+}
+
+.fp-led-badge[data-mode='blink-fast'] .dot {
+    animation-duration: 350ms;
+}
+
+/* Pulse (sleep-ish) */
+@keyframes fp-led-pulse {
+    0% {
+        opacity: 0.22;
+        transform: scale(1);
+    }
+    50% {
+        opacity: 1;
+        transform: scale(1.35);
+    }
+    100% {
+        opacity: 0.22;
+        transform: scale(1);
+    }
+}
+
+.fp-led-badge[data-mode='pulse'] .dot {
+    background: rgb(var(--fp-led-rgb));
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.9), 0 0 10px rgba(var(--fp-led-rgb), 0.35);
+    animation: fp-led-pulse 900ms ease-in-out infinite;
+    opacity: 1;
 }
 
 /* -------------------------------------------------------------------------- */
