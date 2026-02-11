@@ -93,7 +93,8 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
 
         // One-line log (no structured object dump).
         log.warn(
-            `sidecar health non-2xx statusCode=${statusCode} bodyPreview=${JSON.stringify(preview)}`
+            // `sidecar health non-2xx statusCode=${statusCode} bodyPreview=${JSON.stringify(preview)}`
+            `sidecar health non-2xx statusCode=${statusCode}`
         )
     }
 
