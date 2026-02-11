@@ -1,6 +1,6 @@
 // services/orchestrator/src/core/state.ts
 import { EventEmitter } from 'node:events'
-import * as jsonpatch from 'fast-json-patch' // CJS/ESM-safe import
+import * as jsonpatchNS from 'fast-json-patch' // CJS/ESM interop varies by runtime
 import type {
     CfImagerState as CfImagerSnapshot,
     CfImagerMediaStatus,
@@ -8,6 +8,33 @@ import type {
 import type { KeyboardStateSlice as PS2KeyboardSnapshot } from '../devices/ps2-keyboard/types.js'
 import type { PS2MouseStateSlice as PS2MouseSnapshot } from '../devices/ps2-mouse/types.js'
 import type { FrontPanelStateSlice as FrontPanelSnapshot } from '../devices/front-panel/types.js'
+
+/**
+ * fast-json-patch interop normalization:
+ * - Some ESM runtimes expose CJS exports under `.default`
+ * - Others expose functions directly on the namespace object
+ *
+ * We normalize once and then use a guaranteed function reference for compare().
+ */
+const jsonpatch: any = (jsonpatchNS as any).default ?? jsonpatchNS
+
+const compareFn: (a: unknown, b: unknown) => jsonpatchNS.Operation[] = (() => {
+    const fn = (jsonpatch as any)?.compare
+    if (typeof fn !== 'function') {
+        const keys = (() => {
+            try {
+                return Object.keys(jsonpatch ?? {}).join(',')
+            } catch {
+                return 'uninspectable'
+            }
+        })()
+        throw new Error(
+            `fast-json-patch compare() not available (CJS/ESM interop mismatch). keys=[${keys}]`
+        )
+    }
+    // Bind defensively (in case the implementation expects `this`)
+    return fn.bind(jsonpatch)
+})()
 
 /**
  * Client-consumable server configuration shipped inside the state snapshot.
@@ -183,7 +210,7 @@ export type AppState = {
 export type PatchEvent = {
     from: number
     to: number
-    patch: jsonpatch.Operation[]
+    patch: jsonpatchNS.Operation[]
 }
 
 /**
@@ -197,7 +224,7 @@ export type PatchEvent = {
  * - For move/copy operations, both `path` and `from` are considered.
  */
 export function patchTouches(
-    patch: jsonpatch.Operation[],
+    patch: jsonpatchNS.Operation[],
     pointerPrefix: string
 ): boolean {
     const prefix = pointerPrefix.startsWith('/')
@@ -565,7 +592,7 @@ function clone<T>(v: T): T {
 }
 
 function emitChanges(prev: AppState, next: AppState) {
-    const ops = jsonpatch.compare(prev, next)
+    const ops = compareFn(prev, next)
     if (ops.length > 0) {
         stateEvents.emit('patch', {
             from: prev.version,
