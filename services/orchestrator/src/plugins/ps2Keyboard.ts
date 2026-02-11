@@ -307,6 +307,19 @@ function mapFrontPanelPowerSenseToHostPower(powerSense: unknown): KeyboardPowerS
   return 'unknown'
 }
 
+function fmt(v: unknown): string {
+  if (typeof v === 'string') return v
+  if (typeof v === 'number') return String(v)
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (v == null) return 'null'
+  try {
+    return JSON.stringify(v)
+  } catch {
+    return String(v)
+  }
+}
+
+
 // ---- Plugin implementation -------------------------------------------------
 
 const ps2KeyboardPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
@@ -351,19 +364,13 @@ const ps2KeyboardPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     kb.setHostPower(hostPower)
 
     if (hostPower === 'off') {
-      logPlugin.warn('host power is OFF; keyboard key ops will be dropped', {
-        from: prev,
-        to: hostPower,
-        powerSense,
-        why,
-      })
-    } else {
-      logPlugin.info('host power updated for keyboard service', {
-        from: prev,
-        to: hostPower,
-        powerSense,
-        why,
-      })
+        logPlugin.warn(
+            `host power is OFF; keyboard key ops will be dropped from=${prev} to=${hostPower} powerSense=${fmt(powerSense)} why=${why}`
+        )
+        } else {
+        logPlugin.info(
+            `host power updated for keyboard service from=${prev} to=${hostPower} powerSense=${fmt(powerSense)} why=${why}`
+        )
     }
   }
 
