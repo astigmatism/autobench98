@@ -1074,12 +1074,15 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                   (op: any) => typeof op?.path === 'string' && op.path.startsWith('/powerMeter')
               )
             : false
-
+        
+        // too much noise
+        /*
         logWs.debug('broadcasting state.patch', {
             from: evt.from,
             to: evt.to,
             hasPowerMeter
         })
+        */
 
         const payload = JSON.stringify({
             type: 'state.patch',
