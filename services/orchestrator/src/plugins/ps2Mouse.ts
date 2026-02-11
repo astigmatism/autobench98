@@ -69,8 +69,12 @@ class PS2MouseLoggerEventSink implements PS2MouseEventSink {
         const line = this.fmtFirmwareLine(raw).trim()
         if (!line) return
 
-        // Always single-line, key=value, and always visible at info.
-        // (If this gets too noisy later, we can add filtering by prefix.)
+        // Always single-line, key=value.
+        if (line.startsWith('done:')) {
+        this.logMouse.debug(`kind=mouse-firmware line=${JSON.stringify(line)}`)
+        return
+        }
+
         this.logMouse.info(`kind=mouse-firmware line=${JSON.stringify(line)}`)
         return
     }
