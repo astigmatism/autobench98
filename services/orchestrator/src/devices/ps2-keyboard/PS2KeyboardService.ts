@@ -108,6 +108,20 @@ export class PS2KeyboardService {
   // Used for parsing inbound serial into lines (debug/telemetry) safely.
   private readBuffer = ''
 
+  /**
+   * Identify safety fix:
+   * Avoid races between a temporary readLine() data listener and the permanent handleData listener.
+   * We route *all* inbound lines through handleData, and (until identified) we also feed them
+   * into a small FIFO that identify() can consume deterministically.
+   */
+  private pendingLines: string[] = []
+  private pendingLineWaiters: Array<{
+    resolve: (line: string) => void
+    reject: (err: Error) => void
+    timer: NodeJS.Timeout
+  }> = []
+  private static readonly MAX_PENDING_LINES = 256
+
   // Only track modifier keys as "held" for logging semantics.
   private heldModifiers = new Set<string>()
 
@@ -210,6 +224,9 @@ export class PS2KeyboardService {
     this.heldModifiers.clear()
     this.readBuffer = ''
     this.activeCancel = null
+
+    this.failAllPendingLineWaiters(new Error('service stopping'))
+    this.pendingLines = []
   }
 
   /* ---------------------------------------------------------------------- */
@@ -528,6 +545,10 @@ export class PS2KeyboardService {
       this.phase = 'connecting'
       this.identified = false
 
+      // Reset identify line FIFO for the new connection.
+      this.failAllPendingLineWaiters(new Error('superseded by new connection'))
+      this.pendingLines = []
+
       const port = new SerialPort({
         path: devicePath,
         baudRate,
@@ -594,6 +615,10 @@ export class PS2KeyboardService {
     const port = this.port
     const path = this.devicePath ?? 'unknown'
 
+    // Fail any identify waiters promptly so identify() can't hang until timeout.
+    this.failAllPendingLineWaiters(new Error(`port closed: ${reason}`))
+    this.pendingLines = []
+
     this.port = null
     this.identified = false
     this.phase = 'disconnected'
@@ -626,15 +651,47 @@ export class PS2KeyboardService {
       path: this.devicePath ?? 'unknown',
     })
 
-    try {
-      await this.writeLine(this.cfg.identify.request)
+    const request = this.cfg.identify.request
+    const completion = this.cfg.identify.completion
+    const expected = this.cfg.expectedIdToken
+    const timeoutMs = this.cfg.identify.timeoutMs
 
-      const token = await this.readLine(this.cfg.identify.timeoutMs)
-      if (token !== this.cfg.expectedIdToken) {
-        throw new Error(`unexpected identify token: ${token}`)
+    // Conservative retry: some Arduino boards reset on serial open; first request can be missed.
+    // Use a small number of attempts but within the same overall timeout.
+    const attempts = 2
+    const overallDeadline = now() + timeoutMs
+    let lastErr: unknown = null
+
+    try {
+      let token: string | null = null
+
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const remainingOverall = overallDeadline - now()
+        if (remainingOverall <= 0) break
+
+        // Write identify request (may be ignored if device is still booting).
+        await this.writeLine(request)
+
+        // Budget per-attempt wait; last attempt gets all remaining time.
+        const perAttemptMs =
+          attempt === attempts
+            ? remainingOverall
+            : Math.min(750, Math.max(150, Math.floor(remainingOverall / (attempts - attempt + 1))))
+
+        try {
+          token = await this.readForExpectedToken(expected, perAttemptMs)
+          break
+        } catch (err) {
+          lastErr = err
+          // Continue to next attempt if time remains.
+        }
       }
 
-      await this.writeLine(this.cfg.identify.completion)
+      if (!token) {
+        throw (lastErr ?? new Error('identify timeout')) as any
+      }
+
+      await this.writeLine(completion)
       this.identified = true
       this.phase = 'ready'
 
@@ -672,53 +729,84 @@ export class PS2KeyboardService {
     })
   }
 
-  private async readLine(timeoutMs: number): Promise<string> {
-    const start = now()
-    let buf = ''
+  /**
+   * Read lines from the FIFO until the expected token appears or timeout elapses.
+   * Ignores debug/noise lines conservatively (same semantics as prior readLine()).
+   */
+  private async readForExpectedToken(expected: string, timeoutMs: number): Promise<string> {
+    const deadline = now() + Math.max(0, Math.trunc(timeoutMs))
+    let lastNonNoise: string | null = null
+
+    while (true) {
+      const remaining = deadline - now()
+      if (remaining <= 0) {
+        const suffix = lastNonNoise ? ` (last=${lastNonNoise})` : ''
+        throw new Error(`identify timeout${suffix}`)
+      }
+
+      const raw = await this.takeNextLine(remaining)
+      const line = raw.trim()
+      if (!line) continue
+
+      // Keep identify resilient: ignore firmware chatter that is not the token.
+      if (line.startsWith('debug:')) continue
+      if (line.startsWith('done:')) continue
+
+      lastNonNoise = line
+
+      if (line === expected) return line
+
+      // Not expected; keep scanning within the same deadline.
+    }
+  }
+
+  /**
+   * Take the next parsed line from the FIFO, waiting up to timeoutMs.
+   * This avoids a race where identify responses arrive before a temporary on('data') listener is attached.
+   */
+  private takeNextLine(timeoutMs: number): Promise<string> {
+    const immediate = this.pendingLines.shift()
+    if (immediate != null) return Promise.resolve(immediate)
+
+    const t = Math.max(0, Math.trunc(timeoutMs))
 
     return new Promise<string>((resolve, reject) => {
-      if (!this.port) {
-        reject(new Error('port not open'))
-        return
-      }
+      const timer = setTimeout(() => {
+        // Remove this waiter if still present.
+        const idx = this.pendingLineWaiters.findIndex((w) => w.resolve === resolve)
+        if (idx >= 0) this.pendingLineWaiters.splice(idx, 1)
+        reject(new Error('identify timeout'))
+      }, t)
 
-      const port = this.port
-      let finished = false
-
-      const onData = (data: Buffer) => {
-        if (finished) return
-        buf += data.toString('utf8')
-        const lines = buf.split(/\r?\n/)
-        buf = lines.pop() ?? ''
-        for (const l of lines) {
-          const line = l.trim()
-          if (!line) continue
-          if (line.startsWith('debug:')) continue
-          cleanup()
-          finished = true
-          resolve(line)
-          return
-        }
-      }
-
-      const cleanup = () => {
-        port.off('data', onData)
-      }
-
-      port.on('data', onData)
-
-      const tick = () => {
-        if (finished) return
-        if (now() - start >= timeoutMs) {
-          cleanup()
-          finished = true
-          reject(new Error('identify timeout'))
-        } else {
-          setTimeout(tick, 25)
-        }
-      }
-      tick()
+      this.pendingLineWaiters.push({ resolve, reject, timer })
     })
+  }
+
+  private enqueuePendingLine(line: string): void {
+    const waiter = this.pendingLineWaiters.shift()
+    if (waiter) {
+      clearTimeout(waiter.timer)
+      waiter.resolve(line)
+      return
+    }
+
+    this.pendingLines.push(line)
+    if (this.pendingLines.length > PS2KeyboardService.MAX_PENDING_LINES) {
+      // Drop oldest to bound memory; identify will still succeed if token arrives.
+      this.pendingLines.shift()
+    }
+  }
+
+  private failAllPendingLineWaiters(err: Error): void {
+    const waiters = this.pendingLineWaiters.splice(0, this.pendingLineWaiters.length)
+    for (const w of waiters) {
+      clearTimeout(w.timer)
+      try {
+        w.reject(err)
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   private handleData(chunk: string): void {
@@ -729,6 +817,11 @@ export class PS2KeyboardService {
     for (const raw of lines) {
       const line = raw.trim()
       if (!line) continue
+
+      // Feed identify FIFO until identified, so identify() cannot miss an early token response.
+      if (!this.identified) {
+        this.enqueuePendingLine(line)
+      }
 
       this.events.publish({
         kind: 'keyboard-debug-line',
