@@ -950,10 +950,22 @@ export class PS2MouseService {
     })
   }
 
-  private handleData(_chunk: string): void {
-    // unchanged from prior version; telemetry parsing is handled in your next iteration
-    // (keeping this function present avoids introducing additional behavioral diffs here)
-  }
+    private handleData(chunk: string): void {
+    // Accumulate + split into lines (CRLF or LF)
+    this.readBuffer += chunk
+    const lines = this.readBuffer.split(/\r?\n/)
+    this.readBuffer = lines.pop() ?? ''
+
+    for (const raw of lines) {
+        const line = raw.trim()
+        if (!line) continue
+
+        // Mirror keyboard: firmware lines are logs-only, not state.
+        // Use `as any` because your event union may not yet include mouse-debug-line formally.
+        this.events.publish({ kind: 'mouse-debug-line', line } as any)
+    }
+    }
+
 
   private handlePortError(port: SerialPort, err: Error): void {
     if (port !== this.port) return

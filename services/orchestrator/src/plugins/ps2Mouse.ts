@@ -58,10 +58,29 @@ class PS2MouseLoggerEventSink implements PS2MouseEventSink {
   publish(evt: PS2MouseEvent): void {
     const kind = evt.kind
 
-    // Reduce noise: movement tick and firmware lines are high-volume by design.
-    if (kind === 'mouse-move-tick' || kind === 'mouse-debug-line') {
-      this.logMouse.debug(`kind=${kind}`)
-      return
+    // Reduce noise: movement tick is high-volume by design.
+    if (kind === 'mouse-move-tick') {
+        this.logMouse.debug(`kind=${kind}`)
+    return
+    }
+
+    if (kind === 'mouse-debug-line') {
+    const raw = String((evt as any).line ?? '')
+    const line = this.fmtFirmwareLine(raw).trim()
+    if (!line) return
+
+    // Mouse sketch prints "done:" for every command; keep it visible but lower priority.
+    if (line.startsWith('done:')) {
+        this.logMouse.debug(line)
+        return
+    }
+
+    // Most useful Arduino messages:
+    // - "debug: mouse accepts power ON command from keyboard simulator"
+    // - "debug: mouse sent enable data reporting"
+    // etc.
+    this.logMouse.info(line)
+    return
     }
 
     if (kind === 'fatal-error') {
@@ -117,6 +136,31 @@ class PS2MouseLoggerEventSink implements PS2MouseEventSink {
 
     this.logMouse.info(`kind=${kind}`)
   }
+
+  private fmtFirmwareLine(line: string): string {
+    let needsEscape = false
+    for (let i = 0; i < line.length; i++) {
+        const c = line.charCodeAt(i)
+        // allow tab; everything else < 0x20 or DEL treated as control
+        if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+        needsEscape = true
+        break
+        }
+    }
+    if (!needsEscape) return line
+
+    let out = ''
+    for (let i = 0; i < line.length; i++) {
+        const c = line.charCodeAt(i)
+        if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+        out += `\\x${c.toString(16).padStart(2, '0')}`
+        } else {
+        out += line[i]
+        }
+    }
+    return out
+    }
+
 }
 
 /* -------------------------------------------------------------------------- */
