@@ -6,6 +6,7 @@ import type {
     CfImagerMediaStatus,
 } from '../devices/cf-imager/types.js'
 import type { KeyboardStateSlice as PS2KeyboardSnapshot } from '../devices/ps2-keyboard/types.js'
+import type { PS2MouseStateSlice as PS2MouseSnapshot } from '../devices/ps2-mouse/types.js'
 import type { FrontPanelStateSlice as FrontPanelSnapshot } from '../devices/front-panel/types.js'
 
 /**
@@ -126,25 +127,10 @@ export type AtlonaControllerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  PS2 Keyboard snapshot (alias of KeyboardStateSlice)                       */
-/* -------------------------------------------------------------------------- */
-
-// PS2KeyboardSnapshot is imported from ../devices/ps2-keyboard/types.js as KeyboardStateSlice.
-
-/* -------------------------------------------------------------------------- */
-/*  Front panel snapshot (alias of FrontPanelStateSlice)                      */
-/* -------------------------------------------------------------------------- */
-
-// FrontPanelSnapshot is imported from ../devices/front-panel/types.js as FrontPanelStateSlice.
-
-/* -------------------------------------------------------------------------- */
 /*  CF Imager snapshot (alias of CfImagerState)                               */
 /* -------------------------------------------------------------------------- */
 
 export type CfImagerMediaSnapshot = CfImagerMediaStatus
-
-// CfImagerSnapshot is imported as CfImagerState above and aliased.
-// (already named CfImagerSnapshot in the import)
 
 /* -------------------------------------------------------------------------- */
 /*  Sidecar snapshot                                                          */
@@ -156,16 +142,12 @@ export type SidecarSnapshot = {
     port: number
 
     // Canonical base URL as seen from the orchestrator host.
-    // NOTE: This may or may not be directly usable from the browser depending
-    // on how Studio is hosted; the frontend can still choose to ignore it.
     baseUrl: string
 
     // Path for the MJPEG stream on the sidecar.
     streamPath: string
 
     // Convenience, fully combined URL (baseUrl + streamPath).
-    // Frontend panes can use this directly if it matches their hosting model,
-    // or override/ignore it if the orchestrator proxies /stream differently.
     streamUrl: string
 
     // Lightweight health/status; initially unknown.
@@ -188,6 +170,7 @@ export type AppState = {
     serialPrinter: SerialPrinterSnapshot
     atlonaController: AtlonaControllerSnapshot
     ps2Keyboard: PS2KeyboardSnapshot
+    ps2Mouse: PS2MouseSnapshot
     frontPanel: FrontPanelSnapshot
     cfImager: CfImagerSnapshot
     sidecar: SidecarSnapshot
@@ -234,14 +217,6 @@ export function patchTouches(
 
 /**
  * Convenience subscription: notify when a single top-level slice changes.
- *
- * This is the intended pattern for service-to-service coordination:
- * - A service publishes events
- * - Its adapter updates AppState
- * - Other services subscribe to the relevant slice and react
- *
- * Safety note:
- * - Listener exceptions are swallowed so one bad subscriber cannot break state emission.
  */
 export function subscribeSlice<K extends keyof AppState>(
     key: K,
@@ -301,15 +276,6 @@ function isObjectLike(v: unknown): v is object {
     return typeof v === 'object' && v !== null
 }
 
-/**
- * Deep-freeze an object tree to prevent accidental mutation of the internal
- * authoritative state. This is used on the *internal* `state` only.
- *
- * Safety note:
- * - We clone inputs before storing them, and freeze after storing.
- * - Consumers should continue to use `getSnapshot()` for a mutable copy,
- *   or `peek()`/`peekSlice()` for a read-only frozen view.
- */
 function deepFreeze<T>(obj: T, seen = new WeakSet<object>()): T {
     if (!isObjectLike(obj)) return obj
 
@@ -317,7 +283,6 @@ function deepFreeze<T>(obj: T, seen = new WeakSet<object>()): T {
     if (seen.has(o)) return obj
     seen.add(o)
 
-    // Freeze children first (handles arrays and plain objects).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyObj: any = obj as any
     for (const key of Object.keys(anyObj)) {
@@ -352,7 +317,6 @@ const SERIAL_PRINTER_HISTORY_LIMIT = num(process.env.SERIAL_PRINTER_HISTORY_LIMI
 // Sidecar env-derived defaults
 const SIDECAR_HOST = (process.env.SIDECAR_HOST || '127.0.0.1').trim()
 const SIDECAR_PORT = num(process.env.SIDECAR_PORT, 3100)
-// For now the sidecar only promises /stream; screenshot/recordings are separate.
 const SIDECAR_STREAM_PATH = '/stream'
 const SIDECAR_BASE_URL = `http://${SIDECAR_HOST}:${SIDECAR_PORT}`
 const SIDECAR_STREAM_URL = `${SIDECAR_BASE_URL}${SIDECAR_STREAM_PATH}`
@@ -437,6 +401,60 @@ const initialPs2Keyboard: PS2KeyboardSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Initial PS2 mouse slice (spec v0.3 shape)                                 */
+/* -------------------------------------------------------------------------- */
+
+const initialPs2Mouse: PS2MouseSnapshot = {
+    phase: 'disconnected',
+    identified: false,
+
+    deviceId: null,
+    devicePath: null,
+    baudRate: null,
+
+    hostPower: 'unknown',
+
+    busy: false,
+    queueDepth: 0,
+    currentOp: null,
+    operationHistory: [],
+
+    lastError: null,
+    errorHistory: [],
+
+    // Safe, UI-friendly defaults until the service applies config
+    mode: 'relative-gain',
+    gain: 10,
+    accel: {
+        enabled: true,
+        baseGain: 5,
+        maxGain: 20,
+        velocityPxPerSecForMax: 1000,
+    },
+    absoluteGrid: {
+        mode: 'auto',
+        resolved: undefined,
+    },
+    mappingStatus: 'unknown-resolution',
+
+    buttonsDown: {
+        left: false,
+        right: false,
+        middle: false,
+    },
+
+    reporting: 'unknown',
+    protocolMode: 'unknown',
+    lastHostCommand: null,
+    lastDeviceId: null,
+
+    updatedAt: Date.now(),
+    lastMoveAt: null,
+    lastWheelAt: null,
+    lastButtonAt: null,
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Initial front panel slice                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -479,7 +497,6 @@ const initialCfImager: CfImagerSnapshot = {
     },
     currentOp: undefined,
     lastError: undefined,
-    // NEW: initial free-space hint is unknown
     diskFreeBytes: undefined,
 }
 
@@ -528,6 +545,7 @@ let state: AppState = {
     serialPrinter: initialSerialPrinter,
     atlonaController: initialAtlonaController,
     ps2Keyboard: initialPs2Keyboard,
+    ps2Mouse: initialPs2Mouse,
     frontPanel: initialFrontPanel,
     cfImager: initialCfImager,
     sidecar: initialSidecar,
@@ -562,29 +580,14 @@ function emitChanges(prev: AppState, next: AppState) {
 /*  Public read APIs                                                          */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Returns a deep-cloned, mutable copy of AppState.
- * Use this when callers need to freely manipulate the returned object.
- */
 export function getSnapshot(): AppState {
     return clone(state)
 }
 
-/**
- * Returns the current authoritative state by reference.
- * The returned object is deep-frozen to prevent mutation.
- *
- * Use this for efficient read-only access (selectors, gating checks, etc.)
- * without the overhead of cloning the full AppState.
- */
 export function peek(): Readonly<AppState> {
     return state
 }
 
-/**
- * Returns a read-only view of a top-level slice.
- * The returned value is a reference into the frozen authoritative state.
- */
 export function peekSlice<K extends keyof AppState>(key: K): Readonly<AppState[K]> {
     return state[key]
 }
@@ -759,12 +762,9 @@ export function setPS2KeyboardSnapshot(next: PS2KeyboardSnapshot) {
 export function updatePS2KeyboardSnapshot(partial: Partial<PS2KeyboardSnapshot>) {
     const prev = state.ps2Keyboard
 
-    // Shallow merge is sufficient because nested arrays/objects are replaced
-    // as whole snapshots by the adapter.
     const merged: PS2KeyboardSnapshot = {
         ...prev,
         ...clone(partial),
-        // Ensure updatedAt always moves forward if caller didn’t specify it.
         updatedAt:
             (partial as any).updatedAt !== undefined
                 ? (partial as any).updatedAt
@@ -772,6 +772,29 @@ export function updatePS2KeyboardSnapshot(partial: Partial<PS2KeyboardSnapshot>)
     }
 
     set('ps2Keyboard', merged)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  PS2 mouse update helpers                                                  */
+/* -------------------------------------------------------------------------- */
+
+export function setPS2MouseSnapshot(next: PS2MouseSnapshot) {
+    set('ps2Mouse', next)
+}
+
+export function updatePS2MouseSnapshot(partial: Partial<PS2MouseSnapshot>) {
+    const prev = state.ps2Mouse
+
+    const merged: PS2MouseSnapshot = {
+        ...prev,
+        ...clone(partial),
+        updatedAt:
+            (partial as any).updatedAt !== undefined
+                ? (partial as any).updatedAt
+                : Date.now(),
+    }
+
+    set('ps2Mouse', merged)
 }
 
 /* -------------------------------------------------------------------------- */

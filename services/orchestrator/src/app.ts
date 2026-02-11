@@ -34,6 +34,7 @@ import atlonaControllerPlugin from './plugins/atlonaController.js'
 import cfImagerPlugin from './plugins/cfImager.js'
 import streamProxyPlugin from './plugins/streamProxy.js'
 import ps2KeyboardPlugin from './plugins/ps2Keyboard.js'
+import ps2MousePlugin from './plugins/ps2Mouse.js'
 import frontPanelPlugin from './plugins/frontPanel.js'
 
 declare module 'fastify' {
@@ -149,8 +150,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(atlonaControllerPlugin)
     void app.register(powerMeterPlugin)
     void app.register(serialPrinterPlugin)
-    void app.register(ps2KeyboardPlugin)
     void app.register(frontPanelPlugin)
+    void app.register(ps2KeyboardPlugin)
+    void app.register(ps2MousePlugin)
     void app.register(cfImagerPlugin)
 
     void app.register(streamProxyPlugin)

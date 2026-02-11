@@ -176,7 +176,21 @@ const frontPanelPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     {
       publish(evt: FrontPanelEvent): void {
         stateAdapter.handle(evt)
-        updateFrontPanelSnapshot(stateAdapter.getState())
+        const next = stateAdapter.getState()
+        updateFrontPanelSnapshot(next)
+
+        // ✅ Propagate host power to PS/2 mouse via AppState truth.
+        // We only need to push when power sense can change or be invalidated.
+        if (
+          evt.kind === 'frontpanel-power-sense-changed' ||
+          evt.kind === 'frontpanel-device-disconnected' ||
+          evt.kind === 'frontpanel-device-lost'
+        ) {
+          const setMousePower = (app as any).ps2MouseSetHostPower as ((p: 'on' | 'off' | 'unknown') => void) | undefined
+          if (typeof setMousePower === 'function') {
+            setMousePower(next.powerSense as any)
+          }
+        }
       },
     }
   )

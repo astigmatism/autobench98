@@ -8,11 +8,15 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     [LogChannel.ffmpeg]:          { emoji: '🎬', color: 'magenta' },
     [LogChannel.stream]:          { emoji: '📺', color: 'cyan' },
     [LogChannel.ocr]:             { emoji: '🔎', color: 'green' },
+
     // More generic device marker
     [LogChannel.device]:          { emoji: '🛠️', color: 'red' },
 
     // Keyboard-specific channel
     [LogChannel.keyboard]:        { emoji: '⌨️', color: 'cyan' },
+
+    // Mouse-specific channel
+    [LogChannel.mouse]:           { emoji: '🖱️', color: 'cyan' },
 
     // Message bus channel
     [LogChannel.message_bus]:     { emoji: '🚌', color: 'cyan' },
@@ -21,14 +25,18 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     [LogChannel.websocket]:       { emoji: '🔗', color: 'cyan' },
     [LogChannel.app]:             { emoji: '📦', color: 'blue' },
     [LogChannel.request]:         { emoji: '📝', color: 'purple' },
+
     // Power meter-specific channel
     [LogChannel.powermeter]:      { emoji: '🔌', color: 'yellow' },
+
     // Serial printer-specific channel
     [LogChannel.serial_printer]:  { emoji: '🖨️', color: 'white' },
+
     // Atlona controller-specific channel
     [LogChannel.atlona_controller]: { emoji: '📽️', color: 'purple' },
+
     [LogChannel.cf_imager]:       { emoji: '💾', color: 'cyan' },
-    [LogChannel.frontpanel]: { emoji: '⏻', color: 'red' },
+    [LogChannel.frontpanel]:      { emoji: '⏻', color: 'red' },
 }
 
 export const ANSI: Record<ChannelColor, string> = {
@@ -52,6 +60,7 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.ocr]:             30,
     [LogChannel.device]:          30,
     [LogChannel.keyboard]:        30,
+    [LogChannel.mouse]:           30,
     [LogChannel.message_bus]:     30,
     [LogChannel.benchmark]:       30,
     [LogChannel.websocket]:       30,

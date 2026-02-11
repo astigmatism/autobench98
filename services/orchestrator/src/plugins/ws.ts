@@ -19,6 +19,7 @@ import {
 import type { AtlonaControllerService } from '../devices/atlona-controller/AtlonaControllerService.js'
 import type { CfImagerService } from '../devices/cf-imager/CfImagerService.js'
 import type { ClientKeyboardEvent } from '../devices/ps2-keyboard/types.js'
+import type { ClientMouseCommand, MouseButton } from '../devices/ps2-mouse/types.js'
 
 // ---------------------------
 // Log filtering configuration
@@ -106,6 +107,34 @@ function filterAndTransform(entries: ClientLog[]): ClientLog[] {
 // ---------------------------
 
 const LOGS_SNAPSHOT_DEFAULT = 200
+const LOGS_SNAPSHOT_MAX = 2000
+
+function clampHistoryCount(n: unknown, def: number): number {
+    const x = typeof n === 'number' ? n : typeof n === 'string' ? Number(n) : NaN
+    if (!Number.isFinite(x)) return def
+    const i = Math.trunc(x)
+    if (i < 0) return 0
+    if (i > LOGS_SNAPSHOT_MAX) return LOGS_SNAPSHOT_MAX
+    return i
+}
+
+function isFiniteNumber(v: unknown): v is number {
+    return typeof v === 'number' && Number.isFinite(v)
+}
+
+function parseMouseButton(v: unknown): MouseButton | null {
+    if (v === 'left' || v === 'right' || v === 'middle') return v
+    return null
+}
+
+function parseMouseButtonAction(v: unknown): 'down' | 'up' | 'click' | null {
+    if (v === 'down' || v === 'up' || v === 'click') return v
+    // legacy compatibility (optional)
+    if (v === 'press') return 'down'
+    if (v === 'release') return 'up'
+    return null
+}
+
 
 export default fp(async function wsPlugin(app: FastifyInstance) {
     // 🔁 Reuse shared buffer from app if present; otherwise create a local one.
@@ -605,6 +634,155 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
         }
     }
 
+    // add near other handlers
+    async function handlePs2MouseCommand(msg: any) {
+        const mouse = (app as any)?.ps2Mouse as any
+        if (!mouse) {
+            logWs.warn('received ps2-mouse.command but ps2Mouse service is not attached')
+            return
+        }
+
+        const payload = msg?.payload ?? {}
+        const kind = typeof payload.kind === 'string' ? payload.kind.trim() : ''
+        if (!kind) {
+            logWs.warn('ps2-mouse.command: missing kind')
+            return
+        }
+
+        const requestedBy =
+            typeof payload.requestedBy === 'string' && payload.requestedBy.trim()
+                ? payload.requestedBy.trim()
+                : 'ws-client'
+
+        try {
+            // Absolute move
+            if (kind === 'mouse.move.absolute') {
+                const xNormRaw = payload.xNorm ?? payload.x
+                const yNormRaw = payload.yNorm ?? payload.y
+
+                const xNorm = typeof xNormRaw === 'number' && Number.isFinite(xNormRaw) ? xNormRaw : 0
+                const yNorm = typeof yNormRaw === 'number' && Number.isFinite(yNormRaw) ? yNormRaw : 0
+
+                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseMoveAbsolute = {
+                    kind: 'mouse.move.absolute',
+                    xNorm,
+                    yNorm,
+                    requestedBy,
+                }
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
+            // Relative move (NO multiplier/gain here; that’s config)
+            if (kind === 'mouse.move.relative') {
+                const dxRaw = payload.dx
+                const dyRaw = payload.dy
+
+                const dx = typeof dxRaw === 'number' && Number.isFinite(dxRaw) ? dxRaw : 0
+                const dy = typeof dyRaw === 'number' && Number.isFinite(dyRaw) ? dyRaw : 0
+
+                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseMoveRelative = {
+                    kind: 'mouse.move.relative',
+                    dx,
+                    dy,
+                    requestedBy,
+                }
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
+            // Buttons
+            if (kind === 'mouse.button.down' || kind === 'mouse.button.up') {
+                const button = payload.button
+                if (button !== 'left' && button !== 'right' && button !== 'middle') {
+                    logWs.warn('ps2-mouse.command button: invalid button', { button })
+                    return
+                }
+
+                const cmd:
+                    | import('../devices/ps2-mouse/types.js').ClientMouseButtonDown
+                    | import('../devices/ps2-mouse/types.js').ClientMouseButtonUp = {
+                    kind,
+                    button,
+                    requestedBy,
+                }
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
+            if (kind === 'mouse.button.click') {
+                const button = payload.button
+                if (button !== 'left' && button !== 'right' && button !== 'middle') {
+                    logWs.warn('ps2-mouse.command click: invalid button', { button })
+                    return
+                }
+
+                const holdMsRaw = payload.holdMs
+                const holdMs =
+                    typeof holdMsRaw === 'number' && Number.isFinite(holdMsRaw) && holdMsRaw >= 0
+                        ? holdMsRaw
+                        : undefined
+
+                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseButtonClick = {
+                    kind: 'mouse.button.click',
+                    button,
+                    requestedBy,
+                    holdMs,
+                }
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
+            // Wheel (vertical only) — spec uses dy
+            if (kind === 'mouse.wheel') {
+                const dyRaw = payload.dy ?? payload.delta
+                const dy = typeof dyRaw === 'number' && Number.isFinite(dyRaw) ? dyRaw : 0
+
+                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseWheel = {
+                    kind: 'mouse.wheel',
+                    dy,
+                    requestedBy,
+                }
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
+            // Config (NO requestedBy in the type)
+            if (kind === 'mouse.config') {
+                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseConfig = {
+                    kind: 'mouse.config',
+                    mode: payload.mode,
+                    gain: payload.gain,
+                    accel: payload.accel,
+                    absoluteGrid: payload.absoluteGrid,
+                }
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
+            // Cancel all
+            if (kind === 'mouse.cancelAll') {
+                const reason =
+                    typeof payload.reason === 'string' && payload.reason.trim()
+                        ? payload.reason.trim()
+                        : undefined
+
+                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseCancelAll = {
+                    kind: 'mouse.cancelAll',
+                    reason,
+                    requestedBy,
+                }
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
+            logWs.warn('ps2-mouse.command: unknown kind', { kind })
+        } catch (e) {
+            logWs.warn('ps2-mouse.command failed', { kind, err: (e as Error).message })
+        }
+    }
+
+
     // NEW: Front panel WS ingress
     async function handleFrontPanelCommand(msg: any) {
         const svc = (app as any)?.frontPanel as any
@@ -749,13 +927,11 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
             startSnapshotTimer()
 
-            const snapshotCount = Math.max(
-                0,
-                Number(
-                    snap?.serverConfig?.logs?.snapshot ??
-                        process.env.CLIENT_LOGS_SNAPSHOT ??
-                        LOGS_SNAPSHOT_DEFAULT
-                )
+            const snapshotCount = clampHistoryCount(
+                snap?.serverConfig?.logs?.snapshot ??
+                    process.env.CLIENT_LOGS_SNAPSHOT ??
+                    LOGS_SNAPSHOT_DEFAULT,
+                LOGS_SNAPSHOT_DEFAULT
             )
 
             if (snapshotCount > 0) {
@@ -813,7 +989,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                             })
                         )
 
-                        const n = Number(msg?.payload?.logsHistory ?? 0)
+                        const n = clampHistoryCount(msg?.payload?.logsHistory ?? 0, 0)
                         if (n > 0) {
                             const raw = getLogHistory(n)
                             const filtered = filterAndTransform(raw)
@@ -847,7 +1023,11 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     return
                 }
 
-                // NEW: Front panel commands
+                if (msg?.type === 'ps2-mouse.command') {
+                    void handlePs2MouseCommand(msg)
+                    return
+                }
+                // Front panel commands
                 if (msg?.type === 'frontpanel.command') {
                     void handleFrontPanelCommand(msg)
                     return
@@ -861,6 +1041,11 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             sockets.delete(socket)
             stopSnapshotTimer()
             logWs.info('client disconnected')
+        })
+
+        socket.on('error', () => {
+            sockets.delete(socket)
+            stopSnapshotTimer()
         })
     })
 

@@ -464,6 +464,33 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
         }
       }
 
+      // ✅ PS2 mouse wiring
+      if (kind === 'arduino.ps2.mouse') {
+        const hook = (app as any).ps2MouseOnDeviceIdentified as
+          | ((info: { id: string; path: string; baudRate?: number }) => Promise<void> | void)
+          | undefined
+
+        const svc = (app as any).ps2Mouse as
+          | {
+              onDeviceIdentified: (info: { id: string; path: string; baudRate?: number }) => Promise<void> | void
+            }
+          | undefined
+
+        try {
+          if (typeof hook === 'function') {
+            await hook({ id, path, baudRate })
+          } else if (svc?.onDeviceIdentified) {
+            await svc.onDeviceIdentified({ id, path, baudRate })
+          }
+        } catch (err) {
+          log.warn(
+            `ps2Mouse.onDeviceIdentified failed id=${id} path=${path} err="${
+              (err as Error).message
+            }"`
+          )
+        }
+      }
+
       // 👉 Front panel wiring
       if (kind === 'arduino.frontpanel' && (app as any).frontPanel) {
         const fpSvc = (app as any).frontPanel as {
@@ -572,6 +599,29 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
           `ps2Keyboard.onDeviceLost failed id=${id} err="${
             (err as Error).message
           }"`
+        )
+      }
+    }
+
+    // ✅ PS2 mouse lost wiring
+    if (kind === 'arduino.ps2.mouse') {
+      const hook = (app as any).ps2MouseOnDeviceLost as
+        | ((info: { id: string }) => Promise<void> | void)
+        | undefined
+
+      const svc = (app as any).ps2Mouse as
+        | { onDeviceLost: (info: { id: string }) => Promise<void> | void }
+        | undefined
+
+      try {
+        if (typeof hook === 'function') {
+          await hook({ id })
+        } else if (svc?.onDeviceLost) {
+          await svc.onDeviceLost({ id })
+        }
+      } catch (err) {
+        log.warn(
+          `ps2Mouse.onDeviceLost failed id=${id} err="${(err as Error).message}"`
         )
       }
     }
