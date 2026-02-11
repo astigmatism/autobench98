@@ -142,9 +142,11 @@ async function handleHealth(_req, res) {
 
   if (!ok) {
     // Single-line, key=value style
+    /*
     log.sidecar.warn(
-      `health check indicates unhealthy state reasons=${JSON.stringify(reasons)}`
+     `health check indicates unhealthy state reasons=${JSON.stringify(reasons)}`
     )
+     */
   }
 
   sendJson(res, ok ? 200 : 503, payload)
