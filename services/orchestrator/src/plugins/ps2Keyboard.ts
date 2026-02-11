@@ -229,10 +229,17 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
       }
 
       /* ---------------- Firmware/Arduino-emitted sequence lines ------ */
-      case 'keyboard-debug-line': {
-        this.logKb.info(this.enrichFirmwareLine(evt.line))
+    case 'keyboard-debug-line': {
+        const raw = String(evt.line ?? '')
+        const line = this.enrichFirmwareLine(raw).trim()
+        if (!line) break
+
+        // Keep it single-line + key=value, like the rest of the system.
+        // If you later decide "done:" is too noisy, we can downshift those to debug.
+        this.logKb.info(`kind=keyboard-firmware line=${JSON.stringify(line)}`)
         break
-      }
+    }
+
 
       /* ---------------- Failures / cancellations / errors ----------- */
       case 'keyboard-operation-cancelled': {
