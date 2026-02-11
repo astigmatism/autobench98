@@ -92,10 +92,13 @@ const sidecarProxyPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
         lastHealthNon2xxAt = now
 
         // One-line log (no structured object dump).
+        // I dont want this. I realized its mainly just the previous stream sessions trying to reconnect after app restart
+        /*
         log.warn(
             // `sidecar health non-2xx statusCode=${statusCode} bodyPreview=${JSON.stringify(preview)}`
-            `sidecar health non-2xx statusCode=${statusCode}`
+            // `sidecar health non-2xx statusCode=${statusCode}`
         )
+        */
     }
 
     /**
