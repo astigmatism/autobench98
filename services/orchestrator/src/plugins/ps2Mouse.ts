@@ -65,23 +65,16 @@ class PS2MouseLoggerEventSink implements PS2MouseEventSink {
     }
 
     if (kind === 'mouse-debug-line') {
-    const raw = String((evt as any).line ?? '')
-    const line = this.fmtFirmwareLine(raw).trim()
-    if (!line) return
+        const raw = String((evt as any).line ?? '')
+        const line = this.fmtFirmwareLine(raw).trim()
+        if (!line) return
 
-    // Mouse sketch prints "done:" for every command; keep it visible but lower priority.
-    if (line.startsWith('done:')) {
-        this.logMouse.debug(line)
+        // Always single-line, key=value, and always visible at info.
+        // (If this gets too noisy later, we can add filtering by prefix.)
+        this.logMouse.info(`kind=mouse-firmware line=${JSON.stringify(line)}`)
         return
     }
 
-    // Most useful Arduino messages:
-    // - "debug: mouse accepts power ON command from keyboard simulator"
-    // - "debug: mouse sent enable data reporting"
-    // etc.
-    this.logMouse.info(line)
-    return
-    }
 
     if (kind === 'fatal-error') {
       this.logMouse.error(`kind=${kind} error=${evt.error?.message ?? 'unknown'}`)
