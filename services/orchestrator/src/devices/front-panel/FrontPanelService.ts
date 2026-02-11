@@ -565,6 +565,13 @@ export class FrontPanelService {
     })
   }
 
+  /**
+   * Identify-time line reader.
+   *
+   * Safety-critical note:
+   * Firmware may emit telemetry (e.g., POWER_LED_OFF) before the ID token.
+   * Those lines must not be treated as the identify token, or the device will flap.
+   */
   private async readLine(timeoutMs: number): Promise<string> {
     const start = now()
     let buf = ''
@@ -586,7 +593,10 @@ export class FrontPanelService {
         for (const l of lines) {
           const line = l.trim()
           if (!line) continue
-          if (line.startsWith('debug:')) continue
+
+          // Ignore identify-noise lines that can arrive before the expected token.
+          if (this.isIdentifyNoiseLine(line)) continue
+
           cleanup()
           finished = true
           resolve(line)
@@ -804,5 +814,18 @@ export class FrontPanelService {
     if (typeof err === 'string') return { at: now(), scope, message: err, retryable }
     if (err instanceof Error) return { at: now(), scope, message: err.message, retryable }
     return { at: now(), scope, message: 'unknown error', retryable }
+  }
+
+  /**
+   * Identify handshake noise filter.
+   *
+   * We must not treat early telemetry as the ID token.
+   * Known offenders observed in your logs: POWER_LED_OFF / POWER_LED_ON.
+   */
+  private isIdentifyNoiseLine(line: string): boolean {
+    if (line.startsWith('debug:')) return true
+    if (line.startsWith('POWER_LED_')) return true
+    if (line.startsWith('HDD_ACTIVE_')) return true
+    return false
   }
 }
