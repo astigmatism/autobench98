@@ -170,7 +170,7 @@ export class PS2KeyboardService {
    * - 'unknown' => do not block key ops (fail-open)
    * - 'off' => cancel queued key operations; active key op is cancelled best-effort
    */
-  public setHostPower(power: KeyboardPowerState, _why?: string): void {
+  public setHostPower(power: KeyboardPowerState): void {
     if (power === this.hostPower) return
 
     const prev = this.hostPower
@@ -654,44 +654,52 @@ export class PS2KeyboardService {
     const request = this.cfg.identify.request
     const completion = this.cfg.identify.completion
     const expected = this.cfg.expectedIdToken
+    const timeoutMs = this.cfg.identify.timeoutMs
 
-    // Interpret config literally:
-    // - timeoutMs applies per identify attempt
-    // - retries controls how many attempts we make on the same connection
-    const timeoutMs = Math.max(1, Math.trunc(this.cfg.identify.timeoutMs))
-    const retries = Math.max(1, Math.trunc(this.cfg.identify.retries))
-
-    // Small, bounded delay between attempts to allow Arduino reset-on-open to settle.
-    const retryBackoffMs = 100
-
+    // Conservative retry: some Arduino boards reset on serial open; first request can be missed.
+    // Use a small number of attempts but within the same overall timeout.
+    const attempts = 2
+    const overallDeadline = now() + timeoutMs
     let lastErr: unknown = null
 
     try {
-      for (let attempt = 1; attempt <= retries; attempt++) {
+      let token: string | null = null
+
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const remainingOverall = overallDeadline - now()
+        if (remainingOverall <= 0) break
+
+        // Write identify request (may be ignored if device is still booting).
+        await this.writeLine(request)
+
+        // Budget per-attempt wait; last attempt gets all remaining time.
+        const perAttemptMs =
+          attempt === attempts
+            ? remainingOverall
+            : Math.min(750, Math.max(150, Math.floor(remainingOverall / (attempts - attempt + 1))))
+
         try {
-          await this.writeLine(request)
-          const token = await this.readForExpectedToken(expected, timeoutMs)
-
-          await this.writeLine(completion)
-          this.identified = true
-          this.phase = 'ready'
-
-          this.events.publish({
-            kind: 'keyboard-identify-success',
-            at: now(),
-            token,
-          })
-
-          return
+          token = await this.readForExpectedToken(expected, perAttemptMs)
+          break
         } catch (err) {
           lastErr = err
-          if (attempt < retries) {
-            await sleep(retryBackoffMs)
-          }
+          // Continue to next attempt if time remains.
         }
       }
 
-      throw lastErr ?? new Error('identify failed')
+      if (!token) {
+        throw (lastErr ?? new Error('identify timeout')) as any
+      }
+
+      await this.writeLine(completion)
+      this.identified = true
+      this.phase = 'ready'
+
+      this.events.publish({
+        kind: 'keyboard-identify-success',
+        at: now(),
+        token,
+      })
     } catch (err) {
       this.identified = false
       this.phase = 'error'
