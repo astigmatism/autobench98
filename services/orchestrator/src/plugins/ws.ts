@@ -135,11 +135,27 @@ function parseMouseButtonAction(v: unknown): 'down' | 'up' | 'click' | null {
     return null
 }
 
-
 export default fp(async function wsPlugin(app: FastifyInstance) {
-    // 🔁 Reuse shared buffer from app if present; otherwise create a local one.
-    const shared = (app as unknown as { clientBuf?: ClientLogBuffer }).clientBuf
-    const clientBuf: ClientLogBuffer = shared ?? makeClientBuffer()
+    /**
+     * CRITICAL: keep ONE shared client log buffer across the app.
+     *
+     * If ws.ts creates its own buffer while device plugins push to app.clientBuf,
+     * the UI will appear to “not receive” device logs (including Arduino debug lines).
+     */
+    const appAny = app as unknown as { clientBuf?: ClientLogBuffer }
+    let clientBuf: ClientLogBuffer | undefined = appAny.clientBuf
+
+    if (!clientBuf) {
+        clientBuf = makeClientBuffer()
+        // Make it globally available for other plugins.
+        try {
+            // Fastify throws if already decorated; we only do this when missing.
+            app.decorate('clientBuf', clientBuf)
+        } catch {
+            // ignore; we still keep a working buffer locally
+        }
+        appAny.clientBuf = clientBuf
+    }
 
     const { channel } = createLogger('orchestrator:ws', clientBuf)
     const logWs = channel(LogChannel.websocket)
@@ -655,15 +671,62 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 : 'ws-client'
 
         try {
+            // Compatibility: older shape => { kind: 'mouse.button', action: 'down'|'up'|'click'|'press'|'release', button: ... }
+            if (kind === 'mouse.button') {
+                const button = parseMouseButton(payload.button)
+                const action = parseMouseButtonAction(payload.action)
+                if (!button || !action) {
+                    logWs.warn('ps2-mouse.command mouse.button: invalid button/action', {
+                        button: payload.button,
+                        action: payload.action
+                    })
+                    return
+                }
+
+                const mappedKind =
+                    action === 'click'
+                        ? ('mouse.button.click' as const)
+                        : action === 'down'
+                          ? ('mouse.button.down' as const)
+                          : ('mouse.button.up' as const)
+
+                const holdMsRaw = payload.holdMs
+                const holdMs =
+                    isFiniteNumber(holdMsRaw) && holdMsRaw >= 0 ? holdMsRaw : undefined
+
+                const cmd: ClientMouseCommand =
+                    mappedKind === 'mouse.button.click'
+                        ? {
+                              kind: 'mouse.button.click',
+                              button,
+                              requestedBy,
+                              holdMs
+                          }
+                        : mappedKind === 'mouse.button.down'
+                          ? {
+                                kind: 'mouse.button.down',
+                                button,
+                                requestedBy
+                            }
+                          : {
+                                kind: 'mouse.button.up',
+                                button,
+                                requestedBy
+                            }
+
+                mouse.handleClientCommand(cmd)
+                return
+            }
+
             // Absolute move
             if (kind === 'mouse.move.absolute') {
                 const xNormRaw = payload.xNorm ?? payload.x
                 const yNormRaw = payload.yNorm ?? payload.y
 
-                const xNorm = typeof xNormRaw === 'number' && Number.isFinite(xNormRaw) ? xNormRaw : 0
-                const yNorm = typeof yNormRaw === 'number' && Number.isFinite(yNormRaw) ? yNormRaw : 0
+                const xNorm = isFiniteNumber(xNormRaw) ? xNormRaw : 0
+                const yNorm = isFiniteNumber(yNormRaw) ? yNormRaw : 0
 
-                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseMoveAbsolute = {
+                const cmd: ClientMouseCommand = {
                     kind: 'mouse.move.absolute',
                     xNorm,
                     yNorm,
@@ -678,10 +741,10 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const dxRaw = payload.dx
                 const dyRaw = payload.dy
 
-                const dx = typeof dxRaw === 'number' && Number.isFinite(dxRaw) ? dxRaw : 0
-                const dy = typeof dyRaw === 'number' && Number.isFinite(dyRaw) ? dyRaw : 0
+                const dx = isFiniteNumber(dxRaw) ? dxRaw : 0
+                const dy = isFiniteNumber(dyRaw) ? dyRaw : 0
 
-                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseMoveRelative = {
+                const cmd: ClientMouseCommand = {
                     kind: 'mouse.move.relative',
                     dx,
                     dy,
@@ -693,37 +756,35 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
             // Buttons
             if (kind === 'mouse.button.down' || kind === 'mouse.button.up') {
-                const button = payload.button
-                if (button !== 'left' && button !== 'right' && button !== 'middle') {
-                    logWs.warn('ps2-mouse.command button: invalid button', { button })
+                const button = parseMouseButton(payload.button)
+                if (!button) {
+                    logWs.warn('ps2-mouse.command button: invalid button', { button: payload.button })
                     return
                 }
 
-                const cmd:
-                    | import('../devices/ps2-mouse/types.js').ClientMouseButtonDown
-                    | import('../devices/ps2-mouse/types.js').ClientMouseButtonUp = {
-                    kind,
-                    button,
-                    requestedBy,
-                }
+                const cmd: ClientMouseCommand =
+                    kind === 'mouse.button.down'
+                        ? { kind: 'mouse.button.down', button, requestedBy }
+                        : { kind: 'mouse.button.up', button, requestedBy }
+
                 mouse.handleClientCommand(cmd)
                 return
             }
 
             if (kind === 'mouse.button.click') {
-                const button = payload.button
-                if (button !== 'left' && button !== 'right' && button !== 'middle') {
-                    logWs.warn('ps2-mouse.command click: invalid button', { button })
+                const button = parseMouseButton(payload.button)
+                if (!button) {
+                    logWs.warn('ps2-mouse.command click: invalid button', { button: payload.button })
                     return
                 }
 
                 const holdMsRaw = payload.holdMs
                 const holdMs =
-                    typeof holdMsRaw === 'number' && Number.isFinite(holdMsRaw) && holdMsRaw >= 0
+                    isFiniteNumber(holdMsRaw) && holdMsRaw >= 0
                         ? holdMsRaw
                         : undefined
 
-                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseButtonClick = {
+                const cmd: ClientMouseCommand = {
                     kind: 'mouse.button.click',
                     button,
                     requestedBy,
@@ -736,9 +797,9 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             // Wheel (vertical only) — spec uses dy
             if (kind === 'mouse.wheel') {
                 const dyRaw = payload.dy ?? payload.delta
-                const dy = typeof dyRaw === 'number' && Number.isFinite(dyRaw) ? dyRaw : 0
+                const dy = isFiniteNumber(dyRaw) ? dyRaw : 0
 
-                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseWheel = {
+                const cmd: ClientMouseCommand = {
                     kind: 'mouse.wheel',
                     dy,
                     requestedBy,
@@ -749,7 +810,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
             // Config (NO requestedBy in the type)
             if (kind === 'mouse.config') {
-                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseConfig = {
+                const cmd: ClientMouseCommand = {
                     kind: 'mouse.config',
                     mode: payload.mode,
                     gain: payload.gain,
@@ -767,7 +828,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                         ? payload.reason.trim()
                         : undefined
 
-                const cmd: import('../devices/ps2-mouse/types.js').ClientMouseCancelAll = {
+                const cmd: ClientMouseCommand = {
                     kind: 'mouse.cancelAll',
                     reason,
                     requestedBy,
@@ -781,7 +842,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             logWs.warn('ps2-mouse.command failed', { kind, err: (e as Error).message })
         }
     }
-
 
     // NEW: Front panel WS ingress
     async function handleFrontPanelCommand(msg: any) {
@@ -817,7 +877,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             if (kind === 'powerPress') {
                 const durationMs = payload.durationMs
                 const ms =
-                    typeof durationMs === 'number' && Number.isFinite(durationMs)
+                    isFiniteNumber(durationMs)
                         ? durationMs
                         : undefined
                 const h = svc.powerPress?.(ms, requestedBy)
@@ -1074,7 +1134,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                   (op: any) => typeof op?.path === 'string' && op.path.startsWith('/powerMeter')
               )
             : false
-        
+
         // too much noise
         /*
         logWs.debug('broadcasting state.patch', {

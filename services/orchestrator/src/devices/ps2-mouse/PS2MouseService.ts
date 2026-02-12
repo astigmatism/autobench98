@@ -169,6 +169,27 @@ export class PS2MouseService {
 
   private moveTimer: NodeJS.Timeout | null = null
 
+  /**
+   * Identify safety fix:
+   * Do NOT attach a temporary port.on('data') listener that can drop lines.
+   * We route all inbound lines through handleData(), and (until identified)
+   * we also feed them into a FIFO that identify() consumes deterministically.
+   */
+  private pendingLines: string[] = []
+  private pendingLineWaiters: Array<{
+    resolve: (line: string) => void
+    reject: (err: Error) => void
+    timer: NodeJS.Timeout
+  }> = []
+  private static readonly MAX_PENDING_LINES = 256
+
+  /**
+   * Serial write serialization:
+   * Movement ticks and queued ops both write to the same port.
+   * Without serialization, bytes can interleave and corrupt firmware commands.
+   */
+  private writeSeq: Promise<void> = Promise.resolve()
+
   constructor(cfg: PS2MouseConfig, deps: { events: PS2MouseEventSink }) {
     this.cfg = cfg
     this.events = deps.events
@@ -270,6 +291,10 @@ export class PS2MouseService {
     this.reconnectAttempts = 0
 
     this.clearMovementState('service-stopping')
+
+    // Fail any identify waiters promptly.
+    this.failAllPendingLineWaiters(new Error('service stopping'))
+    this.pendingLines = []
   }
 
   /* ---------------------------------------------------------------------- */
@@ -736,6 +761,10 @@ export class PS2MouseService {
       this.phase = 'connecting'
       this.identified = false
 
+      // Reset identify FIFO for the new connection.
+      this.failAllPendingLineWaiters(new Error('superseded by new connection'))
+      this.pendingLines = []
+
       const port = new SerialPort({
         path,
         baudRate,
@@ -800,6 +829,10 @@ export class PS2MouseService {
     const id = this.deviceId
     const path = this.devicePath
 
+    // Fail any identify waiters promptly so identify() can't hang.
+    this.failAllPendingLineWaiters(new Error(`port closed: ${reason}`))
+    this.pendingLines = []
+
     this.requestCancelActiveOp(`device-disconnected:${reason}`)
     this.cancelAll(`device-disconnected:${reason}`)
     this.clearMovementState(`device-disconnected:${reason}`)
@@ -834,7 +867,10 @@ export class PS2MouseService {
     const completion = (this.cfg.identify as any)?.completion ?? 'identify_complete'
     const expected = String((this.cfg.identify as any)?.expectedToken ?? '').trim()
     const timeoutMsRaw = (this.cfg.identify as any)?.timeoutMs
-    const timeoutMs = typeof timeoutMsRaw === 'number' && Number.isFinite(timeoutMsRaw) ? Math.max(1, Math.trunc(timeoutMsRaw)) : 5000
+    const timeoutMs =
+      typeof timeoutMsRaw === 'number' && Number.isFinite(timeoutMsRaw)
+        ? Math.max(1, Math.trunc(timeoutMsRaw))
+        : 5000
 
     if (!expected) throw new Error('missing identify.expectedToken')
 
@@ -849,13 +885,13 @@ export class PS2MouseService {
         const remaining = deadline - safeNow()
         if (remaining <= 0) break
 
-        const line = await this.readLine(remaining)
+        const line = await this.takeNextLine(remaining)
         const t = line.trim()
         if (!t) continue
 
         // Arduino emits "debug:" lines (including power status) that can appear before the ID token.
+        // NOTE: We do NOT publish mouse-debug-line here because handleData already publishes every line.
         if (t.startsWith('debug:') || t.startsWith('done:')) {
-          this.events.publish({ kind: 'mouse-debug-line', line: t } as any)
           continue
         }
 
@@ -866,8 +902,7 @@ export class PS2MouseService {
           break
         }
 
-        // Not what we expected; treat as noise but keep it visible.
-        this.events.publish({ kind: 'mouse-debug-line', line: t } as any)
+        // Not what we expected; keep scanning until deadline.
       }
 
       if (!token) {
@@ -892,20 +927,44 @@ export class PS2MouseService {
     }
   }
 
+  /**
+   * Serialize all writes to the port to prevent interleaving bytes between
+   * movement ticks and discrete operations.
+   */
+  private queueWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeSeq.then(fn, fn)
+    this.writeSeq = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
   private async writeLine(line: string): Promise<void> {
+    // Cancellation is per-active-op; movement tick has no active op and is allowed.
     this.assertActiveOpNotCancelled()
-    if (!this.port || !this.port.isOpen) throw new Error('port not open')
 
-    const eol = ((this.cfg.identify as any)?.writeLineEnding ?? '\n') as string
+    return this.queueWrite(async () => {
+      // Re-check on execution; port could have closed while waiting in the write queue.
+      this.assertActiveOpNotCancelled()
+      if (!this.port || !this.port.isOpen) throw new Error('port not open')
 
-    await new Promise<void>((resolve, reject) => {
-      this.port!.write(`${line}${eol}`, (err) => {
-        if (err) return reject(err)
-        this.port!.drain((e) => (e ? reject(e) : resolve()))
+      const eol = ((this.cfg.identify as any)?.writeLineEnding ?? '\n') as string
+
+      await new Promise<void>((resolve, reject) => {
+        this.port!.write(`${line}${eol}`, (err) => {
+          if (err) return reject(err)
+          this.port!.drain((e) => (e ? reject(e) : resolve()))
+        })
       })
     })
   }
 
+  /**
+   * Legacy readLine() retained (not used by identify anymore).
+   * The prior implementation could drop lines if multiple arrived in a single chunk.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private async readLine(timeoutMs: number): Promise<string> {
     const start = safeNow()
     let buf = ''
@@ -950,31 +1009,79 @@ export class PS2MouseService {
     })
   }
 
-    private handleData(chunk: string): void {
-        // Accumulate
-        this.readBuffer += chunk
+  private takeNextLine(timeoutMs: number): Promise<string> {
+    const immediate = this.pendingLines.shift()
+    if (immediate != null) return Promise.resolve(immediate)
 
-        // Split on any common line ending: CRLF, LF, or CR
-        const parts = this.readBuffer.split(/\r\n|\n|\r/)
-        this.readBuffer = parts.pop() ?? ''
+    const t = Math.max(0, Math.trunc(timeoutMs))
 
-        for (const raw of parts) {
-            const line = raw.trim()
-            if (!line) continue
-            this.events.publish({ kind: 'mouse-debug-line', line } as any)
-        }
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.pendingLineWaiters.findIndex((w) => w.resolve === resolve)
+        if (idx >= 0) this.pendingLineWaiters.splice(idx, 1)
+        reject(new Error('identify timeout'))
+      }, t)
 
-        // Safety valve: if firmware prints without line endings, flush periodically
-        // so you still see *something* in logs instead of buffering forever.
-        const MAX_TAIL = 256
-        if (this.readBuffer.length > MAX_TAIL) {
-            const tail = this.readBuffer.trim()
-            if (tail) this.events.publish({ kind: 'mouse-debug-line', line: tail } as any)
-            this.readBuffer = ''
-        }
+      this.pendingLineWaiters.push({ resolve, reject, timer })
+    })
+  }
+
+  private enqueuePendingLine(line: string): void {
+    const waiter = this.pendingLineWaiters.shift()
+    if (waiter) {
+      clearTimeout(waiter.timer)
+      waiter.resolve(line)
+      return
     }
 
+    this.pendingLines.push(line)
+    if (this.pendingLines.length > PS2MouseService.MAX_PENDING_LINES) {
+      this.pendingLines.shift()
+    }
+  }
 
+  private failAllPendingLineWaiters(err: Error): void {
+    const waiters = this.pendingLineWaiters.splice(0, this.pendingLineWaiters.length)
+    for (const w of waiters) {
+      clearTimeout(w.timer)
+      try {
+        w.reject(err)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private handleData(chunk: string): void {
+    // Accumulate
+    this.readBuffer += chunk
+
+    // Split on any common line ending: CRLF, LF, or CR
+    const parts = this.readBuffer.split(/\r\n|\n|\r/)
+    this.readBuffer = parts.pop() ?? ''
+
+    for (const raw of parts) {
+      const line = raw.trim()
+      if (!line) continue
+
+      // Feed identify FIFO until identified, so identify() cannot miss early token responses.
+      if (!this.identified) {
+        this.enqueuePendingLine(line)
+      }
+
+      this.events.publish({ kind: 'mouse-debug-line', line } as any)
+    }
+
+    // Safety valve: if firmware prints without line endings, flush periodically
+    // so you still see *something* in logs instead of buffering forever.
+    // IMPORTANT: do not enqueue this tail into identify FIFO because it may be partial.
+    const MAX_TAIL = 256
+    if (this.readBuffer.length > MAX_TAIL) {
+      const tail = this.readBuffer.trim()
+      if (tail) this.events.publish({ kind: 'mouse-debug-line', line: tail } as any)
+      this.readBuffer = ''
+    }
+  }
 
   private handlePortError(port: SerialPort, err: Error): void {
     if (port !== this.port) return

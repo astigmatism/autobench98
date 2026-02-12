@@ -23,6 +23,16 @@ export type MouseMoveMode = 'absolute' | 'relative-gain' | 'relative-accel'
 export type MouseButton = 'left' | 'right' | 'middle'
 
 /**
+ * Lightweight, serializable-ish error shape.
+ * NOTE: real `Error` instances are structurally compatible with this type.
+ */
+export type ErrorLike = {
+  message: string
+  name?: string
+  stack?: string
+}
+
+/**
  * Absolute mapping grid configuration (spec v0.3 §9).
  */
 export type MouseAbsoluteGridConfig =
@@ -62,6 +72,25 @@ export type PS2MouseConfig = {
      * e.g. "MS" (mouse) as an ASCII token on a dedicated identify line.
      */
     expectedToken: string
+
+    /**
+     * Identify request command sent to firmware.
+     * PS2MouseService defaults to "identify" if omitted.
+     */
+    request?: string
+
+    /**
+     * Identify completion command sent to firmware after token is observed.
+     * PS2MouseService defaults to "identify_complete" if omitted.
+     */
+    completion?: string
+
+    /**
+     * Line ending used when writing commands to the Arduino.
+     * PS2MouseService defaults to "\n" if omitted.
+     */
+    writeLineEnding?: string
+
     timeoutMs: number
   }
 
@@ -269,7 +298,7 @@ export type MouseOperationResult = {
   ok: boolean
   startedAt?: number
   finishedAt?: number
-  error?: Error
+  error?: ErrorLike
 }
 
 /* -------------------------------------------------------------------------- */
@@ -314,7 +343,7 @@ export type PS2MouseEvent =
     }
   | {
       kind: 'mouse-identify-failed'
-      error?: Error
+      error?: ErrorLike
     }
 
   /* ---------------- Host power coordination ----------------------------- */
@@ -407,8 +436,8 @@ export type PS2MouseEvent =
   | { kind: 'mouse-operation-failed'; result?: MouseOperationResult }
 
   /* ---------------- Errors ---------------------------------------------- */
-  | { kind: 'recoverable-error'; error?: Error }
-  | { kind: 'fatal-error'; error?: Error }
+  | { kind: 'recoverable-error'; error?: ErrorLike }
+  | { kind: 'fatal-error'; error?: ErrorLike }
 
 /* -------------------------------------------------------------------------- */
 /*  State snapshot (device slice for AppState)                                */
