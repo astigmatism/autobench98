@@ -167,11 +167,6 @@ function buildMatchersFromRequired(
   })
 }
 
-/** Mirror SerialDiscoveryService's device id format (used to prune stale probe records). */
-function makeDiscoveryDeviceId(kind: string, path: string, vid?: string, pid?: string): string {
-  return `usb:${vid ?? 'unknown'}:${pid ?? 'unknown'}:${kind}:${path}`
-}
-
 // Shape we’ll expose to the app for readiness querying
 export type DeviceStatusSummary = {
   ready: boolean
@@ -332,22 +327,57 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
   }
 
   /**
-   * Prune the transient "unknown" probe record for a path once we have a real match.
-   * This avoids stale "identifying" rows hanging around in summaries and readiness views.
+   * Prune transient probe records for a path once we have a real match.
    *
-   * IMPORTANT: This is NOT a real device-lost event; it should not increment deltaLost.
+   * Why: probe ids can be built with vid/pid unavailable at probe time
+   * (usb:unknown:unknown:unknown:<path>), then later identified with real vid/pid.
+   *
+   * IMPORTANT: This is NOT a real device-lost event; do not bump deltaLost.
    */
-  const pruneUnknownProbeRecord = (path: string, vid?: string, pid?: string, keepId?: string) => {
-    const unknownId = makeDiscoveryDeviceId('unknown', path, vid, pid)
-    if (keepId && unknownId === keepId) return
-    if (!devices.has(unknownId)) return
+  const pruneUnknownProbeRecordsForPath = (path: string, keepId: string) => {
+    const removedIds: string[] = []
 
-    devices.delete(unknownId)
-    try {
-      opts?.stateAdapter?.remove?.(unknownId)
-    } catch (err) {
-      log.error(
-        `stateAdapter.remove (probe prune) failed err="${(err as Error).message}"`
+    // Fast path: try removing the most likely probe ids.
+    // (We intentionally try both "known" and "unknown" vid/pid forms.)
+    const likelyProbeIds = [
+      `usb:unknown:unknown:unknown:${path}`,
+    ]
+
+    for (const pid of likelyProbeIds) {
+      if (pid !== keepId && devices.has(pid)) {
+        devices.delete(pid)
+        removedIds.push(pid)
+        try {
+          opts?.stateAdapter?.remove?.(pid)
+        } catch (err) {
+          log.error(
+            `stateAdapter.remove (probe prune) failed err="${(err as Error).message}"`
+          )
+        }
+      }
+    }
+
+    // Robust path: scan for any lingering unknown+identifying record for this path.
+    for (const [id, rec] of devices.entries()) {
+      if (id === keepId) continue
+      if (rec.path !== path) continue
+      if (rec.kind !== 'unknown') continue
+      if (rec.status !== 'identifying') continue
+
+      devices.delete(id)
+      removedIds.push(id)
+      try {
+        opts?.stateAdapter?.remove?.(id)
+      } catch (err) {
+        log.error(
+          `stateAdapter.remove (probe prune) failed err="${(err as Error).message}"`
+        )
+      }
+    }
+
+    if (removedIds.length > 0) {
+      log.debug(
+        `pruned probe records path=${path} removed=${JSON.stringify(removedIds)}`
       )
     }
   }
@@ -391,8 +421,8 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
       const now = Date.now()
       const idToken = kindToIdToken.get(kind)
 
-      // ✅ Fix: remove stale "unknown" probe record for this same (path, vid, pid)
-      pruneUnknownProbeRecord(path, vid, pid, id)
+      // ✅ Prune stale probe record(s) for this path.
+      pruneUnknownProbeRecordsForPath(path, id)
 
       upsert({
         id,
