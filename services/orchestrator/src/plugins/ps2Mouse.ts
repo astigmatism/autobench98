@@ -71,11 +71,11 @@ class PS2MouseLoggerEventSink implements PS2MouseEventSink {
 
         // Always single-line, key=value.
         if (line.startsWith('done:')) {
-        this.logMouse.debug(`kind=mouse-firmware line=${JSON.stringify(line)}`)
+        this.logMouse.debug(`kind=ms-firmware line=${JSON.stringify(line)}`)
         return
         }
 
-        this.logMouse.info(`kind=mouse-firmware line=${JSON.stringify(line)}`)
+        this.logMouse.info(`kind=ms-firmware line=${JSON.stringify(line)}`)
         return
     }
 
