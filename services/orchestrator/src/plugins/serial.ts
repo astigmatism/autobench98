@@ -167,6 +167,11 @@ function buildMatchersFromRequired(
   })
 }
 
+/** Mirror SerialDiscoveryService's device id format (used to prune stale probe records). */
+function makeDiscoveryDeviceId(kind: string, path: string, vid?: string, pid?: string): string {
+  return `usb:${vid ?? 'unknown'}:${pid ?? 'unknown'}:${kind}:${path}`
+}
+
 // Shape we’ll expose to the app for readiness querying
 export type DeviceStatusSummary = {
   ready: boolean
@@ -326,15 +331,25 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
     if (existed) deltaLost++
   }
 
-  // Remove stale placeholder records that share the same path (e.g., 'unknown' identifying id),
-  // while keeping the canonical record id.
-  const pruneByPath = (path: string, keepId: string) => {
-    const toDelete: string[] = []
-    for (const [id, rec] of devices.entries()) {
-      if (id === keepId) continue
-      if (rec.path === path) toDelete.push(id)
+  /**
+   * Prune the transient "unknown" probe record for a path once we have a real match.
+   * This avoids stale "identifying" rows hanging around in summaries and readiness views.
+   *
+   * IMPORTANT: This is NOT a real device-lost event; it should not increment deltaLost.
+   */
+  const pruneUnknownProbeRecord = (path: string, vid?: string, pid?: string, keepId?: string) => {
+    const unknownId = makeDiscoveryDeviceId('unknown', path, vid, pid)
+    if (keepId && unknownId === keepId) return
+    if (!devices.has(unknownId)) return
+
+    devices.delete(unknownId)
+    try {
+      opts?.stateAdapter?.remove?.(unknownId)
+    } catch (err) {
+      log.error(
+        `stateAdapter.remove (probe prune) failed err="${(err as Error).message}"`
+      )
     }
-    for (const id of toDelete) remove(id)
   }
 
   // 👉 Public status function for the app (used by /ready and logs)
@@ -376,8 +391,8 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
       const now = Date.now()
       const idToken = kindToIdToken.get(kind)
 
-      // Ensure the identified record becomes the only record for this path.
-      pruneByPath(path, id)
+      // ✅ Fix: remove stale "unknown" probe record for this same (path, vid, pid)
+      pruneUnknownProbeRecord(path, vid, pid, id)
 
       upsert({
         id,
@@ -548,14 +563,8 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
   discovery.on('device:lost', async ({ id }) => {
     const rec = id ? devices.get(id) : undefined
     const kind = rec?.kind
-    const path = rec?.path
 
     remove(id)
-    if (path) {
-      // Defensive: remove any remaining ghosts for the same path.
-      pruneByPath(path, '__none__')
-    }
-
     log.warn(`device lost id=${id}`)
 
     if (kind === 'serial.powermeter' && (app as any).powerMeter) {
