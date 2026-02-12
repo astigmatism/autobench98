@@ -236,7 +236,7 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
 
         // Keep it single-line + key=value, like the rest of the system.
         // If you later decide "done:" is too noisy, we can downshift those to debug.
-        this.logKb.info(`kind=keyboard-firmware line=${JSON.stringify(line)}`)
+        this.logKb.info(`kind=arduino line=${JSON.stringify(line)}`)
         break
     }
 
