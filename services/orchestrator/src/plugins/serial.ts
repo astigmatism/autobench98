@@ -326,6 +326,17 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
     if (existed) deltaLost++
   }
 
+  // Remove stale placeholder records that share the same path (e.g., 'unknown' identifying id),
+  // while keeping the canonical record id.
+  const pruneByPath = (path: string, keepId: string) => {
+    const toDelete: string[] = []
+    for (const [id, rec] of devices.entries()) {
+      if (id === keepId) continue
+      if (rec.path === path) toDelete.push(id)
+    }
+    for (const id of toDelete) remove(id)
+  }
+
   // 👉 Public status function for the app (used by /ready and logs)
   const getDeviceStatus = (): DeviceStatusSummary => {
     const byStatus = tallyStatus()
@@ -364,6 +375,10 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
     async ({ id, path, vid, pid, kind, baudRate }) => {
       const now = Date.now()
       const idToken = kindToIdToken.get(kind)
+
+      // Ensure the identified record becomes the only record for this path.
+      pruneByPath(path, id)
+
       upsert({
         id,
         kind,
@@ -533,8 +548,14 @@ export default fp<SerialPluginOptions>(async function serialPlugin(
   discovery.on('device:lost', async ({ id }) => {
     const rec = id ? devices.get(id) : undefined
     const kind = rec?.kind
+    const path = rec?.path
 
     remove(id)
+    if (path) {
+      // Defensive: remove any remaining ghosts for the same path.
+      pruneByPath(path, '__none__')
+    }
+
     log.warn(`device lost id=${id}`)
 
     if (kind === 'serial.powermeter' && (app as any).powerMeter) {
