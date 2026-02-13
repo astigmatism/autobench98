@@ -85,6 +85,9 @@ export class PS2KeyboardService {
   /**
    * "power" here represents keyboard-side power control (Arduino command),
    * NOT the host PC power sense. Host power is tracked separately via hostPower.
+   *
+   * IMPORTANT: keyboard-side power is now driven ONLY by hostPower (AppState/frontPanel).
+   * Any external attempt to toggle keyboard-side power is deprecated (see powerOn/powerOff).
    */
   private power: KeyboardPowerState = 'unknown'
 
@@ -94,6 +97,9 @@ export class PS2KeyboardService {
    * Decisions you made:
    * - hostPower='unknown' => fail-open for key ops
    * - hostPower='off' => drop (cancel) queued key ops
+   *
+   * Additionally:
+   * - hostPower='on'/'off' => drive keyboard-side "power_on/power_off" pin state (when ready)
    */
   private hostPower: KeyboardPowerState = 'unknown'
 
@@ -167,8 +173,13 @@ export class PS2KeyboardService {
    * Update host power state as observed by the front panel service.
    *
    * Semantics:
-   * - 'unknown' => do not block key ops (fail-open)
+   * - 'unknown' => do not then block key ops (fail-open)
    * - 'off' => cancel queued key operations; active key op is cancelled best-effort
+   *
+   * ALSO:
+   * - When the device is ready, hostPower('on'/'off') is mirrored to keyboard-side
+   *   "power_on"/"power_off" so the Arduino can raise/lower its power pin (e.g. pin 5)
+   *   to inform downstream PS/2 devices (mouse) about host power state.
    */
   public setHostPower(power: KeyboardPowerState): void {
     if (power === this.hostPower) return
@@ -184,6 +195,10 @@ export class PS2KeyboardService {
         this.requestCancelActiveOp('host-power-off')
       }
     }
+
+    // Mirror host power to keyboard-side power (when ready).
+    // This is intentionally fire-and-forget (queued), since setHostPower is synchronous.
+    this.maybeSyncKeyboardSidePowerFromHostPower('app-state')
   }
 
   public getHostPower(): KeyboardPowerState {
@@ -323,42 +338,28 @@ export class PS2KeyboardService {
     })
   }
 
+  /**
+   * @deprecated Keyboard-side power is now derived exclusively from hostPower
+   * (front panel powerSense -> AppState -> plugin -> setHostPower()).
+   *
+   * This method is intentionally non-operative to prevent divergence between
+   * authoritative host power and keyboard-side power pin state.
+   */
   public powerOn(requestedBy?: string): KeyboardOperationHandle {
-    return this.enqueueOperation('powerOn', {
-      requestedBy,
-      label: 'power on',
-      execute: async () => {
-        await this.ensureReady()
-        // Note: this is keyboard-side power control; not gated on host power.
-        await this.writeLine('power_on')
-        this.power = 'on'
-        this.events.publish({
-          kind: 'keyboard-power-changed',
-          at: now(),
-          power: 'on',
-          requestedBy,
-        })
-      },
-    })
+    this.publishDeprecatedPowerUse('powerOn', requestedBy)
+    return this.immediateCancelledHandle('powerOn', 'deprecated')
   }
 
+  /**
+   * @deprecated Keyboard-side power is now derived exclusively from hostPower
+   * (front panel powerSense -> AppState -> plugin -> setHostPower()).
+   *
+   * This method is intentionally non-operative to prevent divergence between
+   * authoritative host power and keyboard-side power pin state.
+   */
   public powerOff(requestedBy?: string): KeyboardOperationHandle {
-    return this.enqueueOperation('powerOff', {
-      requestedBy,
-      label: 'power off',
-      execute: async () => {
-        await this.ensureReady()
-        // Note: this is keyboard-side power control; not gated on host power.
-        await this.writeLine('power_off')
-        this.power = 'off'
-        this.events.publish({
-          kind: 'keyboard-power-changed',
-          at: now(),
-          power: 'off',
-          requestedBy,
-        })
-      },
-    })
+    this.publishDeprecatedPowerUse('powerOff', requestedBy)
+    return this.immediateCancelledHandle('powerOff', 'deprecated')
   }
 
   /**
@@ -545,6 +546,9 @@ export class PS2KeyboardService {
       this.phase = 'connecting'
       this.identified = false
 
+      // New connection => keyboard-side power state is not known until we re-assert.
+      this.power = 'unknown'
+
       // Reset identify line FIFO for the new connection.
       this.failAllPendingLineWaiters(new Error('superseded by new connection'))
       this.pendingLines = []
@@ -625,6 +629,9 @@ export class PS2KeyboardService {
     this.heldModifiers.clear()
     this.readBuffer = ''
 
+    // Port is gone => we can no longer claim keyboard-side pin state.
+    this.power = 'unknown'
+
     if (port && port.isOpen) {
       this.closingPort = port
       await new Promise<void>((resolve) => port.close(() => resolve()))
@@ -676,7 +683,10 @@ export class PS2KeyboardService {
         const perAttemptMs =
           attempt === attempts
             ? remainingOverall
-            : Math.min(750, Math.max(150, Math.floor(remainingOverall / (attempts - attempt + 1))))
+            : Math.min(
+                750,
+                Math.max(150, Math.floor(remainingOverall / (attempts - attempt + 1)))
+              )
 
         try {
           token = await this.readForExpectedToken(expected, perAttemptMs)
@@ -700,6 +710,9 @@ export class PS2KeyboardService {
         at: now(),
         token,
       })
+
+      // Device is now ready: mirror host power to keyboard-side pin state if host power is known.
+      this.maybeSyncKeyboardSidePowerFromHostPower('app-state')
     } catch (err) {
       this.identified = false
       this.phase = 'error'
@@ -1032,9 +1045,111 @@ export class PS2KeyboardService {
     return kind === 'press' || kind === 'hold' || kind === 'release'
   }
 
+  private isPowerOpKind(kind: KeyboardOperationKind): boolean {
+    return kind === 'powerOn' || kind === 'powerOff'
+  }
+
   private assertKeyOpsAllowed(): void {
     // Fail-open for 'unknown' is implemented by only blocking on exact 'off'.
     if (this.hostPower === 'off') throw new CancelledError('host-power-off')
+  }
+
+  /**
+   * Mirror hostPower -> keyboard-side "power_on"/"power_off" (pin state) when possible.
+   * If device is not ready yet, we do nothing; identify() will call this once ready.
+   */
+  private maybeSyncKeyboardSidePowerFromHostPower(requestedBy: string): void {
+    const desired = this.hostPower
+    if (desired !== 'on' && desired !== 'off') return
+
+    // Only attempt when device is actually ready; otherwise we'd just fail ops noisily.
+    if (!this.port || !this.port.isOpen || !this.identified) return
+
+    if (this.power === desired) return
+
+    // Coalesce queued power ops so last-known host state wins.
+    this.cancelQueuedPowerOps('host-power-change')
+    if (this.activeOp && this.isPowerOpKind(this.activeOp.kind)) {
+      this.requestCancelActiveOp('host-power-change')
+    }
+
+    this.enqueueKeyboardSidePower(desired, requestedBy)
+  }
+
+  private enqueueKeyboardSidePower(desired: 'on' | 'off', requestedBy: string): void {
+    const kind: KeyboardOperationKind = desired === 'on' ? 'powerOn' : 'powerOff'
+    const wire = desired === 'on' ? 'power_on' : 'power_off'
+
+    this.enqueueOperation(kind, {
+      requestedBy,
+      label: `hostPower -> keyboard ${wire}`,
+      execute: async () => {
+        await this.ensureReady()
+        await this.writeLine(wire)
+        this.power = desired
+        this.events.publish({
+          kind: 'keyboard-power-changed',
+          at: now(),
+          power: desired,
+          requestedBy,
+        })
+      },
+    })
+  }
+
+  private cancelQueuedPowerOps(reason: string): void {
+    if (this.queue.length === 0) return
+
+    const keep: QueuedOp[] = []
+    for (const op of this.queue) {
+      if (this.isPowerOpKind(op.kind)) {
+        this.publishCancelled(op, reason)
+        op.resolve(this.makeCancellationResult(op, reason))
+      } else {
+        keep.push(op)
+      }
+    }
+    this.queue = keep
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*  Deprecated power entrypoints                                           */
+  /* ---------------------------------------------------------------------- */
+
+  private publishDeprecatedPowerUse(
+    method: 'powerOn' | 'powerOff',
+    requestedBy?: string
+  ): void {
+    this.events.publish({
+      kind: 'recoverable-error',
+      at: now(),
+      error: {
+        at: now(),
+        scope: 'protocol',
+        retryable: false,
+        message:
+          `Deprecated: PS2KeyboardService.${method}() was called` +
+          ` (requestedBy=${requestedBy ?? 'unknown'}). ` +
+          `Keyboard-side power is now driven by hostPower (front panel powerSense -> AppState -> setHostPower).`,
+      },
+    })
+  }
+
+  private immediateCancelledHandle(
+    kind: KeyboardOperationKind,
+    reason: string
+  ): KeyboardOperationHandle {
+    const id = makeOpId('kb')
+    const createdAt = now()
+    const result: KeyboardOperationResult = {
+      id,
+      kind,
+      status: 'cancelled',
+      startedAt: createdAt,
+      endedAt: now(),
+      reason,
+    }
+    return { id, kind, createdAt, done: Promise.resolve(result) }
   }
 
   /* ---------------------------------------------------------------------- */

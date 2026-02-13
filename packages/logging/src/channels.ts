@@ -16,10 +16,7 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
     [LogChannel.keyboard]:        { emoji: '⌨️', color: 'cyan' },
 
     // Mouse-specific channel
-    [LogChannel.mouse]:           { emoji: '🖱️', color: 'cyan' },
-
-    // Message bus channel
-    [LogChannel.message_bus]:     { emoji: '🚌', color: 'cyan' },
+    [LogChannel.mouse]:           { emoji: '🖱️', color: 'white' },
 
     [LogChannel.benchmark]:       { emoji: '⏱️', color: 'green' },
     [LogChannel.websocket]:       { emoji: '🔗', color: 'cyan' },
@@ -61,7 +58,6 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.device]:          30,
     [LogChannel.keyboard]:        30,
     [LogChannel.mouse]:           30,
-    [LogChannel.message_bus]:     30,
     [LogChannel.benchmark]:       30,
     [LogChannel.websocket]:       30,
     [LogChannel.app]:             30,

@@ -1,4 +1,5 @@
 // services/orchestrator/src/plugins/ws.ts
+
 import fp from 'fastify-plugin'
 import websocket from '@fastify/websocket'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
@@ -620,6 +621,8 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }
 
             if (kind === 'power') {
+                // DEPRECATED: keyboard-side power is now derived from host power sense (frontPanel/AppState).
+                // Keep handler for backwards compatibility but ignore the command to prevent divergence.
                 const state =
                     typeof payload.state === 'string' ? payload.state.trim().toLowerCase() : ''
                 if (state !== 'on' && state !== 'off') {
@@ -627,8 +630,10 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     return
                 }
 
-                if (state === 'on') kb.powerOn(requestedBy)
-                else kb.powerOff(requestedBy)
+                logWs.warn(
+                    'ps2-keyboard.command power is deprecated and ignored. Host power is authoritative (frontPanel powerSense -> AppState).',
+                    { state, requestedBy }
+                )
                 return
             }
 

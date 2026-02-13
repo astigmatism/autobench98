@@ -5,12 +5,8 @@ export enum LogChannel {
     stream = 'stream',
     ocr = 'ocr',
     device = 'device',
-
-    // Input devices
     keyboard = 'keyboard',
     mouse = 'mouse',
-
-    message_bus = 'message-bus',
     benchmark = 'benchmark',
     websocket = 'websocket',
     app = 'app',
