@@ -70,23 +70,33 @@ static void logPS2Rx(uint8_t cmd) {
 }
 
 static void logPS2ReadFail(int rc, uint8_t maybeByte) {
-  // Keep your original log shape, but explicitly mark as unreliable.
-  // Throttle repeated failures to reduce serial overhead.
+  // READ FAILURE NOTE:
+  // When keyboard.read(&command) returns rc != 0, the 'command' byte is NOT reliable.
+  // In practice it is often still 0x00 simply because we initialized it to 0x00.
+  // So the old log line ("recieved unknown: 00 ...") was misleading and extremely noisy.
+  //
+  // Also: printing to Serial inside a tight PS/2 loop adds overhead and can worsen timing,
+  // which can create *more* read failures and spam.
+  //
+  // We still keep counters for later diagnostics, but we intentionally SILENCE the log
+  // for now. If you need it back, re-enable the Serial prints below.
   readFailCount++;
   lastReadFailRc = rc;
   lastReadFailByte = maybeByte;
 
+  // Throttle bookkeeping retained (in case you re-enable prints later).
   unsigned long nowMs = millis();
   if (nowMs - lastReadFailLogMs < READ_FAIL_LOG_THROTTLE_MS) return;
   lastReadFailLogMs = nowMs;
 
-  Serial.print(F("debug: keyboard sim recieved unknown: "));
-  printHex2(lastReadFailByte);
-  Serial.print(F(" (read failed rc="));
-  Serial.print(lastReadFailRc);
-  Serial.print(F("; byte unreliable; fails="));
-  Serial.print(readFailCount);
-  Serial.println(F(")"));
+  // --- intentionally silenced ---
+  // Serial.print(F("debug: keyboard sim recieved unknown: "));
+  // printHex2(lastReadFailByte);
+  // Serial.print(F(" (read failed rc="));
+  // Serial.print(lastReadFailRc);
+  // Serial.print(F("; byte unreliable; fails="));
+  // Serial.print(readFailCount);
+  // Serial.println(F(")"));
 }
 
 static void logLEDValue(uint8_t val) {
@@ -105,7 +115,6 @@ static void logLEDValue(uint8_t val) {
 }
 
 static float typematicRateCps(uint8_t rateBits0to4) {
-  // Spec table mapping bits 0-4 => cps (Set Typematic Rate/Delay). :contentReference[oaicite:4]{index=4}
   static const float rates[32] = {
     30.0f, 26.7f, 24.0f, 21.8f, 20.7f, 18.5f, 17.1f, 16.0f,
     15.0f, 13.3f, 12.0f, 10.9f, 10.0f,  9.2f,  8.6f,  8.0f,
@@ -116,7 +125,6 @@ static float typematicRateCps(uint8_t rateBits0to4) {
 }
 
 static unsigned int typematicDelayMs(uint8_t delayBits5to6) {
-  // Spec: 00=0.25s, 01=0.50s, 10=0.75s, 11=1.00s :contentReference[oaicite:5]{index=5}
   switch ((delayBits5to6 >> 5) & 0x03) {
     case 0: return 250;
     case 1: return 500;
@@ -243,7 +251,7 @@ void handlePS2Communication() {
     logPS2Rx(command);
     keyboard_command(command);
   } else {
-    // This is NOT a reliable "host byte"; log as read failure.
+    // Read failed; 'command' byte is unreliable (see logPS2ReadFail comment).
     logPS2ReadFail(rc, command);
   }
 }
@@ -319,7 +327,7 @@ void keyboard_command(unsigned char command) {
         ack();
 
         if (val == 0x00) {
-          // Spec: if argument is 0x00, respond with current scan code set. :contentReference[oaicite:6]{index=6}
+          // If argument is 0x00, respond with current scan code set.
           while (keyboard.write(currentScanSet) != 0) delay(1);
           lastByte = currentScanSet;
 
@@ -373,12 +381,10 @@ void keyboard_command(unsigned char command) {
     case 0xF6: // Set defaults
       Serial.println(F("debug: keyboard set defaults"));
       ack();
-      // For visibility: reflect defaults commonly expected after reset. :contentReference[oaicite:7]{index=7}
       currentScanSet = 0x02;
       break;
 
-    // These are valid host commands per common references; you may see them rarely.
-    // For compatibility, we only ACK (we do not implement per-key list parsing here).
+    // Valid host commands per common references; we ACK only.
     case 0xF7:
     case 0xF8:
     case 0xF9:
