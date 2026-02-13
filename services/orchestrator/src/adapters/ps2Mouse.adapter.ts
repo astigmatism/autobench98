@@ -46,10 +46,25 @@ export function createPS2MouseAdapter(opts: {
   maxErrorHistory?: number
   maxOperationHistory?: number
   initial?: Partial<PS2MouseStateSlice>
+
+  /**
+   * Optional noise controls:
+   * - suppressQueueDepth: stop updating slice.queueDepth/busy via mouse-queue-depth events
+   * - suppressMoveTicks:  stop updating slice.lastMoveAt via mouse-move-tick events
+   *
+   * These do NOT affect device control. They only reduce state churn.
+   */
+  suppressQueueDepth?: boolean
+  suppressMoveTicks?: boolean
 }): PS2MouseAdapter {
+
   const now = opts.now ?? (() => Date.now())
   const maxErrorHistory = clampInt(opts.maxErrorHistory ?? 25, 0, 500)
   const maxOperationHistory = clampInt(opts.maxOperationHistory ?? 100, 0, 2000)
+
+  const suppressQueueDepth = !!opts.suppressQueueDepth
+  const suppressMoveTicks = !!opts.suppressMoveTicks
+
 
   let slice: PS2MouseStateSlice = applyInitial(createInitialSlice(now()), opts.initial)
 
@@ -59,7 +74,10 @@ export function createPS2MouseAdapter(opts: {
       now,
       maxErrorHistory,
       maxOperationHistory,
+      suppressQueueDepth,
+      suppressMoveTicks,
     })
+
 
     slice = next
 
@@ -86,7 +104,10 @@ type ReduceCtx = {
   now: () => number
   maxErrorHistory: number
   maxOperationHistory: number
+  suppressQueueDepth: boolean
+  suppressMoveTicks: boolean
 }
+
 
 function reduce(prev: PS2MouseStateSlice, evt: PS2MouseEvent, ctx: ReduceCtx): PS2MouseStateSlice {
   const t = ctx.now()
@@ -261,8 +282,10 @@ function reduce(prev: PS2MouseStateSlice, evt: PS2MouseEvent, ctx: ReduceCtx): P
     }
 
     case 'mouse-move-tick': {
+      if (ctx.suppressMoveTicks) return prev
       return set({ lastMoveAt: t })
     }
+
 
     case 'mouse-wheel': {
       return set({ lastWheelAt: t })
@@ -468,6 +491,7 @@ function reduce(prev: PS2MouseStateSlice, evt: PS2MouseEvent, ctx: ReduceCtx): P
     /* ------------------------- Queue / operations ------------------------ */
 
     case 'mouse-queue-depth': {
+      if (ctx.suppressQueueDepth) return prev
       const e = evt as any
       const depth = clampInt(e.depth, 0, 1_000_000)
       const busy = depth > 0 || prev.currentOp !== null

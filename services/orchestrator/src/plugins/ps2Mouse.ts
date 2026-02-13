@@ -47,118 +47,216 @@ declare module 'fastify' {
 class PS2MouseLoggerEventSink implements PS2MouseEventSink {
   private readonly logMouse: ReturnType<ReturnType<typeof createLogger>['channel']>
 
+  // Log policy toggles (env-controlled)
+  private readonly logOpLifecycle: boolean
+  private readonly logQueueDepth: boolean
+  private readonly logMoveTick: boolean
+  private readonly firmwareLevel: 'off' | 'debug' | 'info'
+
   constructor(app: FastifyInstance) {
     const { channel } = createLogger('ps2-mouse', app.clientBuf)
 
     // Prefer a dedicated channel if it exists; fall back safely.
     const ch = ((LogChannel as any).mouse ?? (LogChannel as any).keyboard ?? LogChannel.app) as any
     this.logMouse = channel(ch)
+
+    const env = process.env
+
+    // Defaults are QUIET (no lifecycle bookkeeping spam).
+    // Turn on when debugging queue/backlog behavior.
+    this.logOpLifecycle = env.AB_LOG_PS2_MOUSE_OPS === '1'
+    this.logQueueDepth = env.AB_LOG_PS2_MOUSE_QUEUE === '1'
+    this.logMoveTick = env.AB_LOG_PS2_MOUSE_MOVE_TICK === '1'
+
+    // Firmware serial prints are chatty by design; default them to DEBUG.
+    const fw = String(env.AB_LOG_PS2_MOUSE_FIRMWARE ?? 'debug').toLowerCase()
+    this.firmwareLevel = fw === 'off' || fw === '0' ? 'off' : fw === 'info' ? 'info' : 'debug'
   }
 
   publish(evt: PS2MouseEvent): void {
-    const kind = evt.kind
+    // IMPORTANT:
+    // Your PS2MouseEvent.kind union may be narrower than runtime.
+    // Switching on a string avoids TS rejecting legitimate runtime kinds.
+    const e = evt as any
+    const kind = String(e?.kind ?? '')
 
-    // Reduce noise: movement tick is high-volume by design.
-    if (kind === 'mouse-move-tick') {
-        this.logMouse.debug(`kind=${kind}`)
-    return
-    }
-
-    if (kind === 'mouse-debug-line') {
-        const raw = String((evt as any).line ?? '')
-        const line = this.fmtFirmwareLine(raw).trim()
-        if (!line) return
-
-        // Always single-line, key=value.
-        if (line.startsWith('done:')) {
-        this.logMouse.debug(`kind=ms-firmware line=${JSON.stringify(line)}`)
-        return
-        }
-
-        this.logMouse.info(`kind=ms-firmware line=${JSON.stringify(line)}`)
-        return
-    }
-
-
-    if (kind === 'fatal-error') {
-      this.logMouse.error(`kind=${kind} error=${evt.error?.message ?? 'unknown'}`)
-      return
-    }
-
-    if (kind === 'recoverable-error') {
-      this.logMouse.warn(`kind=${kind} error=${evt.error?.message ?? 'unknown'}`)
-      return
-    }
+    // ------------------------------------------------------------------
+    // Hard allowlist / policy gates for known-noisy bookkeeping events
+    // ------------------------------------------------------------------
 
     if (
-      kind === 'mouse-identify-failed' ||
-      kind === 'mouse-operation-failed' ||
-      kind === 'mouse-device-disconnected'
+      kind === 'mouse-operation-queued' ||
+      kind === 'mouse-operation-started' ||
+      kind === 'mouse-operation-progress' ||
+      kind === 'mouse-operation-completed'
     ) {
-      if (kind === 'mouse-device-disconnected') {
-        this.logMouse.warn(`kind=${kind} id=${evt.id} path=${evt.path} reason=${evt.reason}`)
-      } else if (kind === 'mouse-identify-failed') {
-        this.logMouse.warn(`kind=${kind} error=${evt.error?.message ?? 'unknown'}`)
+      if (!this.logOpLifecycle) return
+      this.logMouse.debug(`kind=${kind}`)
+      return
+    }
+
+    if (kind === 'mouse-queue-depth') {
+      if (!this.logQueueDepth) return
+      this.logMouse.debug(`kind=${kind} depth=${e?.depth ?? '—'}`)
+      return
+    }
+
+    if (kind === 'mouse-move-tick') {
+      if (!this.logMoveTick) return
+      this.logMouse.debug(
+        `kind=${kind} mode=${e?.mode ?? '—'} x=${e?.x ?? '—'} y=${e?.y ?? '—'} dx=${e?.dx ?? '—'} dy=${e?.dy ?? '—'}`
+      )
+      return
+    }
+
+    // ------------------------------------------------------------------
+    // Firmware line handling (mouse Arduino Serial.println)
+    // ------------------------------------------------------------------
+
+    if (kind === 'mouse-debug-line') {
+      const raw = String(e?.line ?? '')
+      const line = this.fmtFirmwareLine(raw).trim()
+      if (!line) return
+
+      // Escalate “bad” firmware lines regardless of requested level
+      const lower = line.toLowerCase()
+      const looksBad =
+        lower.includes('failed') ||
+        lower.includes('error') ||
+        lower.includes('timeout') ||
+        lower.includes('unknown') ||
+        lower.includes('unreliable')
+
+      if (looksBad) {
+        this.logMouse.warn(`kind=ms-firmware line=${JSON.stringify(line)}`)
+        return
+      }
+
+      // Quiet by default: firmware chatter goes to debug unless user asks for info.
+      if (this.firmwareLevel === 'off') return
+      if (this.firmwareLevel === 'info') {
+        this.logMouse.info(`kind=ms-firmware line=${JSON.stringify(line)}`)
       } else {
-        this.logMouse.warn(`kind=${kind}`)
+        this.logMouse.debug(`kind=ms-firmware line=${JSON.stringify(line)}`)
       }
       return
     }
 
-    // Default informational events
-    if (kind === 'mouse-device-connected') {
-      this.logMouse.info(`kind=${kind} id=${evt.id} path=${evt.path} baud=${evt.baudRate}`)
-      return
-    }
-    if (kind === 'mouse-device-identified') {
-      this.logMouse.info(`kind=${kind} id=${evt.id} path=${evt.path} baud=${evt.baudRate} token=${evt.token}`)
-      return
-    }
-    if (kind === 'mouse-identify-start') {
-      this.logMouse.info(`kind=${kind} path=${evt.path}`)
-      return
-    }
-    if (kind === 'mouse-identify-success') {
-      this.logMouse.info(`kind=${kind} token=${evt.token}`)
-      return
-    }
-    if (kind === 'mouse-device-lost') {
-      this.logMouse.warn(`kind=${kind} id=${evt.id}`)
-      return
-    }
-    if (kind === 'mouse-host-power-changed') {
-      this.logMouse.info(`kind=${kind} prev=${evt.prev} power=${evt.power} why=${evt.why}`)
+    // ------------------------------------------------------------------
+    // Always-surface events (actionable / important)
+    // ------------------------------------------------------------------
+
+    if (kind === 'fatal-error') {
+      this.logMouse.error(`kind=${kind} error=${e?.error?.message ?? 'unknown'}`)
       return
     }
 
-    this.logMouse.info(`kind=${kind}`)
+    if (kind === 'recoverable-error') {
+      this.logMouse.warn(`kind=${kind} error=${e?.error?.message ?? 'unknown'}`)
+      return
+    }
+
+    if (kind === 'mouse-operation-cancelled') {
+      // Cancellations are meaningful when debugging power policy; keep as warn.
+      const opId = e?.opId ?? e?.id ?? e?.result?.id ?? 'unknown'
+      const reason = e?.reason ?? 'cancelled'
+      this.logMouse.warn(`kind=${kind} opId=${opId} reason=${reason}`)
+      return
+    }
+
+    if (kind === 'mouse-operation-failed') {
+      const opId = e?.result?.id ?? e?.opId ?? e?.id ?? 'unknown'
+      const err = e?.result?.error?.message ?? e?.error?.message ?? 'unknown'
+      this.logMouse.warn(`kind=${kind} opId=${opId} error=${err}`)
+      return
+    }
+
+    if (kind === 'mouse-button') {
+      this.logMouse.info(
+        `kind=${kind} button=${e?.button ?? '—'} action=${e?.action ?? '—'}${e?.noOp ? ` noOp=true reason=${e?.noOpReason ?? '—'}` : ''}`
+      )
+      return
+    }
+
+    if (kind === 'mouse-wheel') {
+      this.logMouse.info(`kind=${kind} dy=${e?.dy ?? '—'}`)
+      return
+    }
+
+    if (kind === 'mouse-config-applied') {
+      this.logMouse.info(`kind=${kind}`)
+      return
+    }
+
+    if (kind === 'mouse-device-disconnected') {
+      this.logMouse.warn(`kind=${kind} id=${e?.id} path=${e?.path} reason=${e?.reason}`)
+      return
+    }
+
+    if (kind === 'mouse-device-connected') {
+      this.logMouse.info(`kind=${kind} id=${e?.id} path=${e?.path} baud=${e?.baudRate}`)
+      return
+    }
+
+    if (kind === 'mouse-device-identified') {
+      this.logMouse.info(`kind=${kind} id=${e?.id} path=${e?.path} baud=${e?.baudRate} token=${e?.token}`)
+      return
+    }
+
+    if (kind === 'mouse-identify-failed') {
+      this.logMouse.warn(`kind=${kind} error=${e?.error?.message ?? 'unknown'}`)
+      return
+    }
+
+    if (kind === 'mouse-identify-start') {
+      this.logMouse.info(`kind=${kind} path=${e?.path}`)
+      return
+    }
+
+    if (kind === 'mouse-identify-success') {
+      this.logMouse.info(`kind=${kind} token=${e?.token}`)
+      return
+    }
+
+    if (kind === 'mouse-device-lost') {
+      this.logMouse.warn(`kind=${kind} id=${e?.id}`)
+      return
+    }
+
+    if (kind === 'mouse-host-power-changed') {
+      this.logMouse.info(`kind=${kind} prev=${e?.prev} power=${e?.power} why=${e?.why}`)
+      return
+    }
+
+    // Default: keep unknown events visible, but not loud.
+    this.logMouse.debug(`kind=${kind}`)
   }
 
   private fmtFirmwareLine(line: string): string {
     let needsEscape = false
     for (let i = 0; i < line.length; i++) {
-        const c = line.charCodeAt(i)
-        // allow tab; everything else < 0x20 or DEL treated as control
-        if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+      const c = line.charCodeAt(i)
+      // allow tab; everything else < 0x20 or DEL treated as control
+      if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
         needsEscape = true
         break
-        }
+      }
     }
     if (!needsEscape) return line
 
     let out = ''
     for (let i = 0; i < line.length; i++) {
-        const c = line.charCodeAt(i)
-        if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+      const c = line.charCodeAt(i)
+      if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
         out += `\\x${c.toString(16).padStart(2, '0')}`
-        } else {
+      } else {
         out += line[i]
-        }
+      }
     }
     return out
-    }
-
+  }
 }
+
 
 /* -------------------------------------------------------------------------- */
 /*  Fanout sink: logger + state adapter                                       */
@@ -241,10 +339,14 @@ const ps2MousePlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
   const loggerSink = new PS2MouseLoggerEventSink(app)
 
   // Use the existing reducer adapter EXACTLY as provided.
-  const stateAdapter = createPS2MouseAdapter({
-    initial: peekSlice('ps2Mouse') as any,
-    onSlice: (next) => updatePS2MouseSnapshot(next),
-  })
+const stateAdapter = createPS2MouseAdapter({
+  initial: peekSlice('ps2Mouse') as any,
+  onSlice: (next) => updatePS2MouseSnapshot(next),
+
+  // Default: suppress state churn unless explicitly enabled
+  suppressQueueDepth: process.env.AB_STATE_PS2_MOUSE_QUEUE !== '1',
+  suppressMoveTicks: process.env.AB_STATE_PS2_MOUSE_MOVE_TICK !== '1',
+})
 
   const events: PS2MouseEventSink = new FanoutPS2MouseEventSink(loggerSink, stateAdapter.sink)
 
