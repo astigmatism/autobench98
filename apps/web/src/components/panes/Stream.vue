@@ -280,7 +280,7 @@
 
                         <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
                             <div class="kb-overlay-inner">
-                                <span class="kb-hint">Press <b>Ctrl+Esc</b> to cancel input capture</span>
+                                <span class="kb-hint">Press <b>Esc</b> to exit input capture</span>
                             </div>
                         </div>
                     </div>
@@ -763,7 +763,7 @@ watch(
 )
 
 /* -------------------------------------------------------------------------- */
-/*  Keyboard capture                                                          */
+/*  Keyboard capture (pointer lock is the ONLY capture mode)                  */
 /* -------------------------------------------------------------------------- */
 
 const captureRef = ref<HTMLElement | null>(null)
@@ -783,6 +783,34 @@ const MODIFIER_CODES = new Set<string>([
 
 const heldModifiers = new Set<string>()
 const canCapture = computed(() => enabled.value)
+
+function isPointerLockedToCaptureEl(): boolean {
+    const el = captureRef.value
+    if (!el) return false
+    return document.pointerLockElement === el
+}
+
+function requestPointerLock() {
+    const el = captureRef.value
+    if (!el) return
+    if (!canCapture.value) return
+    if (document.pointerLockElement === el) return
+
+    try {
+        ;(el as any).requestPointerLock?.()
+    } catch {
+        // ignore
+    }
+}
+
+function exitPointerLock() {
+    if (!isPointerLockedToCaptureEl()) return
+    try {
+        document.exitPointerLock?.()
+    } catch {
+        // ignore
+    }
+}
 
 function focusCaptureLayer(): boolean {
     const el = captureRef.value
@@ -804,11 +832,11 @@ function armCaptureFromMouse() {
 
     refreshWsClient()
 
-    isCapturing.value = true
-    armOnNextFocus.value = false
-
     const focused = focusCaptureLayer()
-    if (!focused) armOnNextFocus.value = true
+    armOnNextFocus.value = !focused
+
+    // Pointer lock is the capture mechanism; isCapturing flips on pointerlockchange.
+    requestPointerLock()
 }
 
 function releaseCapture(opts?: { fromBlur?: boolean }) {
@@ -832,27 +860,60 @@ function releaseCapture(opts?: { fromBlur?: boolean }) {
     }
 }
 
+function onPointerLockChange() {
+    const locked = isPointerLockedToCaptureEl()
+
+    if (locked) {
+        // Enter capture: lock implies exclusive keyboard+mouse mode.
+        isCapturing.value = true
+        armOnNextFocus.value = false
+        refreshWsClient()
+        focusCaptureLayer()
+        return
+    }
+
+    // Exit capture: pointer lock released (Esc, browser, focus change, etc)
+    if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value) {
+        releaseCapture()
+    } else {
+        armOnNextFocus.value = false
+    }
+}
+
+function onPointerLockError() {
+    // Best-effort: ensure we don't get stuck in a "capturing" UI state.
+    if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value) {
+        releaseCapture()
+    }
+}
+
+onMounted(() => {
+    document.addEventListener('pointerlockchange', onPointerLockChange)
+    document.addEventListener('pointerlockerror', onPointerLockError)
+})
+
 function onFocusCapture() {
     if (!canCapture.value) {
+        if (isPointerLockedToCaptureEl()) exitPointerLock()
         releaseCapture()
         return
     }
 
     refreshWsClient()
 
-    if (armOnNextFocus.value) {
-        isCapturing.value = true
-        armOnNextFocus.value = false
-    }
+    // With pointer lock capture, focus alone does not enable capture.
+    armOnNextFocus.value = false
 }
 
 function onBlurCapture() {
-    if (!isCapturing.value && !armOnNextFocus.value) return
-    releaseCapture({ fromBlur: true })
-}
+    // If we blur while locked, force-unlock; pointerlockchange will clean up.
+    if (isPointerLockedToCaptureEl()) {
+        exitPointerLock()
+        return
+    }
 
-function isReleaseCombo(e: KeyboardEvent): boolean {
-    return e.code === 'Escape' && e.ctrlKey
+    if (!isCapturing.value && !armOnNextFocus.value && heldModifiers.size === 0) return
+    releaseCapture({ fromBlur: true })
 }
 
 function blockBrowser(e: KeyboardEvent) {
@@ -863,14 +924,14 @@ function blockBrowser(e: KeyboardEvent) {
 function onKeyDown(e: KeyboardEvent) {
     if (!isCapturing.value) return
 
-    if (isReleaseCombo(e)) {
+    const code = e.code || ''
+    if (!code) {
         blockBrowser(e)
-        releaseCapture()
         return
     }
 
-    const code = e.code || ''
-    if (!code) {
+    // Escape is reserved for pointer lock exit; do NOT forward it to the client.
+    if (code === 'Escape') {
         blockBrowser(e)
         return
     }
@@ -908,7 +969,12 @@ function onKeyUp(e: KeyboardEvent) {
 watch(
     () => enabled.value,
     (v) => {
-        if (!v && (isCapturing.value || armOnNextFocus.value)) releaseCapture()
+        if (v) return
+        if (isPointerLockedToCaptureEl()) {
+            exitPointerLock()
+            return
+        }
+        if (isCapturing.value || armOnNextFocus.value) releaseCapture()
     }
 )
 
@@ -1450,7 +1516,11 @@ function onEnabledChange() {
     if (enabled.value) {
         reloadStream()
     } else {
-        if (isCapturing.value || armOnNextFocus.value) releaseCapture()
+        if (isPointerLockedToCaptureEl()) {
+            exitPointerLock()
+        } else if (isCapturing.value || armOnNextFocus.value) {
+            releaseCapture()
+        }
     }
 }
 
@@ -1459,6 +1529,7 @@ function reloadStream() {
 }
 
 onBeforeUnmount(() => {
+    if (isPointerLockedToCaptureEl()) exitPointerLock()
     if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0) releaseCapture()
 
     // best-effort: release front panel holds if pane unmounts mid-hold
@@ -1470,6 +1541,9 @@ onBeforeUnmount(() => {
         resetHeldByClient.value = false
         sendFrontPanel('resetRelease')
     }
+
+    document.removeEventListener('pointerlockchange', onPointerLockChange)
+    document.removeEventListener('pointerlockerror', onPointerLockError)
 
     if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
     if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
