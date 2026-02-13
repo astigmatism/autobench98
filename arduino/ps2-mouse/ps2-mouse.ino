@@ -41,7 +41,7 @@ static void logWriteFailThrottled(const __FlashStringHelper* what) {
   if (nowMs - lastWriteFailLogMs < WRITE_FAIL_LOG_THROTTLE_MS) return;
   lastWriteFailLogMs = nowMs;
 
-  Serial.print(F("debug: mouse write failed (timeout) during "));
+  Serial.print(F("mouse write failed (timeout) during "));
   Serial.println(what);
 }
 
@@ -76,14 +76,14 @@ void loop() {
   if (currentPowerStatus != lastPowerStatus) {
     if (currentPowerStatus) {
       isPCPoweredOn = true;
-      Serial.println(F("debug: mouse observed POWER_STATUS_PIN HIGH (PC power ON signal from keyboard)"));
+      Serial.println(F("mouse observed POWER_STATUS_PIN HIGH (PC power ON signal from keyboard)"));
     } else {
       isPCPoweredOn = false;
       isInitialized = false;
       isReporting = false; // safest default on power-off
       buttons[0] = buttons[1] = buttons[2] = 0;
       delta_x = delta_y = 0;
-      Serial.println(F("debug: mouse observed POWER_STATUS_PIN LOW (PC power OFF signal from keyboard)"));
+      Serial.println(F("mouse observed POWER_STATUS_PIN LOW (PC power OFF signal from keyboard)"));
     }
     lastPowerStatus = currentPowerStatus;
   }
@@ -98,7 +98,7 @@ void loop() {
       Serial.println(ID);
     } else if (!isIdentified && command == "identify_complete") {
       isIdentified = true;
-      Serial.println(F("debug: mouse identification complete"));
+      Serial.println(F("mouse identification complete"));
     } else if (isIdentified && isPCPoweredOn) {
       // Only accept injection commands (MOVE/CLICK/RELEASE) when the shared power signal says "ON".
       if (command.startsWith("MOVE ")) {
@@ -127,7 +127,7 @@ void loop() {
         if (button >= 0 && button < 3) {
           buttons[button] = 1;
           if (isReporting) write_packet(false);
-          Serial.print(F("debug: mouse button "));
+          Serial.print(F("mouse button "));
           Serial.print(button);
           Serial.println(F(" held"));
         }
@@ -136,7 +136,7 @@ void loop() {
         if (button >= 0 && button < 3) {
           buttons[button] = 0;
           if (isReporting) write_packet(false);
-          Serial.print(F("debug: mouse button "));
+          Serial.print(F("mouse button "));
           Serial.print(button);
           Serial.println(F(" released"));
         }
@@ -158,14 +158,66 @@ void loop() {
 }
 
 void handlePS2Communication() {
-  unsigned char command;
-  if (mouse.read(&command) == 0) {
-    mouse_command(command);
+  // Drain a small burst so cmd+arg sequences are handled in one go.
+  // (Prevents arg bytes from being delayed into the "next loop" and misclassified.)
+  for (uint8_t i = 0; i < 8; i++) {
+    unsigned char cmd;
+    if (mouse.read(&cmd) != 0) break;
+    mouse_command(cmd);
+  }
+}
+
+static void logUnknownCommand(uint8_t cmd) {
+  Serial.print(F("mouse unknown ps2 command=0x"));
+  if (cmd < 0x10) Serial.print('0');
+  Serial.println(cmd, HEX);
+}
+
+// --- PS/2 param handling (prevents arg bytes being mis-read as "unknown commands") ---
+enum PendingParam : uint8_t { PENDING_NONE = 0, PENDING_SAMPLE_RATE, PENDING_RESOLUTION };
+static PendingParam pendingParam = PENDING_NONE;
+static unsigned long pendingSinceMs = 0;
+
+// how long we'll wait for an argument byte after a param-setting command
+static const unsigned long PARAM_WAIT_MS = 20;
+// how long we'll accept a "late" argument as the next received byte
+static const unsigned long PENDING_EXPIRE_MS = 100;
+
+static bool readParamByteWithWait(uint8_t* out, unsigned long timeoutMs = PARAM_WAIT_MS) {
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    if (mouse.read(out) == 0) return true;
+    delayMicroseconds(200);
+  }
+  return false;
+}
+
+static void clearPendingIfExpired() {
+  if (pendingParam == PENDING_NONE) return;
+  if (millis() - pendingSinceMs > PENDING_EXPIRE_MS) {
+    pendingParam = PENDING_NONE;
   }
 }
 
 void mouse_command(unsigned char command) {
   unsigned char val;
+
+  // If we're expecting a parameter byte, treat the next byte as the param (within expiry).
+  clearPendingIfExpired();
+  if (pendingParam != PENDING_NONE) {
+    ack();
+    if (pendingParam == PENDING_SAMPLE_RATE) {
+      Serial.print(F("mouse sample rate arg=0x"));
+    } else {
+      Serial.print(F("mouse resolution arg=0x"));
+    }
+    if (command < 0x10) Serial.print('0');
+    Serial.println(command, HEX);
+
+    pendingParam = PENDING_NONE;
+    return;
+  }
+
   switch (command) {
     case 0xFF: // Reset
       ack();
@@ -177,90 +229,104 @@ void mouse_command(unsigned char command) {
       while (mouse.write(0xAA) != 0); // Self-test passed
       while (mouse.write(0x00) != 0); // Mouse ID
       isInitialized = true;
-      Serial.println(F("debug: mouse sent reset"));
+      Serial.println(F("mouse sent reset"));
       break;
 
     case 0xFE: // Resend
       ack();
-      Serial.println(F("debug: mouse sent resend"));
+      Serial.println(F("mouse sent resend"));
       break;
 
     case 0xF6: // Set defaults
       ack();
       // Defaults include reporting disabled
       isReporting = false;
-      Serial.println(F("debug: mouse sent set defaults"));
+      Serial.println(F("mouse sent set defaults"));
       break;
 
     case 0xF5: // Disable data reporting
       isReporting = false;
       ack();
-      Serial.println(F("debug: mouse sent disable data reporting"));
+      Serial.println(F("mouse sent disable data reporting"));
       break;
 
     case 0xF4: // Enable data reporting
       isReporting = true;
       ack();
-      Serial.println(F("debug: mouse sent enable data reporting"));
+      Serial.println(F("mouse sent enable data reporting"));
       break;
 
-    case 0xF3: // Set sample rate
+    case 0xF3: // Set sample rate (expects 1 arg byte)
       ack();
-      if (mouse.read(&val) == 0) {
+      if (readParamByteWithWait(&val)) {
         ack();
+        Serial.print(F("mouse sent set sample rate arg=0x"));
+        if (val < 0x10) Serial.print('0');
+        Serial.println(val, HEX);
+      } else {
+        pendingParam = PENDING_SAMPLE_RATE;
+        pendingSinceMs = millis();
+        Serial.println(F("mouse set sample rate: arg not ready; pending"));
       }
-      Serial.println(F("debug: mouse sent set sample rate"));
       break;
+
 
     case 0xF2: // Get device ID
       ack();
       while (mouse.write(0x00) != 0); // Mouse ID
-      Serial.println(F("debug: mouse sent ps2 identify"));
+      Serial.println(F("mouse sent ps2 identify"));
       break;
 
     case 0xF0: // Set remote mode
       ack();
-      Serial.println(F("debug: mouse sent remote mode"));
+      Serial.println(F("mouse sent remote mode"));
       break;
 
     case 0xEE: // Set wrap mode
       ack();
-      Serial.println(F("debug: mouse sent set wrap mode"));
+      Serial.println(F("mouse sent set wrap mode"));
       break;
 
     case 0xEC: // Reset wrap mode
       ack();
-      Serial.println(F("debug: mouse sent reset wrap mode"));
+      Serial.println(F("mouse sent reset wrap mode"));
       break;
 
     case 0xEB: // Read data (remote mode)
       ack();
       write_packet(true); // force send in response to host request
-      Serial.println(F("debug: mouse sent read data"));
+      Serial.println(F("mouse sent read data"));
       break;
 
     case 0xEA: // Set stream mode
       ack();
-      Serial.println(F("debug: mouse sent set stream mode"));
+      Serial.println(F("mouse sent set stream mode"));
       break;
 
     case 0xE9: // Status request
       ack();
       send_status();
-      Serial.println(F("debug: mouse sent status"));
+      Serial.println(F("mouse sent status"));
       break;
 
-    case 0xE8: // Set resolution
+    case 0xE8: // Set resolution (expects 1 arg byte)
       ack();
-      if (mouse.read(&val) == 0) {
+      if (readParamByteWithWait(&val)) {
         ack();
+        Serial.print(F("mouse sent resolution arg=0x"));
+        if (val < 0x10) Serial.print('0');
+        Serial.println(val, HEX);
+      } else {
+        pendingParam = PENDING_RESOLUTION;
+        pendingSinceMs = millis();
+        Serial.println(F("mouse set resolution: arg not ready; pending"));
       }
-      Serial.println(F("debug: mouse sent resolution"));
       break;
+
 
     case 0xE7: // Set scaling 2:1
       ack();
-      Serial.println(F("debug: mouse sent scaling 2:1"));
+      Serial.println(F("mouse sent scaling 2:1"));
       break;
 
     case 0xE6: // Set scaling 1:1
@@ -268,9 +334,10 @@ void mouse_command(unsigned char command) {
       break;
 
     default:
-      // Resend for unknown command
+      // Ask host to resend
       mouse.write(0xFE);
-      Serial.println(F("debug: mouse sent command was unknown"));
+      logUnknownCommand(command);
+      Serial.println(F("mouse sent command was unknown"));
       break;
   }
 }
@@ -321,7 +388,9 @@ void write_packet(bool forceSend) {
 }
 
 void ack() {
-  while (mouse.write(0xFA) != 0);
+  if (!writeByteWithRetry(0xFA, 25)) {
+    logWriteFailThrottled(F("ack"));
+  }
 }
 
 void send_status() {
