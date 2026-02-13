@@ -253,7 +253,11 @@
                         :aria-pressed="isCapturing ? 'true' : 'false'"
                         :data-capturing="isCapturing ? 'true' : 'false'"
                         :data-scale="scaleMode"
-                        @mousedown.prevent="armCaptureFromMouse"
+                        @mousedown.prevent="onCaptureMouseDown"
+                        @mouseup.prevent="onCaptureMouseUp"
+                        @mousemove.prevent="onCaptureMouseMove"
+                        @wheel.prevent="onCaptureWheel"
+                        @contextmenu.prevent
                         @focus="onFocusCapture"
                         @blur="onBlurCapture"
                         @keydown="onKeyDown"
@@ -686,6 +690,76 @@ function sendKey(action: 'press' | 'hold' | 'release', code: string, key?: strin
 }
 
 /* -------------------------------------------------------------------------- */
+/*  PS/2 mouse WS send + capture plumbing                                     */
+/* -------------------------------------------------------------------------- */
+
+type MouseButton = 'left' | 'right' | 'middle'
+
+function sendMouse(payload: any) {
+    refreshWsClient()
+    const ws = wsClientRef.value
+    if (!ws) return
+
+    if (typeof ws.sendPs2MouseCommand === 'function') {
+        ws.sendPs2MouseCommand(payload)
+        return
+    }
+
+    if (typeof ws.send === 'function') {
+        ws.send({
+            type: 'ps2-mouse.command',
+            payload,
+        })
+    }
+}
+
+function mapDomButton(btn: number): MouseButton | null {
+    if (btn === 0) return 'left'
+    if (btn === 1) return 'middle'
+    if (btn === 2) return 'right'
+    return null
+}
+
+const heldMouseButtons = new Set<MouseButton>()
+
+let pendingDx = 0
+let pendingDy = 0
+let moveRaf: number | null = null
+
+function flushMouseMove() {
+    moveRaf = null
+    const dx = pendingDx
+    const dy = pendingDy
+    pendingDx = 0
+    pendingDy = 0
+    if (!isPointerLockedToCaptureEl()) return
+    if (dx === 0 && dy === 0) return
+
+    sendMouse({
+        kind: 'mouse.move.relative',
+        dx,
+        dy,
+        requestedBy: 'stream-pane',
+    })
+}
+
+function scheduleMouseMove(dx: number, dy: number) {
+    pendingDx += dx
+    pendingDy += dy
+    if (moveRaf != null) return
+    moveRaf = requestAnimationFrame(() => flushMouseMove())
+}
+
+function releaseAllMouseButtons() {
+    if (heldMouseButtons.size === 0) return
+    const buttons = Array.from(heldMouseButtons)
+    heldMouseButtons.clear()
+    for (const b of buttons) {
+        sendMouse({ kind: 'mouse.button.up', button: b, requestedBy: 'stream-pane' })
+    }
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Front panel WS send + controls                                            */
 /* -------------------------------------------------------------------------- */
 
@@ -827,7 +901,11 @@ function focusCaptureLayer(): boolean {
     return document.activeElement === el
 }
 
-function armCaptureFromMouse() {
+/** Mouse down on capture layer:
+ *  - if not locked, request pointer lock and DO NOT forward the initial click (avoids misclick on enter)
+ *  - if already locked, forward button down
+ */
+function onCaptureMouseDown(e: MouseEvent) {
     if (!canCapture.value) return
 
     refreshWsClient()
@@ -835,12 +913,52 @@ function armCaptureFromMouse() {
     const focused = focusCaptureLayer()
     armOnNextFocus.value = !focused
 
-    // Pointer lock is the capture mechanism; isCapturing flips on pointerlockchange.
-    requestPointerLock()
+    if (!isPointerLockedToCaptureEl()) {
+        requestPointerLock()
+        return
+    }
+
+    const b = mapDomButton(e.button)
+    if (!b) return
+    heldMouseButtons.add(b)
+    sendMouse({ kind: 'mouse.button.down', button: b, requestedBy: 'stream-pane' })
+}
+
+function onCaptureMouseUp(e: MouseEvent) {
+    if (!isCapturing.value) return
+    if (!isPointerLockedToCaptureEl()) return
+    const b = mapDomButton(e.button)
+    if (!b) return
+    heldMouseButtons.delete(b)
+    sendMouse({ kind: 'mouse.button.up', button: b, requestedBy: 'stream-pane' })
+}
+
+function onCaptureMouseMove(e: MouseEvent) {
+    if (!isCapturing.value) return
+    if (!isPointerLockedToCaptureEl()) return
+
+    const dx = Number.isFinite(e.movementX) ? Math.trunc(e.movementX) : 0
+    const dy = Number.isFinite(e.movementY) ? Math.trunc(e.movementY) : 0
+    if (dx === 0 && dy === 0) return
+
+    scheduleMouseMove(dx, dy)
+}
+
+function onCaptureWheel(e: WheelEvent) {
+    if (!isCapturing.value) return
+    if (!isPointerLockedToCaptureEl()) return
+
+    const dy = e.deltaY === 0 ? 0 : e.deltaY > 0 ? 1 : -1
+    if (!dy) return
+
+    sendMouse({ kind: 'mouse.wheel', dy, requestedBy: 'stream-pane' })
 }
 
 function releaseCapture(opts?: { fromBlur?: boolean }) {
     const fromBlur = !!opts?.fromBlur
+
+    // Release any held mouse buttons first (prevents stuck buttons on unlock)
+    releaseAllMouseButtons()
 
     if (heldModifiers.size > 0) {
         const codes = Array.from(heldModifiers).sort()
@@ -864,7 +982,6 @@ function onPointerLockChange() {
     const locked = isPointerLockedToCaptureEl()
 
     if (locked) {
-        // Enter capture: lock implies exclusive keyboard+mouse mode.
         isCapturing.value = true
         armOnNextFocus.value = false
         refreshWsClient()
@@ -872,36 +989,48 @@ function onPointerLockChange() {
         return
     }
 
-    // Exit capture: pointer lock released (Esc, browser, focus change, etc)
-    if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value) {
-        releaseCapture()
+    // Unlock: always cleanup
+    if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value || heldMouseButtons.size > 0) {
+        releaseCapture({ fromBlur: true })
     } else {
         armOnNextFocus.value = false
     }
 }
 
 function onPointerLockError() {
-    // Best-effort: ensure we don't get stuck in a "capturing" UI state.
-    if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value) {
-        releaseCapture()
+    if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value || heldMouseButtons.size > 0) {
+        releaseCapture({ fromBlur: true })
     }
+}
+
+function onWindowBlur() {
+    if (!isPointerLockedToCaptureEl()) return
+    try {
+        document.exitPointerLock?.()
+    } catch {
+        // ignore
+    }
+}
+
+function onVisibilityChange() {
+    if (document.visibilityState !== 'visible') onWindowBlur()
 }
 
 onMounted(() => {
     document.addEventListener('pointerlockchange', onPointerLockChange)
     document.addEventListener('pointerlockerror', onPointerLockError)
+    window.addEventListener('blur', onWindowBlur)
+    document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 function onFocusCapture() {
     if (!canCapture.value) {
         if (isPointerLockedToCaptureEl()) exitPointerLock()
-        releaseCapture()
+        releaseCapture({ fromBlur: true })
         return
     }
 
     refreshWsClient()
-
-    // With pointer lock capture, focus alone does not enable capture.
     armOnNextFocus.value = false
 }
 
@@ -912,7 +1041,7 @@ function onBlurCapture() {
         return
     }
 
-    if (!isCapturing.value && !armOnNextFocus.value && heldModifiers.size === 0) return
+    if (!isCapturing.value && !armOnNextFocus.value && heldModifiers.size === 0 && heldMouseButtons.size === 0) return
     releaseCapture({ fromBlur: true })
 }
 
@@ -930,11 +1059,8 @@ function onKeyDown(e: KeyboardEvent) {
         return
     }
 
-    // Escape is reserved for pointer lock exit; do NOT forward it to the client.
-    if (code === 'Escape') {
-        blockBrowser(e)
-        return
-    }
+    // Esc is reserved for exiting pointer lock; do NOT forward it and do NOT block it.
+    if (code === 'Escape') return
 
     if (MODIFIER_CODES.has(code)) {
         if (!e.repeat && !heldModifiers.has(code)) {
@@ -974,7 +1100,9 @@ watch(
             exitPointerLock()
             return
         }
-        if (isCapturing.value || armOnNextFocus.value) releaseCapture()
+        if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0 || heldMouseButtons.size > 0) {
+            releaseCapture({ fromBlur: true })
+        }
     }
 )
 
@@ -1518,8 +1646,8 @@ function onEnabledChange() {
     } else {
         if (isPointerLockedToCaptureEl()) {
             exitPointerLock()
-        } else if (isCapturing.value || armOnNextFocus.value) {
-            releaseCapture()
+        } else if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0 || heldMouseButtons.size > 0) {
+            releaseCapture({ fromBlur: true })
         }
     }
 }
@@ -1529,8 +1657,15 @@ function reloadStream() {
 }
 
 onBeforeUnmount(() => {
+    if (moveRaf != null) {
+        cancelAnimationFrame(moveRaf)
+        moveRaf = null
+    }
+
     if (isPointerLockedToCaptureEl()) exitPointerLock()
-    if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0) releaseCapture()
+    if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0 || heldMouseButtons.size > 0) {
+        releaseCapture({ fromBlur: true })
+    }
 
     // best-effort: release front panel holds if pane unmounts mid-hold
     if (powerHeldByClient.value) {
@@ -1544,6 +1679,8 @@ onBeforeUnmount(() => {
 
     document.removeEventListener('pointerlockchange', onPointerLockChange)
     document.removeEventListener('pointerlockerror', onPointerLockError)
+    window.removeEventListener('blur', onWindowBlur)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
 
     if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
     if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)

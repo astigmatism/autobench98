@@ -58,13 +58,86 @@ export type PS2KeyboardCommandMessage = {
 }
 
 // ----------------------------
+// PS/2 Mouse WS message types
+// ----------------------------
+
+// Matches orchestrator ws.ts contract:
+// msg.type === 'ps2-mouse.command'
+export type MouseButton = 'left' | 'right' | 'middle'
+
+export type PS2MouseCommandPayload =
+    // relative move
+    | {
+          kind: 'mouse.move.relative'
+          dx: number
+          dy: number
+          requestedBy?: string
+      }
+    // absolute move (normalized 0..1, backend clamps as needed)
+    | {
+          kind: 'mouse.move.absolute'
+          xNorm: number
+          yNorm: number
+          requestedBy?: string
+      }
+    // buttons
+    | {
+          kind: 'mouse.button.down'
+          button: MouseButton
+          requestedBy?: string
+      }
+    | {
+          kind: 'mouse.button.up'
+          button: MouseButton
+          requestedBy?: string
+      }
+    | {
+          kind: 'mouse.button.click'
+          button: MouseButton
+          holdMs?: number
+          requestedBy?: string
+      }
+    // wheel (vertical)
+    | {
+          kind: 'mouse.wheel'
+          dy: number
+          requestedBy?: string
+      }
+    // config
+    | {
+          kind: 'mouse.config'
+          mode?: any
+          gain?: any
+          accel?: any
+          absoluteGrid?: any
+      }
+    // cancel
+    | {
+          kind: 'mouse.cancelAll'
+          reason?: string
+          requestedBy?: string
+      }
+    // legacy compatibility (backend supports this too)
+    | {
+          kind: 'mouse.button'
+          action: 'down' | 'up' | 'click' | 'press' | 'release'
+          button: MouseButton
+          holdMs?: number
+          requestedBy?: string
+      }
+
+export type PS2MouseCommandMessage = {
+    type: 'ps2-mouse.command'
+    payload: PS2MouseCommandPayload
+}
+
+// ----------------------------
 
 // Read Vite-provided env (must be prefixed with VITE_)
 const ENV = import.meta.env as any
 const V_HEARTBEAT_INTERVAL = Number(ENV.VITE_WS_HEARTBEAT_INTERVAL_MS ?? 10000)
 const V_HEARTBEAT_TIMEOUT = Number(ENV.VITE_WS_HEARTBEAT_TIMEOUT_MS ?? 5000)
-const V_RC_ENABLED =
-    String(ENV.VITE_WS_RECONNECT_ENABLED ?? 'true').toLowerCase() === 'true'
+const V_RC_ENABLED = String(ENV.VITE_WS_RECONNECT_ENABLED ?? 'true').toLowerCase() === 'true'
 const V_RC_MIN = Number(ENV.VITE_WS_RECONNECT_MIN_MS ?? 1000)
 const V_RC_MAX = Number(ENV.VITE_WS_RECONNECT_MAX_MS ?? 15000)
 const V_RC_FACTOR = Number(ENV.VITE_WS_RECONNECT_FACTOR ?? 1.8)
@@ -179,13 +252,93 @@ export class WSClient {
     }
 
     // ----------------------------
+    // PS/2 mouse helpers
+    // ----------------------------
+
+    /** Low-level typed sender for PS/2 mouse commands. */
+    sendPs2MouseCommand(payload: PS2MouseCommandPayload) {
+        const msg: PS2MouseCommandMessage = {
+            type: 'ps2-mouse.command',
+            payload
+        }
+        this.send(msg)
+    }
+
+    /** Convenience: relative mouse move. */
+    sendPs2MouseMoveRelative(dx: number, dy: number, requestedBy?: string) {
+        if (!Number.isFinite(dx) || !Number.isFinite(dy)) return
+        if (dx === 0 && dy === 0) return
+        this.sendPs2MouseCommand({
+            kind: 'mouse.move.relative',
+            dx,
+            dy,
+            requestedBy
+        })
+    }
+
+    /** Convenience: absolute mouse move (normalized coordinates). */
+    sendPs2MouseMoveAbsolute(xNorm: number, yNorm: number, requestedBy?: string) {
+        if (!Number.isFinite(xNorm) || !Number.isFinite(yNorm)) return
+        this.sendPs2MouseCommand({
+            kind: 'mouse.move.absolute',
+            xNorm,
+            yNorm,
+            requestedBy
+        })
+    }
+
+    /** Convenience: button down. */
+    sendPs2MouseButtonDown(button: MouseButton, requestedBy?: string) {
+        this.sendPs2MouseCommand({ kind: 'mouse.button.down', button, requestedBy })
+    }
+
+    /** Convenience: button up. */
+    sendPs2MouseButtonUp(button: MouseButton, requestedBy?: string) {
+        this.sendPs2MouseCommand({ kind: 'mouse.button.up', button, requestedBy })
+    }
+
+    /** Convenience: click (optional holdMs). */
+    sendPs2MouseClick(button: MouseButton, opts?: { holdMs?: number; requestedBy?: string }) {
+        const holdMs = opts?.holdMs
+        this.sendPs2MouseCommand({
+            kind: 'mouse.button.click',
+            button,
+            holdMs: Number.isFinite(holdMs as any) ? (holdMs as number) : undefined,
+            requestedBy: opts?.requestedBy
+        })
+    }
+
+    /** Convenience: wheel (vertical only). */
+    sendPs2MouseWheel(dy: number, requestedBy?: string) {
+        if (!Number.isFinite(dy) || dy === 0) return
+        this.sendPs2MouseCommand({ kind: 'mouse.wheel', dy, requestedBy })
+    }
+
+    /** Convenience: config. */
+    sendPs2MouseConfig(patch: { mode?: any; gain?: any; accel?: any; absoluteGrid?: any }) {
+        this.sendPs2MouseCommand({
+            kind: 'mouse.config',
+            mode: patch.mode,
+            gain: patch.gain,
+            accel: patch.accel,
+            absoluteGrid: patch.absoluteGrid
+        })
+    }
+
+    /** Convenience: cancel queued ops (mouse). */
+    sendPs2MouseCancelAll(reason?: string, requestedBy?: string) {
+        this.sendPs2MouseCommand({
+            kind: 'mouse.cancelAll',
+            reason,
+            requestedBy
+        })
+    }
+
+    // ----------------------------
 
     on(type: string, fn: Handler) {
         ;(this.handlers[type] ||= []).push(fn)
-        return () =>
-            (this.handlers[type] = (this.handlers[type] || []).filter(
-                (f) => f !== fn
-            ))
+        return () => (this.handlers[type] = (this.handlers[type] || []).filter((f) => f !== fn))
     }
 
     /** Stop heartbeats and auto-reconnect; closes the socket. */
@@ -280,10 +433,7 @@ export class WSClient {
 
     private scheduleHeartbeat() {
         this.clearHeartbeat()
-        this.hbTimer = window.setTimeout(
-            () => this.doHeartbeat(),
-            Math.min(1000, this.hbIntervalMs)
-        ) as unknown as number
+        this.hbTimer = window.setTimeout(() => this.doHeartbeat(), Math.min(1000, this.hbIntervalMs)) as unknown as number
     }
 
     private doHeartbeat() {
@@ -304,10 +454,7 @@ export class WSClient {
         }, this.hbTimeoutMs) as unknown as number
 
         // schedule next ping
-        this.hbTimer = window.setTimeout(
-            () => this.doHeartbeat(),
-            this.hbIntervalMs
-        ) as unknown as number
+        this.hbTimer = window.setTimeout(() => this.doHeartbeat(), this.hbIntervalMs) as unknown as number
     }
 
     private clearHeartbeat() {
@@ -353,16 +500,10 @@ export class WSClient {
 
     private nextBackoffDelay(): number {
         const pow = Math.max(0, this.attempts)
-        const base = Math.min(
-            this.backoffMax,
-            this.backoffMin * Math.pow(this.backoffFactor, pow)
-        )
+        const base = Math.min(this.backoffMax, this.backoffMin * Math.pow(this.backoffFactor, pow))
         const jitterRange = base * this.backoffJitter
         const jitter = (Math.random() * 2 - 1) * jitterRange // [-j, +j]
-        const val = Math.max(
-            this.backoffMin,
-            Math.min(this.backoffMax, Math.round(base + jitter))
-        )
+        const val = Math.max(this.backoffMin, Math.min(this.backoffMax, Math.round(base + jitter)))
         return val
     }
 
