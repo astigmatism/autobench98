@@ -3,11 +3,7 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
 
-import {
-  createLogger,
-  LogChannel,
-  type ClientLogBuffer,
-} from '@autobench98/logging'
+import { createLogger, LogChannel, type ClientLogBuffer } from '@autobench98/logging'
 
 import { FrontPanelService } from '../devices/front-panel/FrontPanelService.js'
 import type { FrontPanelEvent } from '../devices/front-panel/types.js'
@@ -105,6 +101,7 @@ class FrontPanelLoggerEventSink implements FrontPanelEventSink {
         break
       }
       case 'frontpanel-debug-line': {
+        // Keep legacy behavior: emit raw firmware lines as-is (escaped).
         this.logFp.info(this.fmtFirmwareLine(evt.line))
         break
       }
@@ -159,6 +156,16 @@ class FanoutFrontPanelEventSink implements FrontPanelEventSink {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Host power propagation (frontPanel -> PS/2 keyboard/mouse)                */
+/* -------------------------------------------------------------------------- */
+
+function mapPowerSenseToHostPower(p: unknown): 'on' | 'off' | 'unknown' {
+  if (p === 'on') return 'on'
+  if (p === 'off') return 'off'
+  return 'unknown'
+}
+
 // ---- Plugin implementation -------------------------------------------------
 
 const frontPanelPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
@@ -171,29 +178,49 @@ const frontPanelPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
   const loggerSink = new FrontPanelLoggerEventSink(app)
   const stateAdapter = new FrontPanelStateAdapter()
 
-  const events: FrontPanelEventSink = new FanoutFrontPanelEventSink(
-    loggerSink,
-    {
-      publish(evt: FrontPanelEvent): void {
-        stateAdapter.handle(evt)
-        const next = stateAdapter.getState()
-        updateFrontPanelSnapshot(next)
+  const events: FrontPanelEventSink = new FanoutFrontPanelEventSink(loggerSink, {
+    publish(evt: FrontPanelEvent): void {
+      stateAdapter.handle(evt)
+      const next = stateAdapter.getState()
+      updateFrontPanelSnapshot(next)
 
-        // ✅ Propagate host power to PS/2 mouse via AppState truth.
-        // We only need to push when power sense can change or be invalidated.
-        if (
-          evt.kind === 'frontpanel-power-sense-changed' ||
-          evt.kind === 'frontpanel-device-disconnected' ||
-          evt.kind === 'frontpanel-device-lost'
-        ) {
-          const setMousePower = (app as any).ps2MouseSetHostPower as ((p: 'on' | 'off' | 'unknown') => void) | undefined
-          if (typeof setMousePower === 'function') {
-            setMousePower(next.powerSense as any)
-          }
+      // Safety-critical: also push host-power directly to dependent services as a fail-safe,
+      // while still keeping AppState as the source of truth.
+      //
+      // Rationale: mouse movement injection is gated by mouse firmware's POWER_STATUS_PIN,
+      // which is driven by the keyboard Arduino pin state. That pin state is driven by the
+      // keyboard service receiving host power transitions (frontPanel powerSense).
+      //
+      // This direct propagation is idempotent (services de-dupe identical states) and
+      // protects against any state subscription mis-ordering.
+      if (
+        evt.kind === 'frontpanel-power-sense-changed' ||
+        evt.kind === 'frontpanel-device-disconnected' ||
+        evt.kind === 'frontpanel-device-lost' ||
+        evt.kind === 'frontpanel-identify-success'
+      ) {
+        const hostPower = mapPowerSenseToHostPower((next as any)?.powerSense)
+
+        // PS/2 keyboard service (drives its POWER_STATUS_PIN output, which the mouse reads)
+        const kb = (app as any).ps2Keyboard as { setHostPower?: (p: 'on' | 'off' | 'unknown') => void } | undefined
+        try {
+          if (kb && typeof kb.setHostPower === 'function') kb.setHostPower(hostPower)
+        } catch {
+          // never let propagation failures affect front panel processing
         }
-      },
-    }
-  )
+
+        // PS/2 mouse service (policy gate for ops)
+        const setMousePower = (app as any).ps2MouseSetHostPower as
+          | ((p: 'on' | 'off' | 'unknown') => void)
+          | undefined
+        try {
+          if (typeof setMousePower === 'function') setMousePower(hostPower)
+        } catch {
+          // swallow
+        }
+      }
+    },
+  })
 
   // Construct the service without any message bus dependency.
   const svc = new FrontPanelService(cfg, { events } as any)

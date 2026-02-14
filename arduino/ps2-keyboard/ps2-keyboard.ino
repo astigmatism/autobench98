@@ -29,6 +29,91 @@ static unsigned char lastReadFailByte = 0x00;
 static const unsigned long READ_FAIL_LOG_THROTTLE_MS = 250;
 
 // --------------------------------------------------------------------------
+// Host power signaling model (D5 -> mouse Arduino POWER_STATUS_PIN input)
+//
+// FIX FOR MOUSE MOVEMENT:
+// Mouse firmware gates MOVE/CLICK/RELEASE on isPCPoweredOn derived from D5.
+// If nothing drives D5 HIGH, the mouse will never accept injected movement.
+//
+// New behavior (non-breaking):
+// - Keep existing "power_on"/"power_off" serial commands (compat).
+// - Add AUTO mode: on the first successful PS/2 host command read, we assume
+//   the host is alive and drive D5 HIGH (unless explicitly forced OFF).
+// - We do NOT auto-turn OFF based on inactivity (too risky: host can be idle).
+// --------------------------------------------------------------------------
+
+enum PowerMode : uint8_t {
+  POWER_AUTO = 0,
+  POWER_FORCED_ON = 1,
+  POWER_FORCED_OFF = 2,
+};
+
+static PowerMode powerMode = POWER_AUTO;
+static bool hostEverTalked = false;
+static unsigned long lastHostActivityMs = 0;
+
+static void setPowerPin(bool on) {
+  digitalWrite(POWER_STATUS_PIN, on ? HIGH : LOW);
+  isPCPoweredOn = on;
+}
+
+static void enterForcedOnFromSerial() {
+  powerMode = POWER_FORCED_ON;
+  isPCPoweredOn = true;
+  setPowerPin(true);
+
+  // Preserve existing log text for compatibility with your log searches.
+  Serial.print(F("debug: keyboard accepts power ON command, sets PIN "));
+  Serial.print(POWER_STATUS_PIN);
+  Serial.println(F(" to HIGH"));
+}
+
+static void enterForcedOffFromSerial() {
+  powerMode = POWER_FORCED_OFF;
+  isPCPoweredOn = false;
+  isInitialized = false;
+  setPowerPin(false);
+
+  // Preserve existing log text for compatibility with your log searches.
+  Serial.print(F("debug: keyboard accepts power OFF command, sets PIN "));
+  Serial.print(POWER_STATUS_PIN);
+  Serial.println(F(" to LOW"));
+}
+
+static void enterAutoPowerModeFromSerial() {
+  powerMode = POWER_AUTO;
+
+  // In AUTO: if we've already seen host traffic, keep ON; else remain OFF.
+  if (hostEverTalked) {
+    if (!isPCPoweredOn) {
+      setPowerPin(true);
+    }
+  } else {
+    if (isPCPoweredOn) {
+      setPowerPin(false);
+    }
+  }
+
+  Serial.print(F("debug: keyboard power mode set to AUTO; hostEverTalked="));
+  Serial.print(hostEverTalked ? F("1") : F("0"));
+  Serial.print(F(" pin="));
+  Serial.println(isPCPoweredOn ? F("HIGH") : F("LOW"));
+}
+
+static void noteHostActivity() {
+  hostEverTalked = true;
+  lastHostActivityMs = millis();
+
+  // AUTO behavior: first observed host command -> assert "host on" signal for mouse.
+  if (powerMode == POWER_AUTO && !isPCPoweredOn) {
+    setPowerPin(true);
+    Serial.print(F("debug: keyboard observed PS/2 host activity; sets PIN "));
+    Serial.print(POWER_STATUS_PIN);
+    Serial.println(F(" to HIGH (AUTO)"));
+  }
+}
+
+// --------------------------------------------------------------------------
 // Helpers (fast, low-allocation logging)
 // --------------------------------------------------------------------------
 
@@ -147,7 +232,11 @@ void setup() {
   pinMode(PS2_CLOCK_PIN, INPUT_PULLUP);
   pinMode(PS2_DATA_PIN, INPUT_PULLUP);
 
-  digitalWrite(POWER_STATUS_PIN, LOW);
+  // Default power signal LOW until either:
+  // - explicit "power_on", or
+  // - AUTO mode sees PS/2 host traffic.
+  setPowerPin(false);
+
   lastByte = 0x00;
   currentScanSet = 0x02;
 
@@ -155,6 +244,10 @@ void setup() {
   readFailCount = 0;
   lastReadFailRc = 0;
   lastReadFailByte = 0x00;
+
+  powerMode = POWER_AUTO;
+  hostEverTalked = false;
+  lastHostActivityMs = 0;
 }
 
 void loop() {
@@ -163,7 +256,7 @@ void loop() {
     handlePS2Communication();
   }
 
-  // Process Serial Commands (unchanged command surface)
+  // Process Serial Commands (unchanged command surface + added AUTO mode)
   if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
     command.trim();
@@ -177,19 +270,13 @@ void loop() {
       Serial.println(F("debug: keyboard identification complete"));
     }
     else if (isIdentified && command == "power_on") {
-      isPCPoweredOn = true;
-      digitalWrite(POWER_STATUS_PIN, HIGH);
-      Serial.print(F("debug: keyboard accepts power ON command, sets PIN "));
-      Serial.print(POWER_STATUS_PIN);
-      Serial.println(F(" to HIGH"));
+      enterForcedOnFromSerial();
     }
     else if (isIdentified && command == "power_off") {
-      isPCPoweredOn = false;
-      isInitialized = false;
-      digitalWrite(POWER_STATUS_PIN, LOW);
-      Serial.print(F("debug: keyboard accepts power OFF command, sets PIN "));
-      Serial.print(POWER_STATUS_PIN);
-      Serial.println(F(" to LOW"));
+      enterForcedOffFromSerial();
+    }
+    else if (isIdentified && (command == "power_auto" || command == "auto_power")) {
+      enterAutoPowerModeFromSerial();
     }
     else if (isIdentified) {
       int spaceIndex = command.indexOf(' ');
@@ -248,6 +335,9 @@ void handlePS2Communication() {
   int rc = keyboard.read(&command);
 
   if (rc == 0) {
+    // Successful host command read => host is alive.
+    noteHostActivity();
+
     logPS2Rx(command);
     keyboard_command(command);
   } else {

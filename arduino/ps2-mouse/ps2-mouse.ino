@@ -99,8 +99,11 @@ void loop() {
     } else if (!isIdentified && command == "identify_complete") {
       isIdentified = true;
       Serial.println(F("mouse identification complete"));
-    } else if (isIdentified && isPCPoweredOn) {
-      // Only accept injection commands (MOVE/CLICK/RELEASE) when the shared power signal says "ON".
+    } else if (isIdentified) {
+      // SAFETY/RELIABILITY FIX:
+      // Do NOT gate injection commands on POWER_STATUS_PIN.
+      // The orchestrator already applies host-power policy; firmware should remain tolerant
+      // of missing/miswired/shared power signals. Packet emission remains gated by isReporting.
       if (command.startsWith("MOVE ")) {
         int commaIndex = command.indexOf(',');
         int new_x = command.substring(5, commaIndex).toInt();
@@ -149,12 +152,11 @@ void loop() {
     }
   }
 
-  // IMPORTANT FIX:
-  // Always service PS/2 host communication when activity is present.
-  // Do NOT gate this on isPCPoweredOn; otherwise boot-time init (0xFF/0xF4) can be missed.
-  if (digitalRead(PS2_CLOCK_PIN) == LOW || digitalRead(PS2_DATA_PIN) == LOW) {
-    handlePS2Communication();
-  }
+  // CRITICAL RELIABILITY FIX:
+  // Always service PS/2 host communication.
+  // Do NOT gate on isPCPoweredOn or on "CLK/DATA looks active" heuristics;
+  // otherwise boot-time init (0xFF/0xF4) can be missed.
+  handlePS2Communication();
 }
 
 void handlePS2Communication() {
@@ -270,7 +272,6 @@ void mouse_command(unsigned char command) {
       }
       break;
 
-
     case 0xF2: // Get device ID
       ack();
       while (mouse.write(0x00) != 0); // Mouse ID
@@ -322,7 +323,6 @@ void mouse_command(unsigned char command) {
         Serial.println(F("mouse set resolution: arg not ready; pending"));
       }
       break;
-
 
     case 0xE7: // Set scaling 2:1
       ack();

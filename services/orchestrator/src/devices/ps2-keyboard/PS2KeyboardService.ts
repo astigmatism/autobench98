@@ -100,6 +100,10 @@ export class PS2KeyboardService {
    *
    * Additionally:
    * - hostPower='on'/'off' => drive keyboard-side "power_on/power_off" pin state (when ready)
+   *
+   * NOTE:
+   * Some upstream components historically used 'active' instead of 'on'.
+   * We normalize host power input conservatively to avoid missing power mirroring.
    */
   private hostPower: KeyboardPowerState = 'unknown'
 
@@ -182,13 +186,16 @@ export class PS2KeyboardService {
    *   to inform downstream PS/2 devices (mouse) about host power state.
    */
   public setHostPower(power: KeyboardPowerState): void {
-    if (power === this.hostPower) return
+    // Normalize to avoid missing "on" when upstream uses alternate labels (e.g. 'active').
+    const normalized = this.normalizeHostPower(power as unknown)
+
+    if (normalized === this.hostPower) return
 
     const prev = this.hostPower
-    this.hostPower = power
+    this.hostPower = normalized
 
     // On transition into a known OFF state: drop queued key ops.
-    if (power === 'off' && prev !== 'off') {
+    if (normalized === 'off' && prev !== 'off') {
       this.cancelQueuedKeyOps('host-power-off')
       // If a key op is currently active, request cancellation.
       if (this.activeOp && this.isKeyOpKind(this.activeOp.kind)) {
@@ -1035,6 +1042,17 @@ export class PS2KeyboardService {
     if (typeof err === 'string') return { at: now(), scope, message: err, retryable }
     if (err instanceof Error) return { at: now(), scope, message: err.message, retryable }
     return { at: now(), scope, message: 'unknown error', retryable }
+  }
+
+  private normalizeHostPower(v: unknown): KeyboardPowerState {
+    // Canonical values
+    if (v === 'on' || v === 'off' || v === 'unknown') return v
+
+    // Common upstream synonyms (front panel/UI naming)
+    if (v === 'active') return 'on'
+    if (v === 'inactive') return 'off'
+
+    return 'unknown'
   }
 
   /* ---------------------------------------------------------------------- */

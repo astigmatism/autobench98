@@ -91,6 +91,8 @@ function sleep(ms: number): Promise<void> {
 type Grid = { w: number; h: number }
 
 type MovementState = {
+  // EFFECTIVE mode: driven by last received movement input (absolute vs relative),
+  // while still using configured tuning (gain/accel) for relative.
   mode: MouseMoveMode
 
   // resolved grid used for mapping and clamping
@@ -352,7 +354,7 @@ export class PS2MouseService {
         return this.enqueueWheel(cmd.dy, cmd.requestedBy)
 
       case 'mouse.config':
-        // NOTE: ClientMouseConfig does NOT include requestedBy (per your reported type error and spec §7.4).
+        // NOTE: ClientMouseConfig does NOT include requestedBy (per spec §7.4).
         return this.enqueueConfig(cmd)
 
       case 'mouse.cancelAll':
@@ -391,11 +393,26 @@ export class PS2MouseService {
   /*  Movement ingress (NOT queued)                                          */
   /* ---------------------------------------------------------------------- */
 
+  private effectiveRelativeMode(): MouseMoveMode {
+    // If the configured mode is already relative, keep it.
+    if (this.moveMode === 'relative-gain' || this.moveMode === 'relative-accel') return this.moveMode
+
+    // Otherwise, infer a safe relative mode so relative move commands can still produce motion.
+    // (We do NOT mutate this.moveMode here; we only set movement.mode per-input.)
+    return this.accel.enabled ? 'relative-accel' : 'relative-gain'
+  }
+
   private handleMoveAbsolute(xNorm: number, yNorm: number, _requestedBy?: string): void {
     const x01 = this.cfg.movement.clampAbsoluteToUnit ? clamp01(xNorm) : Number.isFinite(xNorm) ? xNorm : 0
     const y01 = this.cfg.movement.clampAbsoluteToUnit ? clamp01(yNorm) : Number.isFinite(yNorm) ? yNorm : 0
 
-    this.movement.mode = this.moveMode
+    // Effective mode is driven by input type.
+    this.movement.mode = 'absolute'
+
+    // Absolute input supersedes any accumulated relative motion.
+    this.movement.relAcc.dx = 0
+    this.movement.relAcc.dy = 0
+    this.movement.lastRelAt = null
 
     const grid = this.getGridForAbsoluteMapping()
     const tx = clampInt(Math.round(x01 * (grid.w - 1)), 0, grid.w - 1)
@@ -409,17 +426,13 @@ export class PS2MouseService {
     const ddy = Number.isFinite(dy) ? dy : 0
     const now = safeNow()
 
-    this.movement.mode = this.moveMode
+    // Relative input supersedes any outstanding absolute target.
+    this.movement.absTarget = null
 
-    if (this.moveMode === 'relative-gain') {
-      const g = Math.max(1, Math.trunc(this.gain))
-      this.movement.relAcc.dx += ddx * g
-      this.movement.relAcc.dy += ddy * g
-      this.movement.lastRelAt = now
-      return
-    }
+    const mode = this.effectiveRelativeMode()
+    this.movement.mode = mode
 
-    if (this.moveMode === 'relative-accel') {
+    if (mode === 'relative-accel') {
       const g = this.computeAccelGain(now, ddx, ddy)
       this.movement.relAcc.dx += ddx * g
       this.movement.relAcc.dy += ddy * g
@@ -427,6 +440,7 @@ export class PS2MouseService {
       return
     }
 
+    // Default: relative-gain
     const g = Math.max(1, Math.trunc(this.gain))
     this.movement.relAcc.dx += ddx * g
     this.movement.relAcc.dy += ddy * g
@@ -501,7 +515,13 @@ export class PS2MouseService {
 
       if (op.action === 'down') {
         if (this.buttonsDown.has(op.button)) {
-          this.events.publish({ kind: 'mouse-button', button: op.button, action: 'down', noOp: true, noOpReason: 'already-down' })
+          this.events.publish({
+            kind: 'mouse-button',
+            button: op.button,
+            action: 'down',
+            noOp: true,
+            noOpReason: 'already-down',
+          })
           return
         }
         await this.writeLine(`CLICK ${buttonToWire(op.button)}`)
@@ -512,7 +532,13 @@ export class PS2MouseService {
 
       if (op.action === 'up') {
         if (!this.buttonsDown.has(op.button)) {
-          this.events.publish({ kind: 'mouse-button', button: op.button, action: 'up', noOp: true, noOpReason: 'already-up' })
+          this.events.publish({
+            kind: 'mouse-button',
+            button: op.button,
+            action: 'up',
+            noOp: true,
+            noOpReason: 'already-up',
+          })
           return
         }
         await this.writeLine(`RELEASE ${buttonToWire(op.button)}`)
@@ -522,7 +548,13 @@ export class PS2MouseService {
       }
 
       if (this.buttonsDown.has(op.button)) {
-        this.events.publish({ kind: 'mouse-button', button: op.button, action: 'click', noOp: true, noOpReason: 'already-down' })
+        this.events.publish({
+          kind: 'mouse-button',
+          button: op.button,
+          action: 'click',
+          noOp: true,
+          noOpReason: 'already-down',
+        })
         return
       }
 
@@ -607,7 +639,8 @@ export class PS2MouseService {
           ? Math.max(baseGain, Math.trunc(patch.accel.maxGain))
           : this.accel.maxGain
       const vel =
-        typeof patch.accel.velocityPxPerSecForMax === 'number' && Number.isFinite(patch.accel.velocityPxPerSecForMax)
+        typeof patch.accel.velocityPxPerSecForMax === 'number' &&
+        Number.isFinite(patch.accel.velocityPxPerSecForMax)
           ? Math.max(1, Math.trunc(patch.accel.velocityPxPerSecForMax))
           : this.accel.velocityPxPerSecForMax
 
@@ -890,7 +923,6 @@ export class PS2MouseService {
         if (!t) continue
 
         // Arduino emits "debug:" lines (including power status) that can appear before the ID token.
-        // NOTE: We do NOT publish mouse-debug-line here because handleData already publishes every line.
         if (t.startsWith('debug:') || t.startsWith('done:')) {
           continue
         }
@@ -901,8 +933,6 @@ export class PS2MouseService {
           token = t
           break
         }
-
-        // Not what we expected; keep scanning until deadline.
       }
 
       if (!token) {
@@ -960,10 +990,6 @@ export class PS2MouseService {
     })
   }
 
-  /**
-   * Legacy readLine() retained (not used by identify anymore).
-   * The prior implementation could drop lines if multiple arrived in a single chunk.
-   */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private async readLine(timeoutMs: number): Promise<string> {
     const start = safeNow()
@@ -1053,10 +1079,8 @@ export class PS2MouseService {
   }
 
   private handleData(chunk: string): void {
-    // Accumulate
     this.readBuffer += chunk
 
-    // Split on any common line ending: CRLF, LF, or CR
     const parts = this.readBuffer.split(/\r\n|\n|\r/)
     this.readBuffer = parts.pop() ?? ''
 
@@ -1064,7 +1088,6 @@ export class PS2MouseService {
       const line = raw.trim()
       if (!line) continue
 
-      // Feed identify FIFO until identified, so identify() cannot miss early token responses.
       if (!this.identified) {
         this.enqueuePendingLine(line)
       }
@@ -1072,9 +1095,7 @@ export class PS2MouseService {
       this.events.publish({ kind: 'mouse-debug-line', line } as any)
     }
 
-    // Safety valve: if firmware prints without line endings, flush periodically
-    // so you still see *something* in logs instead of buffering forever.
-    // IMPORTANT: do not enqueue this tail into identify FIFO because it may be partial.
+    // Safety valve: flush runaway tail (partial line spam protection).
     const MAX_TAIL = 256
     if (this.readBuffer.length > MAX_TAIL) {
       const tail = this.readBuffer.trim()
@@ -1168,7 +1189,9 @@ export class PS2MouseService {
     let stepDx = 0
     let stepDy = 0
 
-    if (this.moveMode === 'absolute') {
+    const mode = this.movement.mode
+
+    if (mode === 'absolute') {
       const target = this.movement.absTarget
       if (!target) return
 
@@ -1215,7 +1238,7 @@ export class PS2MouseService {
           y: nextY,
           dx: stepDx,
           dy: stepDy,
-          mode: this.moveMode,
+          mode,
         })
       }
     } catch (err) {
@@ -1247,7 +1270,9 @@ export class PS2MouseService {
       this.movement.warnedUnknownGrid = true
       this.events.publish({
         kind: 'recoverable-error',
-        error: new Error('ps2-mouse absolute mapping: unknown resolution in auto grid mode; using fallback 1024x768'),
+        error: new Error(
+          'ps2-mouse absolute mapping: unknown resolution in auto grid mode; using fallback 1024x768'
+        ),
       })
     }
 
