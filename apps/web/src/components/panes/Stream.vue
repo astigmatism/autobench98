@@ -104,7 +104,17 @@
                 <!-- Mouse tuning panel -->
                 <div class="mouse-panel">
                     <div class="mouse-header">
-                        <span class="mouse-title">Mouse settings</span>
+                        <button
+                            class="section-toggle"
+                            type="button"
+                            :aria-expanded="mousePanelOpen ? 'true' : 'false'"
+                            aria-controls="stream-mouse-panel-body"
+                            @click="mousePanelOpen = !mousePanelOpen"
+                        >
+                            <span class="section-chev" :data-open="mousePanelOpen ? 'true' : 'false'">▾</span>
+                            <span class="mouse-title">Mouse settings</span>
+                        </button>
+
                         <div class="mouse-actions">
                             <label class="checkbox panel panel-text mouse-inline">
                                 <input type="checkbox" v-model="mouseDeviceAutoApply" />
@@ -116,176 +126,195 @@
                         </div>
                     </div>
 
-                    <div class="mouse-subtitle">Client-side shaping (per browser)</div>
+                    <transition name="collapse">
+                        <div v-show="mousePanelOpen" id="stream-mouse-panel-body">
+                            <div class="mouse-subtitle">Client-side shaping (per browser)</div>
 
-                    <div class="mouse-grid">
-                        <label class="select panel-text">
-                            <span>Send rate</span>
-                            <select v-model="mouseSendRate">
-                                <option value="raf">RAF (monitor)</option>
-                                <option value="120">120</option>
-                                <option value="90">90</option>
-                                <option value="60">60</option>
-                                <option value="30">30</option>
-                                <option value="20">20</option>
-                                <option value="15">15</option>
-                            </select>
-                        </label>
+                            <div class="mouse-grid">
+                                <label class="select panel-text">
+                                    <span>Send rate</span>
+                                    <select v-model="mouseSendRate">
+                                        <option value="raf">RAF (monitor)</option>
+                                        <option value="120">120</option>
+                                        <option value="90">90</option>
+                                        <option value="60">60</option>
+                                        <option value="30">30</option>
+                                        <option value="20">20</option>
+                                        <option value="15">15</option>
+                                    </select>
+                                </label>
 
-                        <label class="input panel-text">
-                            <span>Sensitivity</span>
-                            <input
-                                type="number"
-                                inputmode="decimal"
-                                step="0.05"
-                                min="0.05"
-                                max="10"
-                                v-model.number="mouseSensitivity"
-                            />
-                        </label>
+                                <label class="input panel-text">
+                                    <span>Sensitivity</span>
+                                    <input
+                                        type="number"
+                                        inputmode="decimal"
+                                        step="0.05"
+                                        min="0.05"
+                                        max="10"
+                                        v-model.number="mouseSensitivity"
+                                    />
+                                </label>
 
-                        <label class="input panel-text">
-                            <span>Smoothing</span>
-                            <input
-                                type="number"
-                                inputmode="decimal"
-                                step="0.05"
-                                min="0"
-                                max="0.95"
-                                v-model.number="mouseSmoothing"
-                            />
-                        </label>
+                                <label class="input panel-text">
+                                    <span>Smoothing</span>
+                                    <input
+                                        type="number"
+                                        inputmode="decimal"
+                                        step="0.05"
+                                        min="0"
+                                        max="0.95"
+                                        v-model.number="mouseSmoothing"
+                                    />
+                                </label>
 
-                        <label class="input panel-text">
-                            <span>Max delta/send</span>
-                            <input
-                                type="number"
-                                inputmode="numeric"
-                                step="1"
-                                min="1"
-                                max="500"
-                                v-model.number="mouseMaxDeltaPerSend"
-                            />
-                        </label>
+                                <label class="input panel-text">
+                                    <span>Max delta/send</span>
+                                    <input
+                                        type="number"
+                                        inputmode="numeric"
+                                        step="1"
+                                        min="1"
+                                        max="500"
+                                        v-model.number="mouseMaxDeltaPerSend"
+                                    />
+                                </label>
 
-                        <label class="checkbox panel panel-text">
-                            <input type="checkbox" v-model="mouseInvertX" />
-                            <span>Invert X</span>
-                        </label>
+                                <label class="checkbox panel panel-text">
+                                    <input type="checkbox" v-model="mouseInvertX" />
+                                    <span>Invert X</span>
+                                </label>
 
-                        <label class="checkbox panel panel-text">
-                            <input type="checkbox" v-model="mouseInvertY" />
-                            <span>Invert Y</span>
-                        </label>
-                    </div>
+                                <label class="checkbox panel panel-text">
+                                    <input type="checkbox" v-model="mouseInvertY" />
+                                    <span>Invert Y</span>
+                                </label>
+                            </div>
 
-                    <div class="mouse-subtitle">Device tuning (applies to Arduino/service)</div>
+                            <div class="mouse-subtitle">Device tuning (applies to Arduino/service)</div>
 
-                    <div class="mouse-grid">
-                        <label class="select panel-text">
-                            <span>Mode</span>
-                            <select v-model="mouseDeviceMode">
-                                <option value="relative-gain">Relative gain</option>
-                                <option value="relative-accel">Relative accel</option>
-                                <option value="absolute">Absolute (requires absolute input)</option>
-                            </select>
-                        </label>
+                            <div class="mouse-grid">
+                                <label class="select panel-text">
+                                    <span>Mode</span>
+                                    <select v-model="mouseDeviceMode">
+                                        <option value="relative-gain">Relative gain</option>
+                                        <option value="relative-accel">Relative accel</option>
+                                        <option value="absolute">Absolute (requires absolute input)</option>
+                                    </select>
+                                </label>
 
-                        <label class="input panel-text">
-                            <span>Gain</span>
-                            <input type="number" step="1" min="1" max="200" v-model.number="mouseDeviceGain" />
-                        </label>
+                                <label class="input panel-text">
+                                    <span>Gain</span>
+                                    <input type="number" step="1" min="1" max="200" v-model.number="mouseDeviceGain" />
+                                </label>
 
-                        <label class="checkbox panel panel-text">
-                            <input type="checkbox" v-model="mouseDeviceAccelEnabled" />
-                            <span>Accel enabled</span>
-                        </label>
+                                <label class="checkbox panel panel-text">
+                                    <input type="checkbox" v-model="mouseDeviceAccelEnabled" />
+                                    <span>Accel enabled</span>
+                                </label>
 
-                        <label class="input panel-text">
-                            <span>Accel base</span>
-                            <input
-                                type="number"
-                                step="1"
-                                min="1"
-                                max="200"
-                                v-model.number="mouseDeviceAccelBaseGain"
-                            />
-                        </label>
+                                <label class="input panel-text">
+                                    <span>Accel base</span>
+                                    <input
+                                        type="number"
+                                        step="1"
+                                        min="1"
+                                        max="200"
+                                        v-model.number="mouseDeviceAccelBaseGain"
+                                    />
+                                </label>
 
-                        <label class="input panel-text">
-                            <span>Accel max</span>
-                            <input
-                                type="number"
-                                step="1"
-                                min="1"
-                                max="500"
-                                v-model.number="mouseDeviceAccelMaxGain"
-                            />
-                        </label>
+                                <label class="input panel-text">
+                                    <span>Accel max</span>
+                                    <input
+                                        type="number"
+                                        step="1"
+                                        min="1"
+                                        max="500"
+                                        v-model.number="mouseDeviceAccelMaxGain"
+                                    />
+                                </label>
 
-                        <label class="input panel-text">
-                            <span>Vel for max</span>
-                            <input
-                                type="number"
-                                step="10"
-                                min="10"
-                                max="50000"
-                                v-model.number="mouseDeviceAccelVelForMax"
-                            />
-                        </label>
+                                <label class="input panel-text">
+                                    <span>Vel for max</span>
+                                    <input
+                                        type="number"
+                                        step="10"
+                                        min="10"
+                                        max="50000"
+                                        v-model.number="mouseDeviceAccelVelForMax"
+                                    />
+                                </label>
 
-                        <label class="select panel-text">
-                            <span>Abs grid</span>
-                            <select v-model="mouseDeviceGridMode">
-                                <option value="auto">Auto</option>
-                                <option value="fixed">Fixed</option>
-                            </select>
-                        </label>
+                                <label class="select panel-text">
+                                    <span>Abs grid</span>
+                                    <select v-model="mouseDeviceGridMode">
+                                        <option value="auto">Auto</option>
+                                        <option value="fixed">Fixed</option>
+                                    </select>
+                                </label>
 
-                        <label class="input panel-text" :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'">
-                            <span>Grid W</span>
-                            <input
-                                :disabled="mouseDeviceGridMode !== 'fixed'"
-                                type="number"
-                                step="1"
-                                min="1"
-                                max="10000"
-                                v-model.number="mouseDeviceGridW"
-                            />
-                        </label>
+                                <label
+                                    class="input panel-text"
+                                    :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'"
+                                >
+                                    <span>Grid W</span>
+                                    <input
+                                        :disabled="mouseDeviceGridMode !== 'fixed'"
+                                        type="number"
+                                        step="1"
+                                        min="1"
+                                        max="10000"
+                                        v-model.number="mouseDeviceGridW"
+                                    />
+                                </label>
 
-                        <label class="input panel-text" :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'">
-                            <span>Grid H</span>
-                            <input
-                                :disabled="mouseDeviceGridMode !== 'fixed'"
-                                type="number"
-                                step="1"
-                                min="1"
-                                max="10000"
-                                v-model.number="mouseDeviceGridH"
-                            />
-                        </label>
-                    </div>
+                                <label
+                                    class="input panel-text"
+                                    :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'"
+                                >
+                                    <span>Grid H</span>
+                                    <input
+                                        :disabled="mouseDeviceGridMode !== 'fixed'"
+                                        type="number"
+                                        step="1"
+                                        min="1"
+                                        max="10000"
+                                        v-model.number="mouseDeviceGridH"
+                                    />
+                                </label>
+                            </div>
 
-                    <div class="mouse-note">
-                        Notes:
-                        <ul>
-                            <li>
-                                <b>Send rate</b> caps how often this browser emits WS mouse moves (reduces overload on fast systems).
-                            </li>
-                            <li>
-                                <b>Max delta/send</b> breaks large moves into smaller chunks to avoid spiky bursts.
-                            </li>
-                            <li>
-                                <b>Absolute</b> mode only helps if you send <code>mouse.move.absolute</code> (this pane uses pointer lock relative moves).
-                            </li>
-                        </ul>
-                    </div>
+                            <div class="mouse-note">
+                                Notes:
+                                <ul>
+                                    <li>
+                                        <b>Send rate</b> caps how often this browser emits WS mouse moves (reduces overload on fast systems).
+                                    </li>
+                                    <li>
+                                        <b>Max delta/send</b> breaks large moves into smaller chunks to avoid spiky bursts.
+                                    </li>
+                                    <li>
+                                        <b>Absolute</b> mode only helps if you send <code>mouse.move.absolute</code> (this pane uses pointer lock relative moves).
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                    </transition>
                 </div>
 
                 <div class="health-panel">
                     <div class="health-header">
-                        <span class="health-title">Sidecar / Stream health</span>
+                        <button
+                            class="section-toggle"
+                            type="button"
+                            :aria-expanded="healthPanelOpen ? 'true' : 'false'"
+                            aria-controls="stream-health-panel-body"
+                            @click="healthPanelOpen = !healthPanelOpen"
+                        >
+                            <span class="section-chev" :data-open="healthPanelOpen ? 'true' : 'false'">▾</span>
+                            <span class="health-title">Sidecar / Stream health</span>
+                        </button>
 
                         <span class="health-meta">
                             <span v-if="healthLoading" class="health-pill health-pill--loading">
@@ -300,126 +329,130 @@
                         </span>
                     </div>
 
-                    <div v-if="healthError" class="health-error">⚠️ {{ healthError }}</div>
+                    <transition name="collapse">
+                        <div v-show="healthPanelOpen" id="stream-health-panel-body">
+                            <div v-if="healthError" class="health-error">⚠️ {{ healthError }}</div>
 
-                    <div v-else-if="health" class="health-grid">
-                        <div class="health-row">
-                            <span class="label">Service</span>
-                            <span class="value monospace">{{ health.service }}</span>
+                            <div v-else-if="health" class="health-grid">
+                                <div class="health-row">
+                                    <span class="label">Service</span>
+                                    <span class="value monospace">{{ health.service }}</span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Uptime</span>
+                                    <span class="value">
+                                        {{ formattedUptime }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Capture</span>
+                                    <span class="value">
+                                        <span v-if="health.capture?.running">Running</span>
+                                        <span v-else>Stopped</span>
+                                        <span v-if="health.capture?.restartCount != null">
+                                            · {{ health.capture.restartCount }} restart<span
+                                                v-if="health.capture.restartCount !== 1"
+                                                >s</span
+                                            >
+                                        </span>
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Viewer cap</span>
+                                    <span class="value monospace">
+                                        {{ viewerCapLabel }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Resyncs</span>
+                                    <span class="value monospace">
+                                        {{ resyncCount }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Capture age</span>
+                                    <span class="value monospace" :data-age="captureAgeBucket">
+                                        {{ formattedCaptureAge }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Backlog est</span>
+                                    <span class="value monospace" :data-age="backlogBucket">
+                                        {{ formattedBacklog }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Buffered</span>
+                                    <span class="value monospace">
+                                        {{ formattedBuffered }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Downstream</span>
+                                    <span class="value monospace">
+                                        {{ formattedDownstream }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Backpressure</span>
+                                    <span class="value monospace">
+                                        {{ formattedBackpressure }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Avg frame</span>
+                                    <span class="value monospace">
+                                        {{ formattedAvgFrame }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Health RTT</span>
+                                    <span class="value monospace">
+                                        {{ healthRttMs != null ? `${healthRttMs}ms` : '—' }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Frame</span>
+                                    <span class="value monospace">
+                                        {{ health.capture?.metrics?.frame ?? '—' }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">FPS</span>
+                                    <span class="value monospace">
+                                        {{ health.capture?.metrics?.fps ?? '—' }}
+                                    </span>
+                                </div>
+
+                                <div class="health-row">
+                                    <span class="label">Quality</span>
+                                    <span class="value monospace">
+                                        {{ health.capture?.metrics?.quality ?? '—' }}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div v-else class="health-empty">No health data yet.</div>
+
+                            <div v-if="health" class="health-note">
+                                If Capture age stays low but Backlog est climbs, the stream path is backlogged
+                                (decode/throughput), not capture.
+                            </div>
                         </div>
-
-                        <div class="health-row">
-                            <span class="label">Uptime</span>
-                            <span class="value">
-                                {{ formattedUptime }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Capture</span>
-                            <span class="value">
-                                <span v-if="health.capture?.running">Running</span>
-                                <span v-else>Stopped</span>
-                                <span v-if="health.capture?.restartCount != null">
-                                    · {{ health.capture.restartCount }} restart<span
-                                        v-if="health.capture.restartCount !== 1"
-                                        >s</span
-                                    >
-                                </span>
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Viewer cap</span>
-                            <span class="value monospace">
-                                {{ viewerCapLabel }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Resyncs</span>
-                            <span class="value monospace">
-                                {{ resyncCount }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Capture age</span>
-                            <span class="value monospace" :data-age="captureAgeBucket">
-                                {{ formattedCaptureAge }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Backlog est</span>
-                            <span class="value monospace" :data-age="backlogBucket">
-                                {{ formattedBacklog }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Buffered</span>
-                            <span class="value monospace">
-                                {{ formattedBuffered }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Downstream</span>
-                            <span class="value monospace">
-                                {{ formattedDownstream }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Backpressure</span>
-                            <span class="value monospace">
-                                {{ formattedBackpressure }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Avg frame</span>
-                            <span class="value monospace">
-                                {{ formattedAvgFrame }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Health RTT</span>
-                            <span class="value monospace">
-                                {{ healthRttMs != null ? `${healthRttMs}ms` : '—' }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Frame</span>
-                            <span class="value monospace">
-                                {{ health.capture?.metrics?.frame ?? '—' }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">FPS</span>
-                            <span class="value monospace">
-                                {{ health.capture?.metrics?.fps ?? '—' }}
-                            </span>
-                        </div>
-
-                        <div class="health-row">
-                            <span class="label">Quality</span>
-                            <span class="value monospace">
-                                {{ health.capture?.metrics?.quality ?? '—' }}
-                            </span>
-                        </div>
-                    </div>
-
-                    <div v-else class="health-empty">No health data yet.</div>
-
-                    <div v-if="health" class="health-note">
-                        If Capture age stays low but Backlog est climbs, the stream path is backlogged
-                        (decode/throughput), not capture.
-                    </div>
+                    </transition>
                 </div>
             </div>
         </transition>
@@ -458,11 +491,7 @@
                             <div class="stream-glow kb-glow" aria-hidden="true"></div>
                         </div>
 
-                        <div
-                            v-if="scaleMode === 'native'"
-                            class="capture-glow kb-glow"
-                            aria-hidden="true"
-                        ></div>
+                        <div v-if="scaleMode === 'native'" class="capture-glow kb-glow" aria-hidden="true"></div>
 
                         <div v-if="isCapturing" class="kb-overlay" aria-hidden="true">
                             <div class="kb-overlay-inner">
@@ -609,6 +638,10 @@ type StreamPanePrefs = {
     mouseDeviceGridMode?: MouseGridMode
     mouseDeviceGridW?: number
     mouseDeviceGridH?: number
+
+    // UI collapse state
+    mousePanelOpen?: boolean
+    healthPanelOpen?: boolean
 }
 
 function isObject(x: any): x is Record<string, unknown> {
@@ -713,6 +746,9 @@ const paneFg = computed(() => {
 const panelFg = '#e6e6e6'
 
 const showControls = ref(false)
+const mousePanelOpen = ref(true)
+const healthPanelOpen = ref(false)
+
 const enabled = ref(true)
 const scaleMode = ref<'fit' | 'fill' | 'stretch' | 'native'>('fit')
 const bgMode = ref<'black' | 'pane'>('black')
@@ -1800,6 +1836,12 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 
     const gh = (prefs as any).mouseDeviceGridH
     if (typeof gh === 'number' && Number.isFinite(gh)) mouseDeviceGridH.value = clampIntSigned(gh, 1, 100000)
+
+    const mpo = (prefs as any).mousePanelOpen
+    if (typeof mpo === 'boolean') mousePanelOpen.value = mpo
+
+    const hpo = (prefs as any).healthPanelOpen
+    if (typeof hpo === 'boolean') healthPanelOpen.value = hpo
 }
 
 function exportPanePrefs(): StreamPanePrefs {
@@ -1832,6 +1874,9 @@ function exportPanePrefs(): StreamPanePrefs {
         mouseDeviceGridMode: mouseDeviceGridMode.value,
         mouseDeviceGridW: mouseDeviceGridW.value,
         mouseDeviceGridH: mouseDeviceGridH.value,
+
+        mousePanelOpen: mousePanelOpen.value,
+        healthPanelOpen: healthPanelOpen.value,
     }
 }
 
@@ -1898,6 +1943,9 @@ watch(
         () => mouseDeviceGridMode.value,
         () => mouseDeviceGridW.value,
         () => mouseDeviceGridH.value,
+
+        () => mousePanelOpen.value,
+        () => healthPanelOpen.value,
     ],
     () => writePanePrefs(exportPanePrefs())
 )
@@ -1971,9 +2019,7 @@ const captureAgeMs = computed(() => {
     if (ms == null || !Number.isFinite(ms)) return null
     return clampNonNeg(ms)
 })
-const formattedCaptureAge = computed(() =>
-    captureAgeMs.value == null ? '—' : formatAge(captureAgeMs.value)
-)
+const formattedCaptureAge = computed(() => (captureAgeMs.value == null ? '—' : formatAge(captureAgeMs.value)))
 const captureAgeBucket = computed(() => {
     const ms = captureAgeMs.value
     if (ms == null) return 'unknown'
@@ -2293,8 +2339,7 @@ onBeforeUnmount(() => {
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease,
-        transform 60ms ease;
+    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease, transform 60ms ease;
     z-index: 31;
 }
 
@@ -2317,6 +2362,44 @@ onBeforeUnmount(() => {
 .slide-fade-leave-to {
     opacity: 0;
     transform: translateY(-6px);
+}
+
+/* Collapsible sections (mouse + health) */
+.collapse-enter-active,
+.collapse-leave-active {
+    transition: max-height 180ms ease, opacity 180ms ease;
+    overflow: hidden;
+}
+.collapse-enter-from,
+.collapse-leave-to {
+    max-height: 0;
+    opacity: 0;
+}
+.collapse-enter-to,
+.collapse-leave-from {
+    max-height: 2000px;
+    opacity: 1;
+}
+
+.section-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--panel-fg);
+    cursor: pointer;
+    user-select: none;
+    text-align: left;
+}
+.section-chev {
+    display: inline-block;
+    transform-origin: center;
+    transition: transform 120ms ease;
+}
+.section-chev[data-open='false'] {
+    transform: rotate(-90deg);
 }
 
 .controls-panel {
@@ -2666,8 +2749,7 @@ onBeforeUnmount(() => {
     pointer-events: none;
     opacity: 0;
     transition: opacity 120ms ease;
-    background-image:
-        linear-gradient(to bottom, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px),
+    background-image: linear-gradient(to bottom, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px),
         linear-gradient(to top, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px),
         linear-gradient(to right, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px),
         linear-gradient(to left, rgba(var(--kb-accent-rgb), 0.75), rgba(var(--kb-accent-rgb), 0) 15px);
@@ -2728,8 +2810,7 @@ onBeforeUnmount(() => {
 }
 
 .monospace {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
-        'Courier New', monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
 }
 
 .frontpanel-leds {
@@ -2875,11 +2956,7 @@ onBeforeUnmount(() => {
     font-size: 0.76rem;
     font-weight: 500;
     text-align: center;
-    transition:
-        background 120ms ease,
-        border-color 120ms ease,
-        transform 60ms ease,
-        box-shadow 120ms ease,
+    transition: background 120ms ease, border-color 120ms ease, transform 60ms ease, box-shadow 120ms ease,
         opacity 120ms ease;
     user-select: none;
     white-space: nowrap;
