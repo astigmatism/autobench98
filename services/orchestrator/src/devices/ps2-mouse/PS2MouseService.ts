@@ -169,7 +169,13 @@ export class PS2MouseService {
   // Movement aggregation / tick flush state (spec v0.3 §8)
   private movement: MovementState
 
+  /**
+   * Movement tick loop (IMPORTANT):
+   * - Must NOT overlap (async re-entrancy creates out-of-order MOVE commands).
+   * - We therefore run a self-scheduling async loop (setTimeout after await).
+   */
   private moveTimer: NodeJS.Timeout | null = null
+  private moveLoopActive = false
 
   /**
    * Identify safety fix:
@@ -385,6 +391,9 @@ export class PS2MouseService {
     if (this.active) {
       this.requestCancelActiveOp(reason)
     }
+
+    // CRITICAL: also clear movement state so a fast fling can't keep moving after cancel.
+    this.clearMovementState(`cancelAll:${reason}`)
 
     this.emitQueueDepth()
   }
@@ -990,51 +999,6 @@ export class PS2MouseService {
     })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private async readLine(timeoutMs: number): Promise<string> {
-    const start = safeNow()
-    let buf = ''
-
-    return new Promise<string>((resolve, reject) => {
-      if (!this.port) return reject(new Error('port not open'))
-
-      const port = this.port
-      let finished = false
-
-      const onData = (data: Buffer) => {
-        if (finished) return
-        buf += data.toString('utf8')
-        const lines = buf.split(/\r?\n/)
-        buf = lines.pop() ?? ''
-        for (const l of lines) {
-          const line = l.trim()
-          if (!line) continue
-          cleanup()
-          finished = true
-          resolve(line)
-          return
-        }
-      }
-
-      const cleanup = () => port.off('data', onData)
-
-      port.on('data', onData)
-
-      const tick = () => {
-        if (finished) return
-        if (safeNow() - start >= timeoutMs) {
-          cleanup()
-          finished = true
-          reject(new Error('identify timeout'))
-        } else {
-          setTimeout(tick, 25)
-        }
-      }
-
-      tick()
-    })
-  }
-
   private takeNextLine(timeoutMs: number): Promise<string> {
     const immediate = this.pendingLines.shift()
     if (immediate != null) return Promise.resolve(immediate)
@@ -1159,18 +1123,30 @@ export class PS2MouseService {
   /* ---------------------------------------------------------------------- */
 
   private ensureMoveTickRunning(): void {
-    if (this.moveTimer) return
+    if (this.moveLoopActive) return
+
+    this.moveLoopActive = true
+
     const hz = Math.max(1, Math.trunc(this.cfg.movement.tickHz))
     const intervalMs = Math.max(1, Math.floor(1000 / hz))
 
-    this.moveTimer = setInterval(() => {
-      void this.flushMovementTick()
-    }, intervalMs)
+    const tick = async () => {
+      if (!this.moveLoopActive) return
+      await this.flushMovementTick()
+      if (!this.moveLoopActive) return
+
+      // schedule AFTER await => no overlap
+      this.moveTimer = setTimeout(() => void tick(), intervalMs)
+    }
+
+    // start the loop
+    this.moveTimer = setTimeout(() => void tick(), intervalMs)
   }
 
   private stopMoveTick(): void {
+    this.moveLoopActive = false
     if (this.moveTimer) {
-      clearInterval(this.moveTimer)
+      clearTimeout(this.moveTimer)
       this.moveTimer = null
     }
   }
@@ -1201,29 +1177,66 @@ export class PS2MouseService {
 
       nextX = clampInt(cur.x + stepDx, 0, grid.w - 1)
       nextY = clampInt(cur.y + stepDy, 0, grid.h - 1)
-    } else {
-      const acc = this.movement.relAcc
-      const consume = (v: number): number => {
-        if (!Number.isFinite(v) || v === 0) return 0
-        const mag = Math.min(Math.abs(v), max)
-        return v < 0 ? -mag : mag
+
+      // should be redundant (target is clamped), but keep guard
+      if (nextX === cur.x && nextY === cur.y) return
+
+      try {
+        await this.writeLine(`MOVE ${nextX},${nextY}`)
+        this.movement.cursor.x = nextX
+        this.movement.cursor.y = nextY
+
+        const now = safeNow()
+        const last = this.movement.lastMoveTickEvtAt
+        const shouldEmit = last == null || now - last >= 250
+        if (shouldEmit) {
+          this.movement.lastMoveTickEvtAt = now
+          this.events.publish({
+            kind: 'mouse-move-tick',
+            x: nextX,
+            y: nextY,
+            dx: stepDx,
+            dy: stepDy,
+            mode,
+          })
+        }
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error('movement tick failed')
+        this.events.publish({ kind: 'recoverable-error', error: e })
       }
 
-      stepDx = Math.trunc(consume(acc.dx))
-      stepDy = Math.trunc(consume(acc.dy))
-      if (stepDx === 0 && stepDy === 0) return
-
-      acc.dx -= stepDx
-      acc.dy -= stepDy
-
-      nextX = clampInt(cur.x + stepDx, 0, grid.w - 1)
-      nextY = clampInt(cur.y + stepDy, 0, grid.h - 1)
+      return
     }
 
-    if (nextX === cur.x && nextY === cur.y) return
+    // Relative modes: compute a candidate step, but DO NOT consume the accumulator
+    // until the MOVE line is successfully written. This prevents losing movement on transient write failures.
+    const acc = this.movement.relAcc
+    const consume = (v: number): number => {
+      if (!Number.isFinite(v) || v === 0) return 0
+      const mag = Math.min(Math.abs(v), max)
+      return v < 0 ? -mag : mag
+    }
+
+    stepDx = Math.trunc(consume(acc.dx))
+    stepDy = Math.trunc(consume(acc.dy))
+    if (stepDx === 0 && stepDy === 0) return
+
+    nextX = clampInt(cur.x + stepDx, 0, grid.w - 1)
+    nextY = clampInt(cur.y + stepDy, 0, grid.h - 1)
+
+    // If clamped to the same point (edge), drain the accumulator to avoid runaway backlog.
+    if (nextX === cur.x && nextY === cur.y) {
+      acc.dx -= stepDx
+      acc.dy -= stepDy
+      return
+    }
 
     try {
       await this.writeLine(`MOVE ${nextX},${nextY}`)
+
+      // Commit only after success.
+      acc.dx -= stepDx
+      acc.dy -= stepDy
       this.movement.cursor.x = nextX
       this.movement.cursor.y = nextY
 
@@ -1253,7 +1266,15 @@ export class PS2MouseService {
 
   private resolveGridFromConfig(cfg: MouseAbsoluteGridConfig): Grid | null {
     if (cfg.mode === 'fixed') {
-      return { w: cfg.fixed.w, h: cfg.fixed.h }
+      // Safety: validate at runtime as well (protects against malformed WS patches)
+      const w = (cfg as any)?.fixed?.w
+      const h = (cfg as any)?.fixed?.h
+      if (typeof w === 'number' && typeof h === 'number' && Number.isFinite(w) && Number.isFinite(h)) {
+        const iw = Math.max(1, Math.trunc(w))
+        const ih = Math.max(1, Math.trunc(h))
+        return { w: iw, h: ih }
+      }
+      return null
     }
     return null
   }

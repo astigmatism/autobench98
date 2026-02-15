@@ -101,6 +101,188 @@
                     <div class="right"></div>
                 </div>
 
+                <!-- NEW: Mouse tuning panel -->
+                <div class="mouse-panel">
+                    <div class="mouse-header">
+                        <span class="mouse-title">Mouse settings</span>
+                        <div class="mouse-actions">
+                            <label class="checkbox panel panel-text mouse-inline">
+                                <input type="checkbox" v-model="mouseDeviceAutoApply" />
+                                <span>Auto-apply device tuning on capture</span>
+                            </label>
+                            <button class="mouse-btn" type="button" @click="applyMouseDeviceConfig">
+                                Apply device tuning
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="mouse-subtitle">Client-side shaping (per browser)</div>
+
+                    <div class="mouse-grid">
+                        <label class="select panel-text">
+                            <span>Send rate</span>
+                            <select v-model="mouseSendRate">
+                                <option value="raf">RAF (monitor)</option>
+                                <option value="120">120</option>
+                                <option value="90">90</option>
+                                <option value="60">60</option>
+                                <option value="30">30</option>
+                                <option value="20">20</option>
+                                <option value="15">15</option>
+                            </select>
+                        </label>
+
+                        <label class="input panel-text">
+                            <span>Sensitivity</span>
+                            <input
+                                type="number"
+                                inputmode="decimal"
+                                step="0.05"
+                                min="0.05"
+                                max="10"
+                                v-model.number="mouseSensitivity"
+                            />
+                        </label>
+
+                        <label class="input panel-text">
+                            <span>Smoothing</span>
+                            <input
+                                type="number"
+                                inputmode="decimal"
+                                step="0.05"
+                                min="0"
+                                max="0.95"
+                                v-model.number="mouseSmoothing"
+                            />
+                        </label>
+
+                        <label class="input panel-text">
+                            <span>Max delta/send</span>
+                            <input
+                                type="number"
+                                inputmode="numeric"
+                                step="1"
+                                min="1"
+                                max="500"
+                                v-model.number="mouseMaxDeltaPerSend"
+                            />
+                        </label>
+
+                        <label class="checkbox panel panel-text">
+                            <input type="checkbox" v-model="mouseInvertX" />
+                            <span>Invert X</span>
+                        </label>
+
+                        <label class="checkbox panel panel-text">
+                            <input type="checkbox" v-model="mouseInvertY" />
+                            <span>Invert Y</span>
+                        </label>
+                    </div>
+
+                    <div class="mouse-subtitle">Device tuning (applies to Arduino/service)</div>
+
+                    <div class="mouse-grid">
+                        <label class="select panel-text">
+                            <span>Mode</span>
+                            <select v-model="mouseDeviceMode">
+                                <option value="relative-gain">Relative gain</option>
+                                <option value="relative-accel">Relative accel</option>
+                                <option value="absolute">Absolute (requires absolute input)</option>
+                            </select>
+                        </label>
+
+                        <label class="input panel-text">
+                            <span>Gain</span>
+                            <input type="number" step="1" min="1" max="200" v-model.number="mouseDeviceGain" />
+                        </label>
+
+                        <label class="checkbox panel panel-text">
+                            <input type="checkbox" v-model="mouseDeviceAccelEnabled" />
+                            <span>Accel enabled</span>
+                        </label>
+
+                        <label class="input panel-text">
+                            <span>Accel base</span>
+                            <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                max="200"
+                                v-model.number="mouseDeviceAccelBaseGain"
+                            />
+                        </label>
+
+                        <label class="input panel-text">
+                            <span>Accel max</span>
+                            <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                max="500"
+                                v-model.number="mouseDeviceAccelMaxGain"
+                            />
+                        </label>
+
+                        <label class="input panel-text">
+                            <span>Vel for max</span>
+                            <input
+                                type="number"
+                                step="10"
+                                min="10"
+                                max="50000"
+                                v-model.number="mouseDeviceAccelVelForMax"
+                            />
+                        </label>
+
+                        <label class="select panel-text">
+                            <span>Abs grid</span>
+                            <select v-model="mouseDeviceGridMode">
+                                <option value="auto">Auto</option>
+                                <option value="fixed">Fixed</option>
+                            </select>
+                        </label>
+
+                        <label class="input panel-text" :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'">
+                            <span>Grid W</span>
+                            <input
+                                :disabled="mouseDeviceGridMode !== 'fixed'"
+                                type="number"
+                                step="1"
+                                min="1"
+                                max="10000"
+                                v-model.number="mouseDeviceGridW"
+                            />
+                        </label>
+
+                        <label class="input panel-text" :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'">
+                            <span>Grid H</span>
+                            <input
+                                :disabled="mouseDeviceGridMode !== 'fixed'"
+                                type="number"
+                                step="1"
+                                min="1"
+                                max="10000"
+                                v-model.number="mouseDeviceGridH"
+                            />
+                        </label>
+                    </div>
+
+                    <div class="mouse-note">
+                        Notes:
+                        <ul>
+                            <li>
+                                <b>Send rate</b> caps how often this browser emits WS mouse moves (reduces overload on fast systems).
+                            </li>
+                            <li>
+                                <b>Max delta/send</b> breaks large moves into smaller chunks to avoid spiky bursts.
+                            </li>
+                            <li>
+                                <b>Absolute</b> mode only helps if you send <code>mouse.move.absolute</code> (this pane uses pointer lock relative moves).
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
                 <div class="health-panel">
                     <div class="health-header">
                         <span class="health-title">Sidecar / Stream health</span>
@@ -390,6 +572,10 @@ type FrontPanelLedsPosition = 'top-left' | 'top-right'
 type FrontPanelLedsVisibility = 'always' | 'hover' | 'hidden'
 type FrontPanelLedMode = 'off' | 'on' | 'blink' | 'blink-fast' | 'pulse'
 
+type MouseSendRateMode = 'raf' | '120' | '90' | '60' | '30' | '20' | '15'
+type MouseDeviceMode = 'relative-gain' | 'relative-accel' | 'absolute'
+type MouseGridMode = 'auto' | 'fixed'
+
 type StreamPanePrefs = {
     enabled?: boolean
     scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
@@ -401,6 +587,26 @@ type StreamPanePrefs = {
 
     fpLedsPosition?: FrontPanelLedsPosition
     fpLedsVisibility?: FrontPanelLedsVisibility
+
+    // NEW: client-side mouse tuning
+    mouseSendRate?: MouseSendRateMode
+    mouseSensitivity?: number
+    mouseSmoothing?: number
+    mouseMaxDeltaPerSend?: number
+    mouseInvertX?: boolean
+    mouseInvertY?: boolean
+
+    // NEW: device-side tuning (mouse.config)
+    mouseDeviceAutoApply?: boolean
+    mouseDeviceMode?: MouseDeviceMode
+    mouseDeviceGain?: number
+    mouseDeviceAccelEnabled?: boolean
+    mouseDeviceAccelBaseGain?: number
+    mouseDeviceAccelMaxGain?: number
+    mouseDeviceAccelVelForMax?: number
+    mouseDeviceGridMode?: MouseGridMode
+    mouseDeviceGridW?: number
+    mouseDeviceGridH?: number
 }
 
 function isObject(x: any): x is Record<string, unknown> {
@@ -511,6 +717,51 @@ const bgMode = ref<'black' | 'pane'>('black')
 const reloadKey = ref(0)
 
 /* -------------------------------------------------------------------------- */
+/*  NEW: Mouse settings (client + device)                                     */
+/* -------------------------------------------------------------------------- */
+
+const mouseSendRate = ref<MouseSendRateMode>('60')
+const mouseSensitivity = ref<number>(1.0)
+const mouseSmoothing = ref<number>(0.0)
+const mouseMaxDeltaPerSend = ref<number>(80)
+const mouseInvertX = ref<boolean>(false)
+const mouseInvertY = ref<boolean>(false)
+
+const mouseDeviceAutoApply = ref<boolean>(false)
+const mouseDeviceMode = ref<MouseDeviceMode>('relative-gain')
+const mouseDeviceGain = ref<number>(10)
+
+const mouseDeviceAccelEnabled = ref<boolean>(true)
+const mouseDeviceAccelBaseGain = ref<number>(5)
+const mouseDeviceAccelMaxGain = ref<number>(20)
+const mouseDeviceAccelVelForMax = ref<number>(1000)
+
+const mouseDeviceGridMode = ref<MouseGridMode>('auto')
+const mouseDeviceGridW = ref<number>(1024)
+const mouseDeviceGridH = ref<number>(768)
+
+function clamp01(n: number): number {
+    if (!Number.isFinite(n)) return 0
+    return Math.max(0, Math.min(1, n))
+}
+function clampNum(n: number, min: number, max: number, fallback: number): number {
+    if (!Number.isFinite(n)) return fallback
+    return Math.max(min, Math.min(max, n))
+}
+function clampIntSigned(n: number, min: number, max: number): number {
+    if (!Number.isFinite(n)) return 0
+    const i = Math.trunc(n)
+    return Math.max(min, Math.min(max, i))
+}
+function resetMouseFilterState() {
+    // reset fractional carry + smoothing state so old state doesn't leak after toggles
+    floatCarryX = 0
+    floatCarryY = 0
+    smoothedX = 0
+    smoothedY = 0
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Front panel buttons state (visibility + position + hover)                 */
 /* -------------------------------------------------------------------------- */
 
@@ -584,7 +835,6 @@ const fpCanInteract = computed(() => fp.value.phase === 'ready' && fp.value.iden
 
 // Hard binding as requested:
 const fpPowerLedMode = computed<FrontPanelLedMode>(() => (fp.value.powerSense === 'on' ? 'on' : 'off'))
-
 const fpHddLedMode = computed<FrontPanelLedMode>(() => (fp.value.hddActive ? 'on' : 'off'))
 
 const powerHeldByClient = ref(false)
@@ -713,6 +963,39 @@ function sendMouse(payload: any) {
     }
 }
 
+function applyMouseDeviceConfig() {
+    // Validate and send a single queued mouse.config op (device-side).
+    const mode = mouseDeviceMode.value
+    const gain = clampIntSigned(mouseDeviceGain.value, 1, 200)
+
+    const accelEnabled = !!mouseDeviceAccelEnabled.value
+    const baseGain = clampIntSigned(mouseDeviceAccelBaseGain.value, 1, 500)
+    const maxGain = clampIntSigned(mouseDeviceAccelMaxGain.value, baseGain, 2000)
+    const velForMax = clampIntSigned(mouseDeviceAccelVelForMax.value, 1, 500000)
+
+    const gridMode = mouseDeviceGridMode.value
+    const w = clampIntSigned(mouseDeviceGridW.value, 1, 100000)
+    const h = clampIntSigned(mouseDeviceGridH.value, 1, 100000)
+
+    const absoluteGrid =
+        gridMode === 'fixed'
+            ? { mode: 'fixed', fixed: { w, h } }
+            : { mode: 'auto' }
+
+    sendMouse({
+        kind: 'mouse.config',
+        mode,
+        gain,
+        accel: {
+            enabled: accelEnabled,
+            baseGain,
+            maxGain,
+            velocityPxPerSecForMax: velForMax,
+        },
+        absoluteGrid,
+    })
+}
+
 function mapDomButton(btn: number): MouseButton | null {
     if (btn === 0) return 'left'
     if (btn === 1) return 'middle'
@@ -722,32 +1005,129 @@ function mapDomButton(btn: number): MouseButton | null {
 
 const heldMouseButtons = new Set<MouseButton>()
 
+// NEW: rate-limited sender state (supports RAF or fixed Hz)
 let pendingDx = 0
 let pendingDy = 0
 let moveRaf: number | null = null
+let moveTimer: number | null = null
+let lastFlushAt = 0
 
-function flushMouseMove() {
-    moveRaf = null
-    const dx = pendingDx
-    const dy = pendingDy
-    pendingDx = 0
-    pendingDy = 0
-    if (!isPointerLockedToCaptureEl()) return
-    if (dx === 0 && dy === 0) return
+// NEW: fractional + smoothing state
+let floatCarryX = 0
+let floatCarryY = 0
+let smoothedX = 0
+let smoothedY = 0
 
-    sendMouse({
-        kind: 'mouse.move.relative',
-        dx,
-        dy,
-        requestedBy: 'stream-pane',
-    })
+function clearMoveSchedule() {
+    if (moveRaf != null) {
+        cancelAnimationFrame(moveRaf)
+        moveRaf = null
+    }
+    if (moveTimer != null) {
+        window.clearTimeout(moveTimer)
+        moveTimer = null
+    }
 }
 
-function scheduleMouseMove(dx: number, dy: number) {
-    pendingDx += dx
-    pendingDy += dy
-    if (moveRaf != null) return
-    moveRaf = requestAnimationFrame(() => flushMouseMove())
+function flushMouseMove() {
+    clearMoveSchedule()
+
+    if (!isPointerLockedToCaptureEl()) {
+        pendingDx = 0
+        pendingDy = 0
+        return
+    }
+
+    const max = clampIntSigned(mouseMaxDeltaPerSend.value, 1, 10000)
+
+    // Chunking: only send up to max per flush; keep remainder for subsequent flushes.
+    let sendDx = pendingDx
+    let sendDy = pendingDy
+
+    if (Math.abs(sendDx) > max) sendDx = sendDx < 0 ? -max : max
+    if (Math.abs(sendDy) > max) sendDy = sendDy < 0 ? -max : max
+
+    pendingDx -= sendDx
+    pendingDy -= sendDy
+
+    if (sendDx !== 0 || sendDy !== 0) {
+        sendMouse({
+            kind: 'mouse.move.relative',
+            dx: sendDx,
+            dy: sendDy,
+            requestedBy: 'stream-pane',
+        })
+        lastFlushAt = performance.now()
+    }
+
+    // If backlog remains (because of max delta/send), schedule another flush.
+    if ((pendingDx !== 0 || pendingDy !== 0) && isPointerLockedToCaptureEl()) {
+        scheduleMouseFlush()
+    }
+}
+
+function scheduleMouseFlush() {
+    if (!isPointerLockedToCaptureEl()) return
+
+    if (mouseSendRate.value === 'raf') {
+        if (moveRaf != null) return
+        moveRaf = requestAnimationFrame(() => flushMouseMove())
+        return
+    }
+
+    const hz = parseInt(mouseSendRate.value, 10)
+    const effectiveHz = Number.isFinite(hz) && hz > 0 ? hz : 60
+    const intervalMs = 1000 / effectiveHz
+
+    if (moveTimer != null) return
+
+    const now = performance.now()
+    const elapsed = now - (lastFlushAt || 0)
+    const delay = elapsed >= intervalMs ? 0 : intervalMs - elapsed
+
+    moveTimer = window.setTimeout(() => flushMouseMove(), Math.max(0, Math.round(delay)))
+}
+
+function ingestMouseDelta(rawDx: number, rawDy: number) {
+    // Apply client shaping: invert, sensitivity, smoothing, fractional carry.
+    let dx = Number.isFinite(rawDx) ? rawDx : 0
+    let dy = Number.isFinite(rawDy) ? rawDy : 0
+    if (dx === 0 && dy === 0) return
+
+    if (mouseInvertX.value) dx = -dx
+    if (mouseInvertY.value) dy = -dy
+
+    const sens = clampNum(mouseSensitivity.value, 0.05, 10, 1.0)
+    let fx = dx * sens
+    let fy = dy * sens
+
+    const s = clampNum(mouseSmoothing.value, 0, 0.95, 0)
+    if (s > 0) {
+        // EMA smoothing: s acts like "alpha" (0=no smoothing; higher=more smoothing)
+        smoothedX = smoothedX + s * (fx - smoothedX)
+        smoothedY = smoothedY + s * (fy - smoothedY)
+        fx = smoothedX
+        fy = smoothedY
+    } else {
+        // if smoothing disabled, keep smoothed state from accumulating old values
+        smoothedX = 0
+        smoothedY = 0
+    }
+
+    floatCarryX += fx
+    floatCarryY += fy
+
+    const outDx = Math.trunc(floatCarryX)
+    const outDy = Math.trunc(floatCarryY)
+
+    floatCarryX -= outDx
+    floatCarryY -= outDy
+
+    if (outDx === 0 && outDy === 0) return
+
+    pendingDx += outDx
+    pendingDy += outDy
+    scheduleMouseFlush()
 }
 
 function releaseAllMouseButtons() {
@@ -915,6 +1295,12 @@ function onCaptureMouseDown(e: MouseEvent) {
 
     if (!isPointerLockedToCaptureEl()) {
         requestPointerLock()
+
+        // optionally auto-apply device tuning when capture begins
+        if (mouseDeviceAutoApply.value) {
+            applyMouseDeviceConfig()
+        }
+
         return
     }
 
@@ -941,7 +1327,7 @@ function onCaptureMouseMove(e: MouseEvent) {
     const dy = Number.isFinite(e.movementY) ? Math.trunc(e.movementY) : 0
     if (dx === 0 && dy === 0) return
 
-    scheduleMouseMove(dx, dy)
+    ingestMouseDelta(dx, dy)
 }
 
 function onCaptureWheel(e: WheelEvent) {
@@ -957,8 +1343,19 @@ function onCaptureWheel(e: WheelEvent) {
 function releaseCapture(opts?: { fromBlur?: boolean }) {
     const fromBlur = !!opts?.fromBlur
 
+    // IMPORTANT ordering:
+    // 1) cancel backend queue + movement accumulator first (so we don't cancel button releases we emit below)
+    // 2) then release held buttons explicitly (prevents stuck buttons)
+    sendMouse({ kind: 'mouse.cancelAll', reason: 'capture_end', requestedBy: 'stream-pane' })
+
     // Release any held mouse buttons first (prevents stuck buttons on unlock)
     releaseAllMouseButtons()
+
+    // Stop any client-side backlog and filter state
+    pendingDx = 0
+    pendingDy = 0
+    clearMoveSchedule()
+    resetMouseFilterState()
 
     if (heldModifiers.size > 0) {
         const codes = Array.from(heldModifiers).sort()
@@ -986,6 +1383,11 @@ function onPointerLockChange() {
         armOnNextFocus.value = false
         refreshWsClient()
         focusCaptureLayer()
+
+        if (mouseDeviceAutoApply.value) {
+            applyMouseDeviceConfig()
+        }
+
         return
     }
 
@@ -1234,6 +1636,16 @@ function isValidFpLedsVis(x: any): x is FrontPanelLedsVisibility {
     return x === 'always' || x === 'hover' || x === 'hidden'
 }
 
+function isValidMouseSendRate(x: any): x is MouseSendRateMode {
+    return x === 'raf' || x === '120' || x === '90' || x === '60' || x === '30' || x === '20' || x === '15'
+}
+function isValidMouseDeviceMode(x: any): x is MouseDeviceMode {
+    return x === 'relative-gain' || x === 'relative-accel' || x === 'absolute'
+}
+function isValidMouseGridMode(x: any): x is MouseGridMode {
+    return x === 'auto' || x === 'fixed'
+}
+
 const paneId = computed(() => String(props.pane?.id ?? '').trim())
 const STORAGE_PREFIX = 'stream:pane:ui:'
 const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
@@ -1288,6 +1700,56 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 
     const nextLedsVis = (prefs as any).fpLedsVisibility
     if (isValidFpLedsVis(nextLedsVis)) fpLedsVisibility.value = nextLedsVis
+
+    // Mouse client prefs
+    const msr = (prefs as any).mouseSendRate
+    if (isValidMouseSendRate(msr)) mouseSendRate.value = msr
+
+    const sens = (prefs as any).mouseSensitivity
+    if (typeof sens === 'number' && Number.isFinite(sens)) mouseSensitivity.value = clampNum(sens, 0.05, 10, 1)
+
+    const sm = (prefs as any).mouseSmoothing
+    if (typeof sm === 'number' && Number.isFinite(sm)) mouseSmoothing.value = clampNum(sm, 0, 0.95, 0)
+
+    const md = (prefs as any).mouseMaxDeltaPerSend
+    if (typeof md === 'number' && Number.isFinite(md)) mouseMaxDeltaPerSend.value = clampIntSigned(md, 1, 10000)
+
+    const invX = (prefs as any).mouseInvertX
+    if (typeof invX === 'boolean') mouseInvertX.value = invX
+
+    const invY = (prefs as any).mouseInvertY
+    if (typeof invY === 'boolean') mouseInvertY.value = invY
+
+    // Mouse device prefs
+    const auto = (prefs as any).mouseDeviceAutoApply
+    if (typeof auto === 'boolean') mouseDeviceAutoApply.value = auto
+
+    const m = (prefs as any).mouseDeviceMode
+    if (isValidMouseDeviceMode(m)) mouseDeviceMode.value = m
+
+    const g = (prefs as any).mouseDeviceGain
+    if (typeof g === 'number' && Number.isFinite(g)) mouseDeviceGain.value = clampIntSigned(g, 1, 200)
+
+    const ae = (prefs as any).mouseDeviceAccelEnabled
+    if (typeof ae === 'boolean') mouseDeviceAccelEnabled.value = ae
+
+    const ab = (prefs as any).mouseDeviceAccelBaseGain
+    if (typeof ab === 'number' && Number.isFinite(ab)) mouseDeviceAccelBaseGain.value = clampIntSigned(ab, 1, 500)
+
+    const am = (prefs as any).mouseDeviceAccelMaxGain
+    if (typeof am === 'number' && Number.isFinite(am)) mouseDeviceAccelMaxGain.value = clampIntSigned(am, 1, 2000)
+
+    const av = (prefs as any).mouseDeviceAccelVelForMax
+    if (typeof av === 'number' && Number.isFinite(av)) mouseDeviceAccelVelForMax.value = clampIntSigned(av, 1, 500000)
+
+    const gm = (prefs as any).mouseDeviceGridMode
+    if (isValidMouseGridMode(gm)) mouseDeviceGridMode.value = gm
+
+    const gw = (prefs as any).mouseDeviceGridW
+    if (typeof gw === 'number' && Number.isFinite(gw)) mouseDeviceGridW.value = clampIntSigned(gw, 1, 100000)
+
+    const gh = (prefs as any).mouseDeviceGridH
+    if (typeof gh === 'number' && Number.isFinite(gh)) mouseDeviceGridH.value = clampIntSigned(gh, 1, 100000)
 }
 
 function exportPanePrefs(): StreamPanePrefs {
@@ -1300,6 +1762,24 @@ function exportPanePrefs(): StreamPanePrefs {
         fpButtonsVisibility: fpButtonsVisibility.value,
         fpLedsPosition: fpLedsPosition.value,
         fpLedsVisibility: fpLedsVisibility.value,
+
+        mouseSendRate: mouseSendRate.value,
+        mouseSensitivity: mouseSensitivity.value,
+        mouseSmoothing: mouseSmoothing.value,
+        mouseMaxDeltaPerSend: mouseMaxDeltaPerSend.value,
+        mouseInvertX: mouseInvertX.value,
+        mouseInvertY: mouseInvertY.value,
+
+        mouseDeviceAutoApply: mouseDeviceAutoApply.value,
+        mouseDeviceMode: mouseDeviceMode.value,
+        mouseDeviceGain: mouseDeviceGain.value,
+        mouseDeviceAccelEnabled: mouseDeviceAccelEnabled.value,
+        mouseDeviceAccelBaseGain: mouseDeviceAccelBaseGain.value,
+        mouseDeviceAccelMaxGain: mouseDeviceAccelMaxGain.value,
+        mouseDeviceAccelVelForMax: mouseDeviceAccelVelForMax.value,
+        mouseDeviceGridMode: mouseDeviceGridMode.value,
+        mouseDeviceGridW: mouseDeviceGridW.value,
+        mouseDeviceGridH: mouseDeviceGridH.value,
     }
 }
 
@@ -1344,8 +1824,32 @@ watch(
         () => fpButtonsVisibility.value,
         () => fpLedsPosition.value,
         () => fpLedsVisibility.value,
+
+        () => mouseSendRate.value,
+        () => mouseSensitivity.value,
+        () => mouseSmoothing.value,
+        () => mouseMaxDeltaPerSend.value,
+        () => mouseInvertX.value,
+        () => mouseInvertY.value,
+
+        () => mouseDeviceAutoApply.value,
+        () => mouseDeviceMode.value,
+        () => mouseDeviceGain.value,
+        () => mouseDeviceAccelEnabled.value,
+        () => mouseDeviceAccelBaseGain.value,
+        () => mouseDeviceAccelMaxGain.value,
+        () => mouseDeviceAccelVelForMax.value,
+        () => mouseDeviceGridMode.value,
+        () => mouseDeviceGridW.value,
+        () => mouseDeviceGridH.value,
     ],
     () => writePanePrefs(exportPanePrefs())
+)
+
+// Reset filters when critical tuning changes (prevents stale smoothing state)
+watch(
+    [() => mouseSensitivity.value, () => mouseSmoothing.value, () => mouseInvertX.value, () => mouseInvertY.value],
+    () => resetMouseFilterState()
 )
 
 /* -------------------------------------------------------------------------- */
@@ -1657,10 +2161,7 @@ function reloadStream() {
 }
 
 onBeforeUnmount(() => {
-    if (moveRaf != null) {
-        cancelAnimationFrame(moveRaf)
-        moveRaf = null
-    }
+    clearMoveSchedule()
 
     if (isPointerLockedToCaptureEl()) exitPointerLock()
     if (isCapturing.value || armOnNextFocus.value || heldModifiers.size > 0 || heldMouseButtons.size > 0) {
@@ -1696,7 +2197,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* (styles unchanged from your provided file) */
+/* (styles mostly unchanged from your provided file) */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
@@ -1816,6 +2317,30 @@ onBeforeUnmount(() => {
     line-height: var(--control-h);
 }
 
+.input {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--control-h);
+    padding: 0 8px;
+    background: #0b0b0b;
+    border: 1px solid #333;
+    border-radius: 6px;
+}
+.input input {
+    width: 92px;
+    background: #0b0b0b;
+    color: var(--panel-fg);
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 0 8px;
+    height: var(--control-h);
+    line-height: var(--control-h);
+}
+.input[data-disabled='true'] {
+    opacity: 0.55;
+}
+
 .checkbox.panel {
     display: inline-flex;
     align-items: center;
@@ -1922,6 +2447,79 @@ onBeforeUnmount(() => {
 
 .health-empty {
     opacity: 0.7;
+}
+
+/* NEW: mouse panel */
+.mouse-panel {
+    margin-top: 4px;
+    padding: 8px 8px;
+    border-radius: 6px;
+    border: 1px dashed #334155;
+    background: #020617;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 0.76rem;
+    color: var(--panel-fg);
+}
+
+.mouse-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.mouse-title {
+    font-weight: 600;
+    opacity: 0.92;
+}
+
+.mouse-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.mouse-inline {
+    --control-h: 26px;
+}
+
+.mouse-btn {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #0b1120;
+    color: var(--panel-fg);
+    cursor: pointer;
+    font-size: 0.76rem;
+}
+.mouse-btn:hover {
+    background: #0f172a;
+}
+
+.mouse-subtitle {
+    opacity: 0.82;
+    font-weight: 500;
+    margin-top: 2px;
+}
+
+.mouse-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 10px;
+}
+
+.mouse-note {
+    opacity: 0.75;
+    line-height: 1.35;
+}
+.mouse-note ul {
+    margin: 6px 0 0 18px;
+    padding: 0;
 }
 
 /* stack wrapper */
@@ -2210,16 +2808,13 @@ onBeforeUnmount(() => {
     justify-content: flex-end;
 }
 
-/* THIS is the missing piece: actually anchor the controls to the viewport bottom,
-   while still letting the select drive left vs right alignment. */
+/* anchor the controls */
 .frontpanel-controls--overlay {
     position: absolute;
     left: 8px;
     right: 8px;
     bottom: 8px;
     z-index: 6;
-
-    /* Don’t steal mouse events from the capture layer except on the buttons themselves. */
     pointer-events: none;
 }
 .frontpanel-controls--overlay .fp-btn {
@@ -2261,7 +2856,6 @@ onBeforeUnmount(() => {
     cursor: default;
 }
 
-/* Optional: subtle “active/held” state that still fits the btn style */
 .fp-btn[data-held='true'] {
     border-color: #4b5563;
     background: #0b1120;

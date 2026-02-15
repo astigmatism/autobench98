@@ -34,6 +34,13 @@ export type ErrorLike = {
 
 /**
  * Absolute mapping grid configuration (spec v0.3 §9).
+ *
+ * NOTE (IMPORTANT):
+ * Previously this type was artificially restricted to a tiny set of resolutions.
+ * That restriction prevents correct absolute mapping for common modes like 800x600,
+ * 1280x1024, etc. The service already clamps safely, so we allow any positive integers.
+ *
+ * Validation of "reasonable" sizes should occur at config-build time and/or when applying patches.
  */
 export type MouseAbsoluteGridConfig =
   | {
@@ -42,7 +49,7 @@ export type MouseAbsoluteGridConfig =
     }
   | {
       mode: 'fixed'
-      fixed: { w: 640 | 1024; h: 480 | 768 }
+      fixed: { w: number; h: number }
     }
 
 export type MouseAccelConfig = {
@@ -507,7 +514,7 @@ export type PS2MouseStateSlice = {
   }
   absoluteGrid: {
     mode: 'auto' | 'fixed'
-    fixed?: { w: 640 | 1024; h: 480 | 768 }
+    fixed?: { w: number; h: number }
     resolved?: { w: number; h: number }
   }
   mappingStatus: MouseMappingStatus
