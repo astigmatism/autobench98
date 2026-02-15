@@ -1,4 +1,4 @@
-<!-- apps/web/src/components/panes/StreamPane.vue -->
+<!-- src/components/panes/Stream.vue -->
 <template>
     <div
         class="stream-pane"
@@ -101,7 +101,7 @@
                     <div class="right"></div>
                 </div>
 
-                <!-- NEW: Mouse tuning panel -->
+                <!-- Mouse tuning panel -->
                 <div class="mouse-panel">
                     <div class="mouse-header">
                         <span class="mouse-title">Mouse settings</span>
@@ -588,7 +588,7 @@ type StreamPanePrefs = {
     fpLedsPosition?: FrontPanelLedsPosition
     fpLedsVisibility?: FrontPanelLedsVisibility
 
-    // NEW: client-side mouse tuning
+    // client-side mouse tuning
     mouseSendRate?: MouseSendRateMode
     mouseSensitivity?: number
     mouseSmoothing?: number
@@ -596,7 +596,7 @@ type StreamPanePrefs = {
     mouseInvertX?: boolean
     mouseInvertY?: boolean
 
-    // NEW: device-side tuning (mouse.config)
+    // device-side tuning (mouse.config)
     mouseDeviceAutoApply?: boolean
     mouseDeviceMode?: MouseDeviceMode
     mouseDeviceGain?: number
@@ -717,7 +717,7 @@ const bgMode = ref<'black' | 'pane'>('black')
 const reloadKey = ref(0)
 
 /* -------------------------------------------------------------------------- */
-/*  NEW: Mouse settings (client + device)                                     */
+/*  Mouse settings (client + device)                                          */
 /* -------------------------------------------------------------------------- */
 
 const mouseSendRate = ref<MouseSendRateMode>('60')
@@ -740,10 +740,6 @@ const mouseDeviceGridMode = ref<MouseGridMode>('auto')
 const mouseDeviceGridW = ref<number>(1024)
 const mouseDeviceGridH = ref<number>(768)
 
-function clamp01(n: number): number {
-    if (!Number.isFinite(n)) return 0
-    return Math.max(0, Math.min(1, n))
-}
 function clampNum(n: number, min: number, max: number, fallback: number): number {
     if (!Number.isFinite(n)) return fallback
     return Math.max(min, Math.min(max, n))
@@ -754,7 +750,6 @@ function clampIntSigned(n: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, i))
 }
 function resetMouseFilterState() {
-    // reset fractional carry + smoothing state so old state doesn't leak after toggles
     floatCarryX = 0
     floatCarryY = 0
     smoothedX = 0
@@ -770,7 +765,6 @@ const fpButtonsVisibility = ref<FrontPanelButtonsVisibility>('hover')
 
 /* -------------------------------------------------------------------------- */
 /*  Front panel LED indicators (visibility + position)                        */
-/*  LED state is derived STRICTLY from frontPanel.powerSense / frontPanel.hddActive */
 /* -------------------------------------------------------------------------- */
 
 const fpLedsPosition = ref<FrontPanelLedsPosition>('top-left')
@@ -1005,14 +999,14 @@ function mapDomButton(btn: number): MouseButton | null {
 
 const heldMouseButtons = new Set<MouseButton>()
 
-// NEW: rate-limited sender state (supports RAF or fixed Hz)
+// rate-limited sender state (supports RAF or fixed Hz)
 let pendingDx = 0
 let pendingDy = 0
 let moveRaf: number | null = null
 let moveTimer: number | null = null
 let lastFlushAt = 0
 
-// NEW: fractional + smoothing state
+// fractional + smoothing state
 let floatCarryX = 0
 let floatCarryY = 0
 let smoothedX = 0
@@ -1103,13 +1097,12 @@ function ingestMouseDelta(rawDx: number, rawDy: number) {
 
     const s = clampNum(mouseSmoothing.value, 0, 0.95, 0)
     if (s > 0) {
-        // EMA smoothing: s acts like "alpha" (0=no smoothing; higher=more smoothing)
+        // EMA smoothing
         smoothedX = smoothedX + s * (fx - smoothedX)
         smoothedY = smoothedY + s * (fy - smoothedY)
         fx = smoothedX
         fy = smoothedY
     } else {
-        // if smoothing disabled, keep smoothed state from accumulating old values
         smoothedX = 0
         smoothedY = 0
     }
@@ -1281,10 +1274,6 @@ function focusCaptureLayer(): boolean {
     return document.activeElement === el
 }
 
-/** Mouse down on capture layer:
- *  - if not locked, request pointer lock and DO NOT forward the initial click (avoids misclick on enter)
- *  - if already locked, forward button down
- */
 function onCaptureMouseDown(e: MouseEvent) {
     if (!canCapture.value) return
 
@@ -1296,7 +1285,6 @@ function onCaptureMouseDown(e: MouseEvent) {
     if (!isPointerLockedToCaptureEl()) {
         requestPointerLock()
 
-        // optionally auto-apply device tuning when capture begins
         if (mouseDeviceAutoApply.value) {
             applyMouseDeviceConfig()
         }
@@ -1343,15 +1331,10 @@ function onCaptureWheel(e: WheelEvent) {
 function releaseCapture(opts?: { fromBlur?: boolean }) {
     const fromBlur = !!opts?.fromBlur
 
-    // IMPORTANT ordering:
-    // 1) cancel backend queue + movement accumulator first (so we don't cancel button releases we emit below)
-    // 2) then release held buttons explicitly (prevents stuck buttons)
     sendMouse({ kind: 'mouse.cancelAll', reason: 'capture_end', requestedBy: 'stream-pane' })
 
-    // Release any held mouse buttons first (prevents stuck buttons on unlock)
     releaseAllMouseButtons()
 
-    // Stop any client-side backlog and filter state
     pendingDx = 0
     pendingDy = 0
     clearMoveSchedule()
@@ -1391,7 +1374,6 @@ function onPointerLockChange() {
         return
     }
 
-    // Unlock: always cleanup
     if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value || heldMouseButtons.size > 0) {
         releaseCapture({ fromBlur: true })
     } else {
@@ -1437,7 +1419,6 @@ function onFocusCapture() {
 }
 
 function onBlurCapture() {
-    // If we blur while locked, force-unlock; pointerlockchange will clean up.
     if (isPointerLockedToCaptureEl()) {
         exitPointerLock()
         return
@@ -1461,7 +1442,6 @@ function onKeyDown(e: KeyboardEvent) {
         return
     }
 
-    // Esc is reserved for exiting pointer lock; do NOT forward it and do NOT block it.
     if (code === 'Escape') return
 
     if (MODIFIER_CODES.has(code)) {
@@ -1846,7 +1826,6 @@ watch(
     () => writePanePrefs(exportPanePrefs())
 )
 
-// Reset filters when critical tuning changes (prevents stale smoothing state)
 watch(
     [() => mouseSensitivity.value, () => mouseSmoothing.value, () => mouseInvertX.value, () => mouseInvertY.value],
     () => resetMouseFilterState()
@@ -2197,7 +2176,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* (styles mostly unchanged from your provided file) */
+/* (styles unchanged) */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
@@ -2449,7 +2428,6 @@ onBeforeUnmount(() => {
     opacity: 0.7;
 }
 
-/* NEW: mouse panel */
 .mouse-panel {
     margin-top: 4px;
     padding: 8px 8px;
@@ -2522,7 +2500,6 @@ onBeforeUnmount(() => {
     padding: 0;
 }
 
-/* stack wrapper */
 .viewport-stack {
     position: relative;
     flex: 1;
@@ -2531,9 +2508,8 @@ onBeforeUnmount(() => {
     flex-direction: column;
 }
 
-/* viewport owns the background/border area */
 .viewport {
-    position: relative; /* overlay anchor */
+    position: relative;
     flex: 1;
     min-height: 0;
     background: #000;
@@ -2680,10 +2656,6 @@ onBeforeUnmount(() => {
         'Courier New', monospace;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Front panel LED overlay indicators                                         */
-/* -------------------------------------------------------------------------- */
-
 .frontpanel-leds {
     display: flex;
     align-items: center;
@@ -2702,11 +2674,11 @@ onBeforeUnmount(() => {
     right: 8px;
     top: 8px;
     z-index: 6;
-    pointer-events: none; /* indicators only */
+    pointer-events: none;
 }
 
 .fp-led-badge {
-    --fp-led-rgb: 156, 163, 175; /* fallback gray */
+    --fp-led-rgb: 156, 163, 175;
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -2722,11 +2694,11 @@ onBeforeUnmount(() => {
 }
 
 .fp-led-badge[data-kind='power'] {
-    --fp-led-rgb: 34, 197, 94; /* green */
+    --fp-led-rgb: 34, 197, 94;
 }
 
 .fp-led-badge[data-kind='hdd'] {
-    --fp-led-rgb: 249, 115, 22; /* orange */
+    --fp-led-rgb: 249, 115, 22;
 }
 
 .fp-led-badge .dot {
@@ -2740,14 +2712,12 @@ onBeforeUnmount(() => {
     transform-origin: center;
 }
 
-/* On */
 .fp-led-badge[data-mode='on'] .dot {
     background: rgb(var(--fp-led-rgb));
     opacity: 1;
     box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.9), 0 0 10px rgba(var(--fp-led-rgb), 0.35);
 }
 
-/* Blink */
 @keyframes fp-led-blink {
     0%,
     49% {
@@ -2770,7 +2740,6 @@ onBeforeUnmount(() => {
     animation-duration: 350ms;
 }
 
-/* Pulse (sleep-ish) */
 @keyframes fp-led-pulse {
     0% {
         opacity: 0.22;
@@ -2793,10 +2762,6 @@ onBeforeUnmount(() => {
     opacity: 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Front panel overlay controls                                               */
-/* -------------------------------------------------------------------------- */
-
 .frontpanel-controls {
     display: flex;
     align-items: center;
@@ -2808,7 +2773,6 @@ onBeforeUnmount(() => {
     justify-content: flex-end;
 }
 
-/* anchor the controls */
 .frontpanel-controls--overlay {
     position: absolute;
     left: 8px;
