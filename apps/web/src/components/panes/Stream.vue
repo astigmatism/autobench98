@@ -577,6 +577,8 @@ type MouseDeviceMode = 'relative-gain' | 'relative-accel' | 'absolute'
 type MouseGridMode = 'auto' | 'fixed'
 
 type StreamPanePrefs = {
+    prefsRev?: number
+
     enabled?: boolean
     scaleMode?: 'fit' | 'fill' | 'stretch' | 'native'
     bgMode?: 'black' | 'pane'
@@ -720,20 +722,22 @@ const reloadKey = ref(0)
 /*  Mouse settings (client + device)                                          */
 /* -------------------------------------------------------------------------- */
 
-const mouseSendRate = ref<MouseSendRateMode>('60')
+// Defaults tuned to reduce "micro-move batching" and avoid multi-pixel jumps.
+const mouseSendRate = ref<MouseSendRateMode>('120')
 const mouseSensitivity = ref<number>(1.0)
 const mouseSmoothing = ref<number>(0.0)
-const mouseMaxDeltaPerSend = ref<number>(80)
+const mouseMaxDeltaPerSend = ref<number>(2)
 const mouseInvertX = ref<boolean>(false)
 const mouseInvertY = ref<boolean>(false)
 
-const mouseDeviceAutoApply = ref<boolean>(false)
+// Device defaults: avoid amplifying the smallest integer deltas.
+const mouseDeviceAutoApply = ref<boolean>(true)
 const mouseDeviceMode = ref<MouseDeviceMode>('relative-gain')
-const mouseDeviceGain = ref<number>(10)
+const mouseDeviceGain = ref<number>(1)
 
-const mouseDeviceAccelEnabled = ref<boolean>(true)
-const mouseDeviceAccelBaseGain = ref<number>(5)
-const mouseDeviceAccelMaxGain = ref<number>(20)
+const mouseDeviceAccelEnabled = ref<boolean>(false)
+const mouseDeviceAccelBaseGain = ref<number>(1)
+const mouseDeviceAccelMaxGain = ref<number>(1)
 const mouseDeviceAccelVelForMax = ref<number>(1000)
 
 const mouseDeviceGridMode = ref<MouseGridMode>('auto')
@@ -744,8 +748,10 @@ function clampNum(n: number, min: number, max: number, fallback: number): number
     if (!Number.isFinite(n)) return fallback
     return Math.max(min, Math.min(max, n))
 }
-function clampIntSigned(n: number, min: number, max: number): number {
-    if (!Number.isFinite(n)) return 0
+function clampIntSigned(n: number, min: number, max: number, fallback: number = min): number {
+    const fbRaw = Number.isFinite(fallback) ? Math.trunc(fallback) : min
+    const fb = Math.max(min, Math.min(max, fbRaw))
+    if (!Number.isFinite(n)) return fb
     const i = Math.trunc(n)
     return Math.max(min, Math.min(max, i))
 }
@@ -1284,11 +1290,6 @@ function onCaptureMouseDown(e: MouseEvent) {
 
     if (!isPointerLockedToCaptureEl()) {
         requestPointerLock()
-
-        if (mouseDeviceAutoApply.value) {
-            applyMouseDeviceConfig()
-        }
-
         return
     }
 
@@ -1630,6 +1631,9 @@ const paneId = computed(() => String(props.pane?.id ?? '').trim())
 const STORAGE_PREFIX = 'stream:pane:ui:'
 const storageKey = computed(() => (paneId.value ? `${STORAGE_PREFIX}${paneId.value}` : ''))
 
+// Increment when changing defaults/migrations.
+const STREAM_PANE_PREFS_REV = 2
+
 function readPanePrefs(): StreamPanePrefs | null {
     const key = storageKey.value
     if (!key) return null
@@ -1652,6 +1656,72 @@ function writePanePrefs(p: StreamPanePrefs) {
     } catch {
         // ignore
     }
+}
+
+function getPrefsRev(prefs: StreamPanePrefs | null | undefined): number {
+    const raw = (prefs as any)?.prefsRev
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0
+    return Math.max(0, Math.floor(raw))
+}
+
+function migratePanePrefs(prefs: StreamPanePrefs): StreamPanePrefs {
+    const rev = getPrefsRev(prefs)
+    if (rev >= STREAM_PANE_PREFS_REV) return prefs
+
+    const out: StreamPanePrefs = { ...prefs, prefsRev: STREAM_PANE_PREFS_REV }
+
+    // Legacy defaults from your source (before this fix):
+    //   mouseSendRate: '60'
+    //   mouseMaxDeltaPerSend: 80
+    //   mouseDeviceAutoApply: false
+    //   mouseDeviceGain: 10
+    //   mouseDeviceAccelEnabled: true
+    //   mouseDeviceAccelBaseGain: 5
+    //   mouseDeviceAccelMaxGain: 20
+    //   mouseDeviceAccelVelForMax: 1000
+    //
+    // These can cause micro-movements to batch into multi-count deltas, which then
+    // get amplified by device gain/accel (perceived as "snapping to a grid").
+    const msr = (prefs as any).mouseSendRate
+    const mdps = (prefs as any).mouseMaxDeltaPerSend
+
+    const auto = (prefs as any).mouseDeviceAutoApply
+    const gain = (prefs as any).mouseDeviceGain
+    const accelEnabled = (prefs as any).mouseDeviceAccelEnabled
+    const base = (prefs as any).mouseDeviceAccelBaseGain
+    const max = (prefs as any).mouseDeviceAccelMaxGain
+    const vel = (prefs as any).mouseDeviceAccelVelForMax
+
+    const looksLikeLegacyDeviceDefaults =
+        (typeof auto !== 'boolean' || auto === false) &&
+        (typeof gain !== 'number' || gain === 10) &&
+        (typeof accelEnabled !== 'boolean' || accelEnabled === true) &&
+        (typeof base !== 'number' || base === 5) &&
+        (typeof max !== 'number' || max === 20) &&
+        (typeof vel !== 'number' || vel === 1000)
+
+    if (looksLikeLegacyDeviceDefaults) {
+        out.mouseDeviceAutoApply = true
+        out.mouseDeviceGain = 1
+        out.mouseDeviceAccelEnabled = false
+        out.mouseDeviceAccelBaseGain = 1
+        out.mouseDeviceAccelMaxGain = 1
+        // keep velocityPxPerSecForMax as-is
+    }
+
+    const looksLikeLegacyClientDefaults =
+        (typeof mdps !== 'number' || mdps === 80) &&
+        (typeof msr !== 'string' || msr === '60')
+
+    if (looksLikeLegacyClientDefaults) {
+        out.mouseSendRate = '120'
+        out.mouseMaxDeltaPerSend = 2
+    } else {
+        if (typeof mdps !== 'number' || mdps === 80) out.mouseMaxDeltaPerSend = 2
+        if (typeof msr !== 'string') out.mouseSendRate = '120'
+    }
+
+    return out
 }
 
 function applyPanePrefs(prefs?: StreamPanePrefs | null) {
@@ -1734,6 +1804,8 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
 
 function exportPanePrefs(): StreamPanePrefs {
     return {
+        prefsRev: STREAM_PANE_PREFS_REV,
+
         enabled: !!enabled.value,
         scaleMode: scaleMode.value,
         bgMode: bgMode.value,
@@ -1789,7 +1861,11 @@ function hydrateForPane() {
     }
 
     const stored = readPanePrefs()
-    if (stored) applyPanePrefs(stored)
+    if (stored) {
+        const migrated = migratePanePrefs(stored)
+        applyPanePrefs(migrated)
+        if (migrated !== stored) writePanePrefs(migrated)
+    }
 }
 
 onMounted(() => hydrateForPane())
