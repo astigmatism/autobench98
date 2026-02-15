@@ -1,5 +1,7 @@
 #include <ps2dev.h>
 #include <EEPROM.h>
+#include <string.h>
+#include <stdlib.h>
 
 #define ID "MS"
 #define PS2_CLOCK_PIN 3
@@ -51,90 +53,136 @@ unsigned long lastSampleSentMs = 0;
 
 // ----------------------------
 // PS/2 TX frame queue (prevents partial packet corruption)
+//
+// NOTE (IMPORTANT):
+// The Arduino build system auto-generates function prototypes. If a prototype
+// uses a user-defined type declared later in the .ino, compilation can fail.
+// To keep this sketch "prototype-safe" across Arduino IDE / arduino-cli,
+// this TX queue uses ONLY built-in types (no structs in function signatures).
 // ----------------------------
-struct TxFrame {
-  uint8_t len;         // 1..3
-  uint8_t bytes[3];
-};
 
 static const uint8_t TX_HI_CAP = 16;
 static const uint8_t TX_LO_CAP = 16;
 
-TxFrame txHi[TX_HI_CAP];
-TxFrame txLo[TX_LO_CAP];
-uint8_t txHiHead = 0, txHiTail = 0;
-uint8_t txLoHead = 0, txLoTail = 0;
+// High-priority queue storage (len + 3 bytes per frame)
+static uint8_t txHiLen[TX_HI_CAP];
+static uint8_t txHiB0[TX_HI_CAP];
+static uint8_t txHiB1[TX_HI_CAP];
+static uint8_t txHiB2[TX_HI_CAP];
+static uint8_t txHiHead = 0, txHiTail = 0;
 
-bool txActive = false;
-TxFrame txCur;
-uint8_t txCurIdx = 0;
+// Low-priority queue storage
+static uint8_t txLoLen[TX_LO_CAP];
+static uint8_t txLoB0[TX_LO_CAP];
+static uint8_t txLoB1[TX_LO_CAP];
+static uint8_t txLoB2[TX_LO_CAP];
+static uint8_t txLoHead = 0, txLoTail = 0;
 
-// Queue helpers
-static inline uint8_t nextIdx(uint8_t i, uint8_t cap) { return (uint8_t)((i + 1) % cap); }
+// Current frame being transmitted (supports partial send if host inhibits)
+static bool txActive = false;
+static uint8_t txCurLen = 0;
+static uint8_t txCur[3] = {0, 0, 0};
+static uint8_t txCurIdx = 0;
 
-static bool txPush(TxFrame* q, uint8_t cap, uint8_t &head, uint8_t &tail, const TxFrame &f) {
-  uint8_t nt = nextIdx(tail, cap);
-  if (nt == head) return false; // full
-  q[tail] = f;
-  tail = nt;
+static inline uint8_t nextIdx(uint8_t i, uint8_t cap) {
+  return (uint8_t)((i + 1) % cap);
+}
+
+static void txReset() {
+  txHiHead = txHiTail = 0;
+  txLoHead = txLoTail = 0;
+  txActive = false;
+  txCurLen = 0;
+  txCurIdx = 0;
+  txCur[0] = txCur[1] = txCur[2] = 0;
+}
+
+static bool txHiPush(uint8_t len, uint8_t b0, uint8_t b1, uint8_t b2) {
+  uint8_t nt = nextIdx(txHiTail, TX_HI_CAP);
+  if (nt == txHiHead) return false; // full
+  txHiLen[txHiTail] = len;
+  txHiB0[txHiTail] = b0;
+  txHiB1[txHiTail] = b1;
+  txHiB2[txHiTail] = b2;
+  txHiTail = nt;
   return true;
 }
 
-static bool txPop(TxFrame* q, uint8_t cap, uint8_t &head, uint8_t &tail, TxFrame &out) {
-  if (head == tail) return false; // empty
-  out = q[head];
-  head = nextIdx(head, cap);
+static bool txLoPush(uint8_t len, uint8_t b0, uint8_t b1, uint8_t b2) {
+  uint8_t nt = nextIdx(txLoTail, TX_LO_CAP);
+  if (nt == txLoHead) return false; // full
+  txLoLen[txLoTail] = len;
+  txLoB0[txLoTail] = b0;
+  txLoB1[txLoTail] = b1;
+  txLoB2[txLoTail] = b2;
+  txLoTail = nt;
+  return true;
+}
+
+static bool txHiPop(uint8_t &len, uint8_t &b0, uint8_t &b1, uint8_t &b2) {
+  if (txHiHead == txHiTail) return false;
+  len = txHiLen[txHiHead];
+  b0 = txHiB0[txHiHead];
+  b1 = txHiB1[txHiHead];
+  b2 = txHiB2[txHiHead];
+  txHiHead = nextIdx(txHiHead, TX_HI_CAP);
+  return true;
+}
+
+static bool txLoPop(uint8_t &len, uint8_t &b0, uint8_t &b1, uint8_t &b2) {
+  if (txLoHead == txLoTail) return false;
+  len = txLoLen[txLoHead];
+  b0 = txLoB0[txLoHead];
+  b1 = txLoB1[txLoHead];
+  b2 = txLoB2[txLoHead];
+  txLoHead = nextIdx(txLoHead, TX_LO_CAP);
   return true;
 }
 
 static bool txEnqueueHi1(uint8_t b0) {
-  TxFrame f; f.len = 1; f.bytes[0] = b0; f.bytes[1] = 0; f.bytes[2] = 0;
-  return txPush(txHi, TX_HI_CAP, txHiHead, txHiTail, f);
+  return txHiPush(1, b0, 0, 0);
 }
 static bool txEnqueueHi2(uint8_t b0, uint8_t b1) {
-  TxFrame f; f.len = 2; f.bytes[0] = b0; f.bytes[1] = b1; f.bytes[2] = 0;
-  return txPush(txHi, TX_HI_CAP, txHiHead, txHiTail, f);
+  return txHiPush(2, b0, b1, 0);
 }
 static bool txEnqueueHi3(uint8_t b0, uint8_t b1, uint8_t b2) {
-  TxFrame f; f.len = 3; f.bytes[0] = b0; f.bytes[1] = b1; f.bytes[2] = b2;
-  return txPush(txHi, TX_HI_CAP, txHiHead, txHiTail, f);
+  return txHiPush(3, b0, b1, b2);
 }
 static bool txEnqueueLo3(uint8_t b0, uint8_t b1, uint8_t b2) {
-  TxFrame f; f.len = 3; f.bytes[0] = b0; f.bytes[1] = b1; f.bytes[2] = b2;
-  return txPush(txLo, TX_LO_CAP, txLoHead, txLoTail, f);
+  return txLoPush(3, b0, b1, b2);
+}
+
+static bool txLoadNextFrame() {
+  uint8_t len, b0, b1, b2;
+  if (txHiPop(len, b0, b1, b2) || txLoPop(len, b0, b1, b2)) {
+    txCurLen = len;
+    txCur[0] = b0;
+    txCur[1] = b1;
+    txCur[2] = b2;
+    txCurIdx = 0;
+    txActive = true;
+    return true;
+  }
+  return false;
 }
 
 // Service TX queue (call often)
 static void txService() {
-  // If no active frame, pick next (hi first)
   if (!txActive) {
-    TxFrame next;
-    if (txPop(txHi, TX_HI_CAP, txHiHead, txHiTail, next) ||
-        txPop(txLo, TX_LO_CAP, txLoHead, txLoTail, next)) {
-      txCur = next;
-      txCurIdx = 0;
-      txActive = true;
-    } else {
-      return;
-    }
+    if (!txLoadNextFrame()) return;
   }
 
   // Attempt to send as much as possible. If a write fails, stop and retry later.
   while (txActive) {
-    int rc = mouse.write(txCur.bytes[txCurIdx]);
+    int rc = mouse.write(txCur[txCurIdx]);
     if (rc == 0) {
       txCurIdx++;
-      if (txCurIdx >= txCur.len) {
-        // Frame complete; load next immediately if available
+      if (txCurIdx >= txCurLen) {
         txActive = false;
         txCurIdx = 0;
 
-        TxFrame next;
-        if (txPop(txHi, TX_HI_CAP, txHiHead, txHiTail, next) ||
-            txPop(txLo, TX_LO_CAP, txLoHead, txLoTail, next)) {
-          txCur = next;
-          txCurIdx = 0;
-          txActive = true;
+        // Immediately load and continue if another frame is queued.
+        if (txLoadNextFrame()) {
           continue;
         }
         return;
@@ -156,7 +204,7 @@ static void txService() {
 static void buildDataPacket(int dx_internal, int dy_internal, uint8_t out[3]) {
   // clamp to spec range [-255, +255]
   int x = dx_internal;
-  int y = -dy_internal; // CRITICAL FIX: invert Y at PS/2 boundary
+  int y = -dy_internal; // invert Y at PS/2 boundary
 
   if (x > 255) x = 255;
   if (x < -255) x = -255;
@@ -215,10 +263,17 @@ static void setSampleRate(uint8_t hz) {
 static char cmdBuf[64];
 static uint8_t cmdLen = 0;
 
-static inline void trimInPlace(char* s) {
-  // trim leading
-  while (*s == ' ' || *s == '\t') s++;
-  // trim trailing by finding end
+static void trimInPlace(char *s) {
+  if (!s) return;
+
+  // Trim leading spaces/tabs by shifting the string left.
+  char *p = s;
+  while (*p == ' ' || *p == '\t') p++;
+  if (p != s) {
+    memmove(s, p, strlen(p) + 1);
+  }
+
+  // Trim trailing spaces/tabs.
   size_t n = strlen(s);
   while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
     s[n - 1] = '\0';
@@ -226,14 +281,14 @@ static inline void trimInPlace(char* s) {
   }
 }
 
-static bool startsWith(const char* s, const char* prefix) {
+static bool startsWith(const char *s, const char *prefix) {
   while (*prefix) {
     if (*s++ != *prefix++) return false;
   }
   return true;
 }
 
-static void handleSerialCommand(char* raw) {
+static void handleSerialCommand(char *raw) {
   // raw is NUL-terminated; strip CR and spaces
   trimInPlace(raw);
   if (raw[0] == '\0') return;
@@ -260,8 +315,8 @@ static void handleSerialCommand(char* raw) {
   // Commands only after identified
   if (startsWith(raw, "MOVE ")) {
     // Expected: "MOVE x,y" (absolute positions)
-    const char* body = raw + 5;
-    const char* comma = strchr(body, ',');
+    const char *body = raw + 5;
+    const char *comma = strchr(body, ',');
     if (!comma) return;
 
     int new_x = atoi(body);
@@ -361,7 +416,7 @@ static void serviceSerial() {
 // ----------------------------
 
 // Param handling to avoid arg bytes being treated as standalone commands
-enum PendingParam : uint8_t { PENDING_NONE = 0, PENDING_SAMPLE_RATE, PENDING_RESOLUTION };
+enum PendingParam { PENDING_NONE = 0, PENDING_SAMPLE_RATE, PENDING_RESOLUTION };
 static PendingParam pendingParam = PENDING_NONE;
 static unsigned long pendingSinceMs = 0;
 static const unsigned long PENDING_EXPIRE_MS = 100;
@@ -662,9 +717,7 @@ void setup() {
   lastSampleSentMs = millis();
 
   cmdLen = 0;
-  txActive = false;
-  txHiHead = txHiTail = 0;
-  txLoHead = txLoTail = 0;
+  txReset();
 }
 
 void loop() {
