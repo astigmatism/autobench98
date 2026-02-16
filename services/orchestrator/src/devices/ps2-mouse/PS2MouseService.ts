@@ -107,7 +107,7 @@ type MovementState = {
   // last time we observed a relative move event (used for velocity)
   lastRelAt: number | null
 
-  // virtual cursor position in grid coords
+  // virtual cursor position in grid coords (absolute) / unbounded (relative)
   cursor: { x: number; y: number }
 
   // warning gating for "auto grid unresolved"
@@ -1151,92 +1151,47 @@ export class PS2MouseService {
     }
   }
 
-  private async flushMovementTick(): Promise<void> {
-    if (this.stopping) return
-    if (this.hostPower === 'off') return
-    if (!this.port || !this.port.isOpen || !this.identified) return
+private async flushMovementTick(): Promise<void> {
+  if (this.stopping) return
+  if (this.hostPower === 'off') return
+  if (!this.port || !this.port.isOpen || !this.identified) return
+
+  const max = clampInt(this.cfg.movement.perTickMaxDelta, 1, 255)
+  const mode = this.movement.mode
+
+  // IMPORTANT:
+  // Firmware clamps *deltas* to ±255 => MOVE must be sent as dx,dy (deltas).
+  // Absolute mode uses an internal grid only to compute per-tick deltas.
+  if (mode === 'absolute') {
+    const target = this.movement.absTarget
+    if (!target) return
 
     const grid = this.getGridForClamping()
-    const max = clampInt(this.cfg.movement.perTickMaxDelta, 1, 255)
+
+    // Keep cursor in-bounds for absolute stepping (grid coords).
+    this.movement.cursor.x = clampInt(this.movement.cursor.x, 0, grid.w - 1)
+    this.movement.cursor.y = clampInt(this.movement.cursor.y, 0, grid.h - 1)
 
     const cur = this.movement.cursor
-    let nextX = cur.x
-    let nextY = cur.y
-    let stepDx = 0
-    let stepDy = 0
 
-    const mode = this.movement.mode
-
-    if (mode === 'absolute') {
-      const target = this.movement.absTarget
-      if (!target) return
-
-      stepDx = clampInt(target.x - cur.x, -max, max)
-      stepDy = clampInt(target.y - cur.y, -max, max)
-      if (stepDx === 0 && stepDy === 0) return
-
-      nextX = clampInt(cur.x + stepDx, 0, grid.w - 1)
-      nextY = clampInt(cur.y + stepDy, 0, grid.h - 1)
-
-      // should be redundant (target is clamped), but keep guard
-      if (nextX === cur.x && nextY === cur.y) return
-
-      try {
-        await this.writeLine(`MOVE ${nextX},${nextY}`)
-        this.movement.cursor.x = nextX
-        this.movement.cursor.y = nextY
-
-        const now = safeNow()
-        const last = this.movement.lastMoveTickEvtAt
-        const shouldEmit = last == null || now - last >= 250
-        if (shouldEmit) {
-          this.movement.lastMoveTickEvtAt = now
-          this.events.publish({
-            kind: 'mouse-move-tick',
-            x: nextX,
-            y: nextY,
-            dx: stepDx,
-            dy: stepDy,
-            mode,
-          })
-        }
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error('movement tick failed')
-        this.events.publish({ kind: 'recoverable-error', error: e })
-      }
-
-      return
-    }
-
-    // Relative modes: compute a candidate step, but DO NOT consume the accumulator
-    // until the MOVE line is successfully written. This prevents losing movement on transient write failures.
-    const acc = this.movement.relAcc
-    const consume = (v: number): number => {
-      if (!Number.isFinite(v) || v === 0) return 0
-      const mag = Math.min(Math.abs(v), max)
-      return v < 0 ? -mag : mag
-    }
-
-    stepDx = Math.trunc(consume(acc.dx))
-    stepDy = Math.trunc(consume(acc.dy))
+    let stepDx = clampInt(target.x - cur.x, -max, max)
+    let stepDy = clampInt(target.y - cur.y, -max, max)
     if (stepDx === 0 && stepDy === 0) return
 
-    nextX = clampInt(cur.x + stepDx, 0, grid.w - 1)
-    nextY = clampInt(cur.y + stepDy, 0, grid.h - 1)
+    const nextX = clampInt(cur.x + stepDx, 0, grid.w - 1)
+    const nextY = clampInt(cur.y + stepDy, 0, grid.h - 1)
 
-    // If clamped to the same point (edge), drain the accumulator to avoid runaway backlog.
-    if (nextX === cur.x && nextY === cur.y) {
-      acc.dx -= stepDx
-      acc.dy -= stepDy
-      return
-    }
+    // If clamping collapses movement, do not send.
+    if (nextX === cur.x && nextY === cur.y) return
+
+    // Recompute deltas after clamping (ensures wire deltas match committed cursor change).
+    stepDx = nextX - cur.x
+    stepDy = nextY - cur.y
+    if (stepDx === 0 && stepDy === 0) return
 
     try {
-      await this.writeLine(`MOVE ${nextX},${nextY}`)
+      await this.writeLine(`MOVE ${stepDx},${stepDy}`)
 
-      // Commit only after success.
-      acc.dx -= stepDx
-      acc.dy -= stepDy
       this.movement.cursor.x = nextX
       this.movement.cursor.y = nextY
 
@@ -1258,7 +1213,57 @@ export class PS2MouseService {
       const e = err instanceof Error ? err : new Error('movement tick failed')
       this.events.publish({ kind: 'recoverable-error', error: e })
     }
+
+    return
   }
+
+  // Relative modes:
+  // - Always send dx,dy deltas (bounded per tick).
+  // - DO NOT clamp to any grid (prevents artificial "edges").
+  const acc = this.movement.relAcc
+  const consume = (v: number): number => {
+    if (!Number.isFinite(v) || v === 0) return 0
+    const mag = Math.min(Math.abs(v), max)
+    return v < 0 ? -mag : mag
+  }
+
+  const stepDx = Math.trunc(consume(acc.dx))
+  const stepDy = Math.trunc(consume(acc.dy))
+  if (stepDx === 0 && stepDy === 0) return
+
+  try {
+    await this.writeLine(`MOVE ${stepDx},${stepDy}`)
+
+    // Commit only after success.
+    acc.dx -= stepDx
+    acc.dy -= stepDy
+
+    // Cursor is "virtual" in relative mode (unbounded); used only for logs/telemetry.
+    const nextX = this.movement.cursor.x + stepDx
+    const nextY = this.movement.cursor.y + stepDy
+    this.movement.cursor.x = nextX
+    this.movement.cursor.y = nextY
+
+    const now = safeNow()
+    const last = this.movement.lastMoveTickEvtAt
+    const shouldEmit = last == null || now - last >= 250
+    if (shouldEmit) {
+      this.movement.lastMoveTickEvtAt = now
+      this.events.publish({
+        kind: 'mouse-move-tick',
+        x: nextX,
+        y: nextY,
+        dx: stepDx,
+        dy: stepDy,
+        mode,
+      })
+    }
+  } catch (err) {
+    const e = err instanceof Error ? err : new Error('movement tick failed')
+    this.events.publish({ kind: 'recoverable-error', error: e })
+  }
+}
+
 
   /* ---------------------------------------------------------------------- */
   /*  Grid resolution helpers (spec v0.3 §9)                                 */

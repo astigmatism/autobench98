@@ -1,10 +1,6 @@
 // services/orchestrator/src/devices/ps2-mouse/utils.ts
 
-import type {
-  PS2MouseConfig,
-  MouseMoveMode,
-  MouseAbsoluteGridConfig,
-} from './types.js'
+import type { PS2MouseConfig, MouseMoveMode, MouseAbsoluteGridConfig } from './types.js'
 
 /* -------------------------------------------------------------------------- */
 /*  Env parsing helpers (safety-first)                                        */
@@ -65,14 +61,22 @@ function parseMoveMode(raw: string | undefined, def: MouseMoveMode): MouseMoveMo
 /*  Absolute grid parsing (spec v0.3 §9)                                      */
 /* -------------------------------------------------------------------------- */
 
-type FixedW = 640 | 1024
-type FixedH = 480 | 768
+function parseFixedGridAnyPositive(w: number, h: number): { w: number; h: number } | null {
+  // Spec v0.3 §9: allow any positive integers for fixed grids.
+  // Safety: reject non-finite or non-positive values; cap extreme values to a sane ceiling.
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null
+  const iw = Math.trunc(w)
+  const ih = Math.trunc(h)
+  if (iw <= 0 || ih <= 0) return null
 
-function parseFixedGrid(w: number, h: number): { w: FixedW; h: FixedH } | null {
-  // Only accept the two supported pairs.
-  if (w === 640 && h === 480) return { w: 640, h: 480 }
-  if (w === 1024 && h === 768) return { w: 1024, h: 768 }
-  return null
+  // Safety ceiling: prevents accidental enormous numbers from creating pathological clamp behavior.
+  // This is intentionally generous (covers all common desktop resolutions).
+  const MAX_DIM = 16384
+
+  return {
+    w: Math.min(iw, MAX_DIM),
+    h: Math.min(ih, MAX_DIM),
+  }
 }
 
 function parseAbsoluteGrid(env: NodeJS.ProcessEnv): MouseAbsoluteGridConfig {
@@ -81,9 +85,10 @@ function parseAbsoluteGrid(env: NodeJS.ProcessEnv): MouseAbsoluteGridConfig {
 
   const w = int(env, 'PS2_MOUSE_ABS_GRID_W', 1024)
   const h = int(env, 'PS2_MOUSE_ABS_GRID_H', 768)
-  const fixed = parseFixedGrid(w, h)
+
+  const fixed = parseFixedGridAnyPositive(w, h)
   if (!fixed) {
-    // Safety: if invalid fixed dims are provided, fall back to auto.
+    // Safety: if invalid fixed dims are provided, fall back to auto (unchanged behavior).
     return { mode: 'auto' }
   }
 

@@ -14,9 +14,13 @@ export type MousePowerState = 'on' | 'off' | 'unknown'
 
 /**
  * Movement modes (spec v0.3 §7.4 / §8):
- * - absolute: normalized [0..1] mapped into a resolved grid
+ * - absolute: normalized [0..1] mapped into a resolved grid (service steps toward target)
  * - relative-gain: raw deltas multiplied by a gain
  * - relative-accel: gain increases with velocity, bounded by config
+ *
+ * NOTE (wire protocol):
+ * The firmware clamps deltas to ±255, so the service ultimately emits per-tick **dx,dy** steps to firmware
+ * even when operating in "absolute" mode (absolute is a service-local mapping mode).
  */
 export type MouseMoveMode = 'absolute' | 'relative-gain' | 'relative-accel'
 
@@ -365,12 +369,15 @@ export type PS2MouseEvent =
   | {
       kind: 'mouse-move-tick'
       /**
-       * Service-local virtual cursor position after tick flush (grid coords).
+       * Service-local virtual cursor position after tick flush.
+       *
+       * - absolute mode: grid coords (bounded by resolved grid)
+       * - relative modes: service-local running position (diagnostic; not host pixels; may be unbounded)
        */
       x: number
       y: number
       /**
-       * Optional: include step delta if available.
+       * Per-tick step delta actually emitted to firmware (bounded by perTickMaxDelta).
        */
       dx?: number
       dy?: number
