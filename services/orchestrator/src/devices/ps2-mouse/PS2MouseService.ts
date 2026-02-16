@@ -1222,14 +1222,12 @@ private async flushMovementTick(): Promise<void> {
 
   // Relative modes: integrate deltas into our centered absolute cursor, then send MOVE x,y.
   const acc = this.movement.relAcc
-  const consume = (v: number): number => {
-    if (!Number.isFinite(v) || v === 0) return 0
-    const mag = Math.min(Math.abs(v), max)
-    return v < 0 ? -mag : mag
-  }
 
-  const stepDx = Math.trunc(consume(acc.dx))
-  const stepDy = Math.trunc(consume(acc.dy))
+  // Unbiased rounding + error diffusion:
+  // - avoids truncation bias that produces “staircase” diagonals
+  // - leftover fractional motion remains in acc for the next tick
+  const stepDx = clampInt(Math.round(acc.dx), -max, max)
+  const stepDy = clampInt(Math.round(acc.dy), -max, max)
   if (stepDx === 0 && stepDy === 0) return
 
   const nextX = clampInt(cur.x + stepDx, b.minX, b.maxX)
