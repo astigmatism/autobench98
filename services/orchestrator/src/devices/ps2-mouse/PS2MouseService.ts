@@ -216,13 +216,16 @@ export class PS2MouseService {
 
     // Initialize cursor in the middle of the resolved grid if available; else safe fallback.
     const initGrid: Grid = gridResolved ?? { w: 1024, h: 768 }
+    // IMPORTANT:
+    // Firmware virtual cursor appears to be CENTERED (0,0 = center).
+    // Therefore our service cursor must start at 0,0 (not W/2,H/2) to avoid “left half unreachable”.
     this.movement = {
       mode: this.moveMode,
       gridResolved,
       absTarget: null,
       relAcc: { dx: 0, dy: 0 },
       lastRelAt: null,
-      cursor: { x: Math.floor((initGrid.w - 1) / 2), y: Math.floor((initGrid.h - 1) / 2) },
+      cursor: { x: 0, y: 0 },
       warnedUnknownGrid: false,
       lastMoveTickEvtAt: null,
     }
@@ -424,8 +427,17 @@ export class PS2MouseService {
     this.movement.lastRelAt = null
 
     const grid = this.getGridForAbsoluteMapping()
-    const tx = clampInt(Math.round(x01 * (grid.w - 1)), 0, grid.w - 1)
-    const ty = clampInt(Math.round(y01 * (grid.h - 1)), 0, grid.h - 1)
+    const b = this.getCenteredBounds(grid)
+
+    // Map [0..1] into centered coordinates:
+    // xNorm=0   => minX
+    // xNorm=0.5 => 0
+    // xNorm=1   => maxX
+    const txRaw = Math.round(x01 * (grid.w - 1)) - Math.floor(grid.w / 2)
+    const tyRaw = Math.round(y01 * (grid.h - 1)) - Math.floor(grid.h / 2)
+
+    const tx = clampInt(txRaw, b.minX, b.maxX)
+    const ty = clampInt(tyRaw, b.minY, b.maxY)
 
     this.movement.absTarget = { x: tx, y: ty }
   }
@@ -1156,56 +1168,47 @@ private async flushMovementTick(): Promise<void> {
   if (this.hostPower === 'off') return
   if (!this.port || !this.port.isOpen || !this.identified) return
 
+  const grid = this.getGridForClamping()
+  const b = this.getCenteredBounds(grid)
   const max = clampInt(this.cfg.movement.perTickMaxDelta, 1, 255)
   const mode = this.movement.mode
 
-  // IMPORTANT:
-  // Firmware clamps *deltas* to ±255 => MOVE must be sent as dx,dy (deltas).
-  // Absolute mode uses an internal grid only to compute per-tick deltas.
+  // Keep cursor within centered bounds (important if previous code drifted it out-of-range)
+  this.movement.cursor.x = clampInt(this.movement.cursor.x, b.minX, b.maxX)
+  this.movement.cursor.y = clampInt(this.movement.cursor.y, b.minY, b.maxY)
+
+  const cur = this.movement.cursor
+
   if (mode === 'absolute') {
     const target = this.movement.absTarget
     if (!target) return
 
-    const grid = this.getGridForClamping()
-
-    // Keep cursor in-bounds for absolute stepping (grid coords).
-    this.movement.cursor.x = clampInt(this.movement.cursor.x, 0, grid.w - 1)
-    this.movement.cursor.y = clampInt(this.movement.cursor.y, 0, grid.h - 1)
-
-    const cur = this.movement.cursor
-
-    let stepDx = clampInt(target.x - cur.x, -max, max)
-    let stepDy = clampInt(target.y - cur.y, -max, max)
+    const stepDx = clampInt(target.x - cur.x, -max, max)
+    const stepDy = clampInt(target.y - cur.y, -max, max)
     if (stepDx === 0 && stepDy === 0) return
 
-    const nextX = clampInt(cur.x + stepDx, 0, grid.w - 1)
-    const nextY = clampInt(cur.y + stepDy, 0, grid.h - 1)
+    const nextX = clampInt(cur.x + stepDx, b.minX, b.maxX)
+    const nextY = clampInt(cur.y + stepDy, b.minY, b.maxY)
 
-    // If clamping collapses movement, do not send.
     if (nextX === cur.x && nextY === cur.y) return
 
-    // Recompute deltas after clamping (ensures wire deltas match committed cursor change).
-    stepDx = nextX - cur.x
-    stepDy = nextY - cur.y
-    if (stepDx === 0 && stepDy === 0) return
-
     try {
-      await this.writeLine(`MOVE ${stepDx},${stepDy}`)
+      // IMPORTANT: firmware expects absolute (centered) coordinates
+      await this.writeLine(`MOVE ${nextX},${nextY}`)
 
       this.movement.cursor.x = nextX
       this.movement.cursor.y = nextY
 
       const now = safeNow()
       const last = this.movement.lastMoveTickEvtAt
-      const shouldEmit = last == null || now - last >= 250
-      if (shouldEmit) {
+      if (last == null || now - last >= 250) {
         this.movement.lastMoveTickEvtAt = now
         this.events.publish({
           kind: 'mouse-move-tick',
           x: nextX,
           y: nextY,
-          dx: stepDx,
-          dy: stepDy,
+          dx: nextX - cur.x,
+          dy: nextY - cur.y,
           mode,
         })
       }
@@ -1217,9 +1220,7 @@ private async flushMovementTick(): Promise<void> {
     return
   }
 
-  // Relative modes:
-  // - Always send dx,dy deltas (bounded per tick).
-  // - DO NOT clamp to any grid (prevents artificial "edges").
+  // Relative modes: integrate deltas into our centered absolute cursor, then send MOVE x,y.
   const acc = this.movement.relAcc
   const consume = (v: number): number => {
     if (!Number.isFinite(v) || v === 0) return 0
@@ -1231,30 +1232,36 @@ private async flushMovementTick(): Promise<void> {
   const stepDy = Math.trunc(consume(acc.dy))
   if (stepDx === 0 && stepDy === 0) return
 
+  const nextX = clampInt(cur.x + stepDx, b.minX, b.maxX)
+  const nextY = clampInt(cur.y + stepDy, b.minY, b.maxY)
+
+  // If we hit bounds, drain what we attempted to apply so we don't build backlog.
+  if (nextX === cur.x && nextY === cur.y) {
+    acc.dx -= stepDx
+    acc.dy -= stepDy
+    return
+  }
+
   try {
-    await this.writeLine(`MOVE ${stepDx},${stepDy}`)
+    // IMPORTANT: firmware expects absolute (centered) coordinates
+    await this.writeLine(`MOVE ${nextX},${nextY}`)
 
     // Commit only after success.
     acc.dx -= stepDx
     acc.dy -= stepDy
-
-    // Cursor is "virtual" in relative mode (unbounded); used only for logs/telemetry.
-    const nextX = this.movement.cursor.x + stepDx
-    const nextY = this.movement.cursor.y + stepDy
     this.movement.cursor.x = nextX
     this.movement.cursor.y = nextY
 
     const now = safeNow()
     const last = this.movement.lastMoveTickEvtAt
-    const shouldEmit = last == null || now - last >= 250
-    if (shouldEmit) {
+    if (last == null || now - last >= 250) {
       this.movement.lastMoveTickEvtAt = now
       this.events.publish({
         kind: 'mouse-move-tick',
         x: nextX,
         y: nextY,
-        dx: stepDx,
-        dy: stepDy,
+        dx: nextX - cur.x,
+        dy: nextY - cur.y,
         mode,
       })
     }
@@ -1283,6 +1290,18 @@ private async flushMovementTick(): Promise<void> {
     }
     return null
   }
+
+  private getCenteredBounds(grid: Grid): { minX: number; maxX: number; minY: number; maxY: number } {
+    // For even sizes, this yields symmetric ranges like:
+    // 1024 => [-512 .. 511]
+    // 768  => [-384 .. 383]
+    const minX = -Math.floor(grid.w / 2)
+    const maxX = Math.ceil(grid.w / 2) - 1
+    const minY = -Math.floor(grid.h / 2)
+    const maxY = Math.ceil(grid.h / 2) - 1
+    return { minX, maxX, minY, maxY }
+  }
+
 
   private getGridForClamping(): Grid {
     return this.movement.gridResolved ?? { w: 1024, h: 768 }
