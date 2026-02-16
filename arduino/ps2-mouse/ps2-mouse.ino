@@ -313,9 +313,11 @@ static void handleSerialCommand(char *raw) {
   if (!isIdentified) return;
 
   // Commands only after identified
-  if (startsWith(raw, "MOVE ")) {
-    // Expected: "MOVE x,y" (absolute positions)
-    const char *body = raw + 5;
+  // Supported:
+  // - "MOVE x,y" (legacy)
+  // - "M x,y"    (short alias to reduce bytes on the wire)
+  if (startsWith(raw, "MOVE ") || startsWith(raw, "M ")) {
+    const char *body = startsWith(raw, "MOVE ") ? (raw + 5) : (raw + 2);
     const char *comma = strchr(body, ',');
     if (!comma) return;
 

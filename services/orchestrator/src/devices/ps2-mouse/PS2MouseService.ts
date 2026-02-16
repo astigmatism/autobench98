@@ -132,6 +132,9 @@ export class PS2MouseService {
   private phase: MouseDevicePhase = 'disconnected'
   private identified = false
 
+  // track the currently-open baud (can differ from cfg.serial.baudRate via discovery)
+  private currentBaudRate: number | null = null
+
   /**
    * Host PC power state (from front panel).
    * Spec v0.3 §6.2:
@@ -214,8 +217,6 @@ export class PS2MouseService {
 
     const gridResolved = this.resolveGridFromConfig(this.absoluteGrid)
 
-    // Initialize cursor in the middle of the resolved grid if available; else safe fallback.
-    const initGrid: Grid = gridResolved ?? { w: 1024, h: 768 }
     // IMPORTANT:
     // Firmware virtual cursor appears to be CENTERED (0,0 = center).
     // Therefore our service cursor must start at 0,0 (not W/2,H/2) to avoid “left half unreachable”.
@@ -247,8 +248,6 @@ export class PS2MouseService {
       why,
     })
 
-    // Spec v0.3 §6.2: On power off, cancel queued + best-effort cancel active,
-    // clear movement accumulators/targets, and stop sending movement/wheel while off.
     if (power === 'off' && prev !== 'off') {
       this.clearMovementState('host-power-off')
       this.cancelQueuedOps('host-power-off')
@@ -268,7 +267,6 @@ export class PS2MouseService {
     this.stopping = false
     this.ensureMoveTickRunning()
 
-    // Optional direct path mode
     if (this.cfg.serial.path) {
       this.deviceId = this.deviceId ?? 'ps2-mouse'
       this.devicePath = this.cfg.serial.path
@@ -300,10 +298,10 @@ export class PS2MouseService {
     this.activeCancel = null
     this.buttonsDown.clear()
     this.reconnectAttempts = 0
+    this.currentBaudRate = null
 
     this.clearMovementState('service-stopping')
 
-    // Fail any identify waiters promptly.
     this.failAllPendingLineWaiters(new Error('service stopping'))
     this.pendingLines = []
   }
@@ -363,7 +361,6 @@ export class PS2MouseService {
         return this.enqueueWheel(cmd.dy, cmd.requestedBy)
 
       case 'mouse.config':
-        // NOTE: ClientMouseConfig does NOT include requestedBy (per spec §7.4).
         return this.enqueueConfig(cmd)
 
       case 'mouse.cancelAll':
@@ -395,9 +392,7 @@ export class PS2MouseService {
       this.requestCancelActiveOp(reason)
     }
 
-    // CRITICAL: also clear movement state so a fast fling can't keep moving after cancel.
     this.clearMovementState(`cancelAll:${reason}`)
-
     this.emitQueueDepth()
   }
 
@@ -406,11 +401,7 @@ export class PS2MouseService {
   /* ---------------------------------------------------------------------- */
 
   private effectiveRelativeMode(): MouseMoveMode {
-    // If the configured mode is already relative, keep it.
     if (this.moveMode === 'relative-gain' || this.moveMode === 'relative-accel') return this.moveMode
-
-    // Otherwise, infer a safe relative mode so relative move commands can still produce motion.
-    // (We do NOT mutate this.moveMode here; we only set movement.mode per-input.)
     return this.accel.enabled ? 'relative-accel' : 'relative-gain'
   }
 
@@ -418,10 +409,8 @@ export class PS2MouseService {
     const x01 = this.cfg.movement.clampAbsoluteToUnit ? clamp01(xNorm) : Number.isFinite(xNorm) ? xNorm : 0
     const y01 = this.cfg.movement.clampAbsoluteToUnit ? clamp01(yNorm) : Number.isFinite(yNorm) ? yNorm : 0
 
-    // Effective mode is driven by input type.
     this.movement.mode = 'absolute'
 
-    // Absolute input supersedes any accumulated relative motion.
     this.movement.relAcc.dx = 0
     this.movement.relAcc.dy = 0
     this.movement.lastRelAt = null
@@ -429,10 +418,6 @@ export class PS2MouseService {
     const grid = this.getGridForAbsoluteMapping()
     const b = this.getCenteredBounds(grid)
 
-    // Map [0..1] into centered coordinates:
-    // xNorm=0   => minX
-    // xNorm=0.5 => 0
-    // xNorm=1   => maxX
     const txRaw = Math.round(x01 * (grid.w - 1)) - Math.floor(grid.w / 2)
     const tyRaw = Math.round(y01 * (grid.h - 1)) - Math.floor(grid.h / 2)
 
@@ -447,7 +432,6 @@ export class PS2MouseService {
     const ddy = Number.isFinite(dy) ? dy : 0
     const now = safeNow()
 
-    // Relative input supersedes any outstanding absolute target.
     this.movement.absTarget = null
 
     const mode = this.effectiveRelativeMode()
@@ -461,7 +445,6 @@ export class PS2MouseService {
       return
     }
 
-    // Default: relative-gain
     const g = Math.max(1, Math.trunc(this.gain))
     this.movement.relAcc.dx += ddx * g
     this.movement.relAcc.dy += ddy * g
@@ -476,7 +459,7 @@ export class PS2MouseService {
     const dtSec = dtMs / 1000
 
     const dist = Math.sqrt(dx * dx + dy * dy)
-    const vel = dist / dtSec // px/sec in client delta units
+    const vel = dist / dtSec
 
     const ratio = clamp01(vel / Math.max(1, this.accel.velocityPxPerSecForMax))
     const g = Math.round(this.accel.baseGain + (this.accel.maxGain - this.accel.baseGain) * ratio)
@@ -599,7 +582,7 @@ export class PS2MouseService {
     const op: MouseOperationConfig = {
       id,
       kind: 'config',
-      requestedBy: 'unknown', // ClientMouseConfig has no requestedBy (spec §7.4)
+      requestedBy: 'unknown',
       queuedAt: createdAt,
       patch: {
         mode: cmd.mode,
@@ -815,7 +798,6 @@ export class PS2MouseService {
       this.phase = 'connecting'
       this.identified = false
 
-      // Reset identify FIFO for the new connection.
       this.failAllPendingLineWaiters(new Error('superseded by new connection'))
       this.pendingLines = []
 
@@ -852,6 +834,7 @@ export class PS2MouseService {
       }
 
       this.port = port
+      this.currentBaudRate = baudRate
       this.readBuffer = ''
       this.buttonsDown.clear()
       this.reconnectAttempts = 0
@@ -883,7 +866,6 @@ export class PS2MouseService {
     const id = this.deviceId
     const path = this.devicePath
 
-    // Fail any identify waiters promptly so identify() can't hang.
     this.failAllPendingLineWaiters(new Error(`port closed: ${reason}`))
     this.pendingLines = []
 
@@ -893,6 +875,7 @@ export class PS2MouseService {
     this.buttonsDown.clear()
 
     this.port = null
+    this.currentBaudRate = null
     this.identified = false
     this.phase = 'disconnected'
     this.readBuffer = ''
@@ -914,9 +897,6 @@ export class PS2MouseService {
     this.phase = 'identifying'
     this.events.publish({ kind: 'mouse-identify-start', path })
 
-    // Match Arduino sketch:
-    // - request: "identify" => device prints "MS"
-    // - completion: "identify_complete" => device marks identified
     const req = (this.cfg.identify as any)?.request ?? 'identify'
     const completion = (this.cfg.identify as any)?.completion ?? 'identify_complete'
     const expected = String((this.cfg.identify as any)?.expectedToken ?? '').trim()
@@ -943,7 +923,6 @@ export class PS2MouseService {
         const t = line.trim()
         if (!t) continue
 
-        // Arduino emits "debug:" lines (including power status) that can appear before the ID token.
         if (t.startsWith('debug:') || t.startsWith('done:')) {
           continue
         }
@@ -991,12 +970,13 @@ export class PS2MouseService {
     return run
   }
 
+  /**
+   * Discrete ops / identify writes: keep drain() for determinism.
+   */
   private async writeLine(line: string): Promise<void> {
-    // Cancellation is per-active-op; movement tick has no active op and is allowed.
     this.assertActiveOpNotCancelled()
 
     return this.queueWrite(async () => {
-      // Re-check on execution; port could have closed while waiting in the write queue.
       this.assertActiveOpNotCancelled()
       if (!this.port || !this.port.isOpen) throw new Error('port not open')
 
@@ -1008,6 +988,37 @@ export class PS2MouseService {
           this.port!.drain((e) => (e ? reject(e) : resolve()))
         })
       })
+    })
+  }
+
+  /**
+   * Movement writes: DO NOT drain per command.
+   * - This prevents the movement tick loop from self-throttling into visible steps.
+   * - We also optionally skip if the writable backlog is already high.
+   */
+  private async writeMovementLine(line: string): Promise<boolean> {
+    return this.queueWrite(async () => {
+      this.assertActiveOpNotCancelled()
+      if (!this.port || !this.port.isOpen) return false
+
+      const eol = ((this.cfg.identify as any)?.writeLineEnding ?? '\n') as string
+      const payload = `${line}${eol}`
+
+      const maxBacklog = Math.max(
+        64,
+        Math.trunc(((this.cfg.movement as any)?.maxSerialBacklogBytes as number | undefined) ?? 256)
+      )
+
+      const writableLength = (this.port as any).writableLength
+      if (typeof writableLength === 'number' && writableLength > maxBacklog) {
+        return false
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        this.port!.write(payload, (err) => (err ? reject(err) : resolve()))
+      })
+
+      return true
     })
   }
 
@@ -1071,7 +1082,6 @@ export class PS2MouseService {
       this.events.publish({ kind: 'mouse-debug-line', line } as any)
     }
 
-    // Safety valve: flush runaway tail (partial line spam protection).
     const MAX_TAIL = 256
     if (this.readBuffer.length > MAX_TAIL) {
       const tail = this.readBuffer.trim()
@@ -1139,20 +1149,17 @@ export class PS2MouseService {
 
     this.moveLoopActive = true
 
-    const hz = Math.max(1, Math.trunc(this.cfg.movement.tickHz))
-    const intervalMs = Math.max(1, Math.floor(1000 / hz))
-
     const tick = async () => {
       if (!this.moveLoopActive) return
       await this.flushMovementTick()
       if (!this.moveLoopActive) return
 
-      // schedule AFTER await => no overlap
+      // IMPORTANT: cap tick rate to serial capacity (baud / line length)
+      const intervalMs = this.computeMovementIntervalMs()
       this.moveTimer = setTimeout(() => void tick(), intervalMs)
     }
 
-    // start the loop
-    this.moveTimer = setTimeout(() => void tick(), intervalMs)
+    this.moveTimer = setTimeout(() => void tick(), this.computeMovementIntervalMs())
   }
 
   private stopMoveTick(): void {
@@ -1163,39 +1170,120 @@ export class PS2MouseService {
     }
   }
 
-private async flushMovementTick(): Promise<void> {
-  if (this.stopping) return
-  if (this.hostPower === 'off') return
-  if (!this.port || !this.port.isOpen || !this.identified) return
+  /**
+   * At 9600 baud, you cannot sustain a 120Hz stream of ASCII absolute coordinates.
+   * We compute a conservative cap based on:
+   * - 8N1 framing (~10 bits per byte)
+   * - worst-case "M -512,-384\n" line length for the current grid
+   * - utilization headroom (75%) for buttons/config/etc.
+   */
+  private computeMovementIntervalMs(): number {
+    const hzCfg = Math.max(1, Math.trunc(this.cfg.movement.tickHz))
+    const hzCap = this.computeSerialMovementHzCap()
+    const hz = Math.max(1, Math.min(hzCfg, hzCap))
+    return Math.max(1, Math.floor(1000 / hz))
+  }
 
-  const grid = this.getGridForClamping()
-  const b = this.getCenteredBounds(grid)
-  const max = clampInt(this.cfg.movement.perTickMaxDelta, 1, 255)
-  const mode = this.movement.mode
+  private computeSerialMovementHzCap(): number {
+    const baud = this.currentBaudRate ?? this.cfg.serial.baudRate
+    const bytesPerSec = Math.max(1, Math.floor(baud / 10)) // 8N1 ~ 10 bits/byte
+    const util = 0.75
+    const budget = Math.max(1, Math.floor(bytesPerSec * util))
 
-  // Keep cursor within centered bounds (important if previous code drifted it out-of-range)
-  this.movement.cursor.x = clampInt(this.movement.cursor.x, b.minX, b.maxX)
-  this.movement.cursor.y = clampInt(this.movement.cursor.y, b.minY, b.maxY)
+    const grid = this.getGridForClamping()
+    const b = this.getCenteredBounds(grid)
+    const maxAbsX = Math.max(Math.abs(b.minX), Math.abs(b.maxX))
+    const maxAbsY = Math.max(Math.abs(b.minY), Math.abs(b.maxY))
+    const xDigits = String(maxAbsX).length
+    const yDigits = String(maxAbsY).length
 
-  const cur = this.movement.cursor
+    const eol = ((this.cfg.identify as any)?.writeLineEnding ?? '\n') as string
 
-  if (mode === 'absolute') {
-    const target = this.movement.absTarget
-    if (!target) return
+    // Worst-case length for: "M -xxx,-yyy\n"
+    // = 2 ("M ") + (1 sign + xDigits) + 1 comma + (1 sign + yDigits) + eolLen
+    const bytesPerCmd = 2 + (1 + xDigits) + 1 + (1 + yDigits) + eol.length
 
-    const stepDx = clampInt(target.x - cur.x, -max, max)
-    const stepDy = clampInt(target.y - cur.y, -max, max)
+    return Math.max(1, Math.floor(budget / Math.max(1, bytesPerCmd)))
+  }
+
+  private async flushMovementTick(): Promise<void> {
+    if (this.stopping) return
+    if (this.hostPower === 'off') return
+    if (!this.port || !this.port.isOpen || !this.identified) return
+
+    const grid = this.getGridForClamping()
+    const b = this.getCenteredBounds(grid)
+    const max = clampInt(this.cfg.movement.perTickMaxDelta, 1, 255)
+    const mode = this.movement.mode
+
+    this.movement.cursor.x = clampInt(this.movement.cursor.x, b.minX, b.maxX)
+    this.movement.cursor.y = clampInt(this.movement.cursor.y, b.minY, b.maxY)
+
+    const cur = this.movement.cursor
+
+    if (mode === 'absolute') {
+      const target = this.movement.absTarget
+      if (!target) return
+
+      const stepDx = clampInt(target.x - cur.x, -max, max)
+      const stepDy = clampInt(target.y - cur.y, -max, max)
+      if (stepDx === 0 && stepDy === 0) return
+
+      const nextX = clampInt(cur.x + stepDx, b.minX, b.maxX)
+      const nextY = clampInt(cur.y + stepDy, b.minY, b.maxY)
+
+      if (nextX === cur.x && nextY === cur.y) return
+
+      try {
+        // Short command: "M x,y" (firmware accepts both MOVE and M)
+        const ok = await this.writeMovementLine(`M ${nextX},${nextY}`)
+        if (!ok) return
+
+        this.movement.cursor.x = nextX
+        this.movement.cursor.y = nextY
+
+        const now = safeNow()
+        const last = this.movement.lastMoveTickEvtAt
+        if (last == null || now - last >= 250) {
+          this.movement.lastMoveTickEvtAt = now
+          this.events.publish({
+            kind: 'mouse-move-tick',
+            x: nextX,
+            y: nextY,
+            dx: nextX - cur.x,
+            dy: nextY - cur.y,
+            mode,
+          })
+        }
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error('movement tick failed')
+        this.events.publish({ kind: 'recoverable-error', error: e })
+      }
+
+      return
+    }
+
+    const acc = this.movement.relAcc
+
+    const stepDx = clampInt(Math.round(acc.dx), -max, max)
+    const stepDy = clampInt(Math.round(acc.dy), -max, max)
     if (stepDx === 0 && stepDy === 0) return
 
     const nextX = clampInt(cur.x + stepDx, b.minX, b.maxX)
     const nextY = clampInt(cur.y + stepDy, b.minY, b.maxY)
 
-    if (nextX === cur.x && nextY === cur.y) return
+    if (nextX === cur.x && nextY === cur.y) {
+      acc.dx -= stepDx
+      acc.dy -= stepDy
+      return
+    }
 
     try {
-      // IMPORTANT: firmware expects absolute (centered) coordinates
-      await this.writeLine(`MOVE ${nextX},${nextY}`)
+      const ok = await this.writeMovementLine(`M ${nextX},${nextY}`)
+      if (!ok) return
 
+      acc.dx -= stepDx
+      acc.dy -= stepDy
       this.movement.cursor.x = nextX
       this.movement.cursor.y = nextY
 
@@ -1216,59 +1304,7 @@ private async flushMovementTick(): Promise<void> {
       const e = err instanceof Error ? err : new Error('movement tick failed')
       this.events.publish({ kind: 'recoverable-error', error: e })
     }
-
-    return
   }
-
-  // Relative modes: integrate deltas into our centered absolute cursor, then send MOVE x,y.
-  const acc = this.movement.relAcc
-
-  // Unbiased rounding + error diffusion:
-  // - avoids truncation bias that produces “staircase” diagonals
-  // - leftover fractional motion remains in acc for the next tick
-  const stepDx = clampInt(Math.round(acc.dx), -max, max)
-  const stepDy = clampInt(Math.round(acc.dy), -max, max)
-  if (stepDx === 0 && stepDy === 0) return
-
-  const nextX = clampInt(cur.x + stepDx, b.minX, b.maxX)
-  const nextY = clampInt(cur.y + stepDy, b.minY, b.maxY)
-
-  // If we hit bounds, drain what we attempted to apply so we don't build backlog.
-  if (nextX === cur.x && nextY === cur.y) {
-    acc.dx -= stepDx
-    acc.dy -= stepDy
-    return
-  }
-
-  try {
-    // IMPORTANT: firmware expects absolute (centered) coordinates
-    await this.writeLine(`MOVE ${nextX},${nextY}`)
-
-    // Commit only after success.
-    acc.dx -= stepDx
-    acc.dy -= stepDy
-    this.movement.cursor.x = nextX
-    this.movement.cursor.y = nextY
-
-    const now = safeNow()
-    const last = this.movement.lastMoveTickEvtAt
-    if (last == null || now - last >= 250) {
-      this.movement.lastMoveTickEvtAt = now
-      this.events.publish({
-        kind: 'mouse-move-tick',
-        x: nextX,
-        y: nextY,
-        dx: nextX - cur.x,
-        dy: nextY - cur.y,
-        mode,
-      })
-    }
-  } catch (err) {
-    const e = err instanceof Error ? err : new Error('movement tick failed')
-    this.events.publish({ kind: 'recoverable-error', error: e })
-  }
-}
-
 
   /* ---------------------------------------------------------------------- */
   /*  Grid resolution helpers (spec v0.3 §9)                                 */
@@ -1276,7 +1312,6 @@ private async flushMovementTick(): Promise<void> {
 
   private resolveGridFromConfig(cfg: MouseAbsoluteGridConfig): Grid | null {
     if (cfg.mode === 'fixed') {
-      // Safety: validate at runtime as well (protects against malformed WS patches)
       const w = (cfg as any)?.fixed?.w
       const h = (cfg as any)?.fixed?.h
       if (typeof w === 'number' && typeof h === 'number' && Number.isFinite(w) && Number.isFinite(h)) {
@@ -1290,16 +1325,12 @@ private async flushMovementTick(): Promise<void> {
   }
 
   private getCenteredBounds(grid: Grid): { minX: number; maxX: number; minY: number; maxY: number } {
-    // For even sizes, this yields symmetric ranges like:
-    // 1024 => [-512 .. 511]
-    // 768  => [-384 .. 383]
     const minX = -Math.floor(grid.w / 2)
     const maxX = Math.ceil(grid.w / 2) - 1
     const minY = -Math.floor(grid.h / 2)
     const maxY = Math.ceil(grid.h / 2) - 1
     return { minX, maxX, minY, maxY }
   }
-
 
   private getGridForClamping(): Grid {
     return this.movement.gridResolved ?? { w: 1024, h: 768 }
@@ -1313,9 +1344,7 @@ private async flushMovementTick(): Promise<void> {
       this.movement.warnedUnknownGrid = true
       this.events.publish({
         kind: 'recoverable-error',
-        error: new Error(
-          'ps2-mouse absolute mapping: unknown resolution in auto grid mode; using fallback 1024x768'
-        ),
+        error: new Error('ps2-mouse absolute mapping: unknown resolution in auto grid mode; using fallback 1024x768'),
       })
     }
 
