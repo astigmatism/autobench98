@@ -3277,10 +3277,16 @@ onBeforeUnmount(() => {
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    outline: none;
+    outline: none;                 /* keep default off */
     cursor: pointer;
     user-select: none;
     border-radius: 6px;
+}
+
+/* Remove the red capture outline/glow when the user is in fullscreen mode */
+:fullscreen .kb-capture-layer[data-capturing='true'] .stream-glow,
+:fullscreen .kb-capture-layer[data-capturing='true'] .capture-glow {
+    opacity: 0 !important;
 }
 
 .stream-frame {
