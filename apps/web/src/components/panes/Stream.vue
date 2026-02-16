@@ -29,20 +29,16 @@
                             </label>
 
                             <label class="select panel-text">
-                                <span>Scale</span>
-                                <select v-model="scaleMode">
-                                    <option value="fit">Fit</option>
-                                    <option value="fill">Fill</option>
-                                    <option value="stretch">Stretch</option>
-                                    <option value="native">1:1</option>
-                                </select>
-                            </label>
+                                <span>LEDs</span>
+                                <select v-model="fpLedsPosition">
+                                    <option value="top-left-h">Top left (horizontal)</option>
+                                    <option value="top-left-v">Top left (vertical)</option>
 
-                            <label class="select panel-text">
-                                <span>Background</span>
-                                <select v-model="bgMode">
-                                    <option value="black">Black</option>
-                                    <option value="pane">Pane</option>
+                                    <option value="top-right-h">Top right (horizontal)</option>
+                                    <option value="top-right-v">Top right (vertical)</option>
+
+                                    <option value="bottom-right-h">Bottom right (horizontal)</option>
+                                    <option value="bottom-right-v">Bottom right (vertical)</option>
                                 </select>
                             </label>
 
@@ -116,10 +112,9 @@
                         </button>
 
                         <div class="mouse-actions">
-                            <label class="checkbox panel panel-text mouse-inline">
-                                <input type="checkbox" v-model="mouseDeviceAutoApply" />
-                                <span>Auto-apply device tuning on capture</span>
-                            </label>
+                            <button class="mouse-btn mouse-btn--secondary" type="button" @click="resetAllMouseToDefaults">
+                                Reset all to defaults
+                            </button>
                             <button class="mouse-btn" type="button" @click="applyMouseDeviceConfig">
                                 Apply device tuning
                             </button>
@@ -131,171 +126,436 @@
                             <div class="mouse-subtitle">Client-side shaping (per browser)</div>
 
                             <div class="mouse-grid">
-                                <label class="select panel-text">
-                                    <span>Send rate</span>
-                                    <select v-model="mouseSendRate">
-                                        <option value="raf">RAF (monitor)</option>
-                                        <option value="120">120</option>
-                                        <option value="90">90</option>
-                                        <option value="60">60</option>
-                                        <option value="30">30</option>
-                                        <option value="20">20</option>
-                                        <option value="15">15</option>
-                                    </select>
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Send rate</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="select panel-text">
+                                            <select v-model="mouseSendRate">
+                                                <option value="raf">RAF (monitor)</option>
+                                                <option value="120">120</option>
+                                                <option value="90">90</option>
+                                                <option value="60">60</option>
+                                                <option value="30">30</option>
+                                                <option value="20">20</option>
+                                                <option value="15">15</option>
+                                            </select>
+                                        </div>
 
-                                <label class="input panel-text">
-                                    <span>Sensitivity</span>
-                                    <input
-                                        type="number"
-                                        inputmode="decimal"
-                                        step="0.05"
-                                        min="0.05"
-                                        max="10"
-                                        v-model.number="mouseSensitivity"
-                                    />
-                                </label>
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseSendRate === MOUSE_DEFAULTS.sendRate"
+                                            @click="setDefaultMouseSendRate"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Caps how often this browser flushes queued mouse deltas. Lower values reduce WS load but can feel “chunky”.
+                                        <span class="mouse-setting-default">Default: {{ labelForSendRate(MOUSE_DEFAULTS.sendRate) }}</span>
+                                    </div>
+                                </div>
 
-                                <label class="input panel-text">
-                                    <span>Smoothing</span>
-                                    <input
-                                        type="number"
-                                        inputmode="decimal"
-                                        step="0.05"
-                                        min="0"
-                                        max="0.95"
-                                        v-model.number="mouseSmoothing"
-                                    />
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Sensitivity</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input
+                                                type="number"
+                                                inputmode="decimal"
+                                                step="0.05"
+                                                min="0.05"
+                                                max="10"
+                                                v-model.number="mouseSensitivity"
+                                            />
+                                        </div>
 
-                                <label class="input panel-text">
-                                    <span>Max delta/send</span>
-                                    <input
-                                        type="number"
-                                        inputmode="numeric"
-                                        step="1"
-                                        min="1"
-                                        max="500"
-                                        v-model.number="mouseMaxDeltaPerSend"
-                                    />
-                                </label>
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseSensitivity === MOUSE_DEFAULTS.sensitivity"
+                                            @click="setDefaultMouseSensitivity"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Multiplies pointer-lock deltas before smoothing/rounding. Higher = faster cursor; lower = slower.
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.sensitivity }}</span>
+                                    </div>
+                                </div>
 
-                                <label class="checkbox panel panel-text">
-                                    <input type="checkbox" v-model="mouseInvertX" />
-                                    <span>Invert X</span>
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Smoothing</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input
+                                                type="number"
+                                                inputmode="decimal"
+                                                step="0.05"
+                                                min="0"
+                                                max="0.95"
+                                                v-model.number="mouseSmoothing"
+                                            />
+                                        </div>
 
-                                <label class="checkbox panel panel-text">
-                                    <input type="checkbox" v-model="mouseInvertY" />
-                                    <span>Invert Y</span>
-                                </label>
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseSmoothing === MOUSE_DEFAULTS.smoothing"
+                                            @click="setDefaultMouseSmoothing"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        EMA smoothing factor (0 = none). Higher values reduce jitter but add “floatiness” and latency.
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.smoothing }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Max delta/send</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input
+                                                type="number"
+                                                inputmode="numeric"
+                                                step="1"
+                                                min="1"
+                                                max="500"
+                                                v-model.number="mouseMaxDeltaPerSend"
+                                            />
+                                        </div>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseMaxDeltaPerSend === MOUSE_DEFAULTS.maxDeltaPerSend"
+                                            @click="setDefaultMouseMaxDeltaPerSend"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Chunks large moves into smaller packets so you don’t get “spiky bursts” (especially with device gain/accel).
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.maxDeltaPerSend }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Invert X</div>
+                                    <div class="mouse-setting-control">
+                                        <label class="checkbox panel panel-text">
+                                            <input type="checkbox" v-model="mouseInvertX" />
+                                            <span>Enabled</span>
+                                        </label>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseInvertX === MOUSE_DEFAULTS.invertX"
+                                            @click="setDefaultMouseInvertX"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Flips horizontal direction before sensitivity/smoothing.
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.invertX ? 'On' : 'Off' }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Invert Y</div>
+                                    <div class="mouse-setting-control">
+                                        <label class="checkbox panel panel-text">
+                                            <input type="checkbox" v-model="mouseInvertY" />
+                                            <span>Enabled</span>
+                                        </label>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseInvertY === MOUSE_DEFAULTS.invertY"
+                                            @click="setDefaultMouseInvertY"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Flips vertical direction before sensitivity/smoothing.
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.invertY ? 'On' : 'Off' }}</span>
+                                    </div>
+                                </div>
                             </div>
 
                             <div class="mouse-subtitle">Device tuning (applies to Arduino/service)</div>
+                            <div class="mouse-actions-note">
+                                These settings are sent via <code>mouse.config</code> when you click <b>Apply device tuning</b>,
+                                and also automatically at capture start if auto-apply is enabled.
+                            </div>
 
                             <div class="mouse-grid">
-                                <label class="select panel-text">
-                                    <span>Mode</span>
-                                    <select v-model="mouseDeviceMode">
-                                        <option value="relative-gain">Relative gain</option>
-                                        <option value="relative-accel">Relative accel</option>
-                                        <option value="absolute">Absolute (requires absolute input)</option>
-                                    </select>
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Auto-apply device tuning on capture</div>
+                                    <div class="mouse-setting-control">
+                                        <label class="checkbox panel panel-text">
+                                            <input type="checkbox" v-model="mouseDeviceAutoApply" />
+                                            <span>Enabled</span>
+                                        </label>
 
-                                <label class="input panel-text">
-                                    <span>Gain</span>
-                                    <input type="number" step="1" min="1" max="200" v-model.number="mouseDeviceGain" />
-                                </label>
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceAutoApply === MOUSE_DEFAULTS.deviceAutoApply"
+                                            @click="setDefaultMouseDeviceAutoApply"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        If enabled, the pane sends a device config automatically when pointer-lock capture begins.
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceAutoApply ? 'On' : 'Off' }}</span>
+                                    </div>
+                                </div>
 
-                                <label class="checkbox panel panel-text">
-                                    <input type="checkbox" v-model="mouseDeviceAccelEnabled" />
-                                    <span>Accel enabled</span>
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Mode</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="select panel-text">
+                                            <select v-model="mouseDeviceMode">
+                                                <option value="relative-gain">Relative gain</option>
+                                                <option value="relative-accel">Relative accel</option>
+                                                <option value="absolute">Absolute (requires absolute input)</option>
+                                            </select>
+                                        </div>
 
-                                <label class="input panel-text">
-                                    <span>Accel base</span>
-                                    <input
-                                        type="number"
-                                        step="1"
-                                        min="1"
-                                        max="200"
-                                        v-model.number="mouseDeviceAccelBaseGain"
-                                    />
-                                </label>
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceMode === MOUSE_DEFAULTS.deviceMode"
+                                            @click="setDefaultMouseDeviceMode"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Controls how the device interprets deltas. This pane sends <code>mouse.move.relative</code> from pointer lock, so relative modes apply.
+                                        <span class="mouse-setting-default">Default: {{ labelForDeviceMode(MOUSE_DEFAULTS.deviceMode) }}</span>
+                                    </div>
+                                </div>
 
-                                <label class="input panel-text">
-                                    <span>Accel max</span>
-                                    <input
-                                        type="number"
-                                        step="1"
-                                        min="1"
-                                        max="500"
-                                        v-model.number="mouseDeviceAccelMaxGain"
-                                    />
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Gain</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input type="number" step="1" min="1" max="200" v-model.number="mouseDeviceGain" />
+                                        </div>
 
-                                <label class="input panel-text">
-                                    <span>Vel for max</span>
-                                    <input
-                                        type="number"
-                                        step="10"
-                                        min="10"
-                                        max="50000"
-                                        v-model.number="mouseDeviceAccelVelForMax"
-                                    />
-                                </label>
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceGain === MOUSE_DEFAULTS.deviceGain"
+                                            @click="setDefaultMouseDeviceGain"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Scales deltas on the device. Higher values amplify movement (and any batching artifacts).
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceGain }}</span>
+                                    </div>
+                                </div>
 
-                                <label class="select panel-text">
-                                    <span>Abs grid</span>
-                                    <select v-model="mouseDeviceGridMode">
-                                        <option value="auto">Auto</option>
-                                        <option value="fixed">Fixed</option>
-                                    </select>
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Accel enabled</div>
+                                    <div class="mouse-setting-control">
+                                        <label class="checkbox panel panel-text">
+                                            <input type="checkbox" v-model="mouseDeviceAccelEnabled" />
+                                            <span>Enabled</span>
+                                        </label>
 
-                                <label
-                                    class="input panel-text"
-                                    :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'"
-                                >
-                                    <span>Grid W</span>
-                                    <input
-                                        :disabled="mouseDeviceGridMode !== 'fixed'"
-                                        type="number"
-                                        step="1"
-                                        min="1"
-                                        max="10000"
-                                        v-model.number="mouseDeviceGridW"
-                                    />
-                                </label>
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceAccelEnabled === MOUSE_DEFAULTS.deviceAccelEnabled"
+                                            @click="setDefaultMouseDeviceAccelEnabled"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Enables velocity-based gain ramp on the device. Useful for “flick” acceleration; can feel like snapping if combined with batching/gain.
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceAccelEnabled ? 'On' : 'Off' }}</span>
+                                    </div>
+                                </div>
 
-                                <label
-                                    class="input panel-text"
-                                    :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'"
-                                >
-                                    <span>Grid H</span>
-                                    <input
-                                        :disabled="mouseDeviceGridMode !== 'fixed'"
-                                        type="number"
-                                        step="1"
-                                        min="1"
-                                        max="10000"
-                                        v-model.number="mouseDeviceGridH"
-                                    />
-                                </label>
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Accel base</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input type="number" step="1" min="1" max="200" v-model.number="mouseDeviceAccelBaseGain" />
+                                        </div>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceAccelBaseGain === MOUSE_DEFAULTS.deviceAccelBaseGain"
+                                            @click="setDefaultMouseDeviceAccelBaseGain"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Base gain when accel is enabled (at low velocity).
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceAccelBaseGain }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Accel max</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input type="number" step="1" min="1" max="500" v-model.number="mouseDeviceAccelMaxGain" />
+                                        </div>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceAccelMaxGain === MOUSE_DEFAULTS.deviceAccelMaxGain"
+                                            @click="setDefaultMouseDeviceAccelMaxGain"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Max gain when accel is enabled (at/above “Vel for max”).
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceAccelMaxGain }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Vel for max</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input
+                                                type="number"
+                                                step="10"
+                                                min="10"
+                                                max="50000"
+                                                v-model.number="mouseDeviceAccelVelForMax"
+                                            />
+                                        </div>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceAccelVelForMax === MOUSE_DEFAULTS.deviceAccelVelForMax"
+                                            @click="setDefaultMouseDeviceAccelVelForMax"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Velocity threshold (px/sec) for reaching max accel gain.
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceAccelVelForMax }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting">
+                                    <div class="mouse-setting-name">Abs grid</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="select panel-text">
+                                            <select v-model="mouseDeviceGridMode">
+                                                <option value="auto">Auto</option>
+                                                <option value="fixed">Fixed</option>
+                                            </select>
+                                        </div>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceGridMode === MOUSE_DEFAULTS.deviceGridMode"
+                                            @click="setDefaultMouseDeviceGridMode"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Only relevant for <code>absolute</code> mode inputs. Fixed grid defines the absolute coordinate space (W/H).
+                                        <span class="mouse-setting-default">Default: {{ labelForGridMode(MOUSE_DEFAULTS.deviceGridMode) }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting" :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'">
+                                    <div class="mouse-setting-name">Grid W</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input
+                                                :disabled="mouseDeviceGridMode !== 'fixed'"
+                                                type="number"
+                                                step="1"
+                                                min="1"
+                                                max="10000"
+                                                v-model.number="mouseDeviceGridW"
+                                            />
+                                        </div>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceGridMode !== 'fixed' || mouseDeviceGridW === MOUSE_DEFAULTS.deviceGridW"
+                                            @click="setDefaultMouseDeviceGridW"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Absolute grid width (only when Abs grid = Fixed).
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceGridW }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="mouse-setting" :data-disabled="mouseDeviceGridMode !== 'fixed' ? 'true' : 'false'">
+                                    <div class="mouse-setting-name">Grid H</div>
+                                    <div class="mouse-setting-control">
+                                        <div class="input panel-text">
+                                            <input
+                                                :disabled="mouseDeviceGridMode !== 'fixed'"
+                                                type="number"
+                                                step="1"
+                                                min="1"
+                                                max="10000"
+                                                v-model.number="mouseDeviceGridH"
+                                            />
+                                        </div>
+
+                                        <button
+                                            class="mouse-default-btn"
+                                            type="button"
+                                            :disabled="mouseDeviceGridMode !== 'fixed' || mouseDeviceGridH === MOUSE_DEFAULTS.deviceGridH"
+                                            @click="setDefaultMouseDeviceGridH"
+                                        >
+                                            Default
+                                        </button>
+                                    </div>
+                                    <div class="mouse-setting-desc">
+                                        Absolute grid height (only when Abs grid = Fixed).
+                                        <span class="mouse-setting-default">Default: {{ MOUSE_DEFAULTS.deviceGridH }}</span>
+                                    </div>
+                                </div>
                             </div>
 
                             <div class="mouse-note">
-                                Notes:
+                                Quick notes:
                                 <ul>
                                     <li>
-                                        <b>Send rate</b> caps how often this browser emits WS mouse moves (reduces overload on fast systems).
+                                        This pane uses pointer lock, so it sends <code>mouse.move.relative</code> deltas.
+                                        <b>Absolute</b> mode only helps if another sender emits <code>mouse.move.absolute</code>.
                                     </li>
                                     <li>
-                                        <b>Max delta/send</b> breaks large moves into smaller chunks to avoid spiky bursts.
-                                    </li>
-                                    <li>
-                                        <b>Absolute</b> mode only helps if you send <code>mouse.move.absolute</code> (this pane uses pointer lock relative moves).
+                                        If you see “snapping”, it’s usually a combination of (a) client batching (send rate / max delta) and (b) device amplification (gain/accel).
                                     </li>
                                 </ul>
                             </div>
@@ -524,7 +784,7 @@
 
                 <!-- Front panel controls: overlay + position control (bottom-left / bottom-right) -->
                 <div
-                    v-show="fpButtonsShouldShow"
+                    v-show="fpButtonsShouldShow && !isCapturing"
                     class="frontpanel-controls frontpanel-controls--overlay"
                     :data-pos="fpButtonsPosition"
                 >
@@ -597,7 +857,14 @@ type StreamFpsMode = 'auto' | '60' | '30' | '20' | '15' | '8' | '4' | '2'
 type FrontPanelButtonsPosition = 'bottom-left' | 'bottom-right'
 type FrontPanelButtonsVisibility = 'always' | 'hover' | 'hidden'
 
-type FrontPanelLedsPosition = 'top-left' | 'top-right'
+type FrontPanelLedsPosition =
+    | 'top-left-h'
+    | 'top-left-v'
+    | 'top-right-h'
+    | 'top-right-v'
+    | 'bottom-right-h'
+    | 'bottom-right-v'
+
 type FrontPanelLedsVisibility = 'always' | 'hover' | 'hidden'
 type FrontPanelLedMode = 'off' | 'on' | 'blink' | 'blink-fast' | 'pulse'
 
@@ -758,27 +1025,137 @@ const reloadKey = ref(0)
 /*  Mouse settings (client + device)                                          */
 /* -------------------------------------------------------------------------- */
 
-// Defaults tuned to reduce "micro-move batching" and avoid multi-pixel jumps.
-const mouseSendRate = ref<MouseSendRateMode>('120')
-const mouseSensitivity = ref<number>(1.0)
-const mouseSmoothing = ref<number>(0.0)
-const mouseMaxDeltaPerSend = ref<number>(2)
-const mouseInvertX = ref<boolean>(false)
-const mouseInvertY = ref<boolean>(false)
+const MOUSE_DEFAULTS = {
+    // client-side shaping
+    sendRate: '120' as MouseSendRateMode,
+    sensitivity: 1.0,
+    smoothing: 0.0,
+    maxDeltaPerSend: 1,
+    invertX: false,
+    invertY: false,
+
+    // device-side tuning
+    deviceAutoApply: true,
+    deviceMode: 'relative-gain' as MouseDeviceMode,
+    deviceGain: 1,
+
+    deviceAccelEnabled: false,
+    deviceAccelBaseGain: 1,
+    deviceAccelMaxGain: 1,
+    deviceAccelVelForMax: 1000,
+
+    deviceGridMode: 'auto' as MouseGridMode,
+    deviceGridW: 1024,
+    deviceGridH: 768,
+} as const
+
+function labelForSendRate(v: MouseSendRateMode): string {
+    return v === 'raf' ? 'RAF (monitor)' : `${v}Hz`
+}
+function labelForDeviceMode(v: MouseDeviceMode): string {
+    if (v === 'relative-gain') return 'Relative gain'
+    if (v === 'relative-accel') return 'Relative accel'
+    return 'Absolute'
+}
+function labelForGridMode(v: MouseGridMode): string {
+    return v === 'fixed' ? 'Fixed' : 'Auto'
+}
+
+// Defaults tuned to reduce “micro-move batching” and avoid multi-pixel jumps.
+const mouseSendRate = ref<MouseSendRateMode>(MOUSE_DEFAULTS.sendRate)
+const mouseSensitivity = ref<number>(MOUSE_DEFAULTS.sensitivity)
+const mouseSmoothing = ref<number>(MOUSE_DEFAULTS.smoothing)
+const mouseMaxDeltaPerSend = ref<number>(MOUSE_DEFAULTS.maxDeltaPerSend)
+const mouseInvertX = ref<boolean>(MOUSE_DEFAULTS.invertX)
+const mouseInvertY = ref<boolean>(MOUSE_DEFAULTS.invertY)
 
 // Device defaults: avoid amplifying the smallest integer deltas.
-const mouseDeviceAutoApply = ref<boolean>(true)
-const mouseDeviceMode = ref<MouseDeviceMode>('relative-gain')
-const mouseDeviceGain = ref<number>(1)
+const mouseDeviceAutoApply = ref<boolean>(MOUSE_DEFAULTS.deviceAutoApply)
+const mouseDeviceMode = ref<MouseDeviceMode>(MOUSE_DEFAULTS.deviceMode)
+const mouseDeviceGain = ref<number>(MOUSE_DEFAULTS.deviceGain)
 
-const mouseDeviceAccelEnabled = ref<boolean>(false)
-const mouseDeviceAccelBaseGain = ref<number>(1)
-const mouseDeviceAccelMaxGain = ref<number>(1)
-const mouseDeviceAccelVelForMax = ref<number>(1000)
+const mouseDeviceAccelEnabled = ref<boolean>(MOUSE_DEFAULTS.deviceAccelEnabled)
+const mouseDeviceAccelBaseGain = ref<number>(MOUSE_DEFAULTS.deviceAccelBaseGain)
+const mouseDeviceAccelMaxGain = ref<number>(MOUSE_DEFAULTS.deviceAccelMaxGain)
+const mouseDeviceAccelVelForMax = ref<number>(MOUSE_DEFAULTS.deviceAccelVelForMax)
 
-const mouseDeviceGridMode = ref<MouseGridMode>('auto')
-const mouseDeviceGridW = ref<number>(1024)
-const mouseDeviceGridH = ref<number>(768)
+const mouseDeviceGridMode = ref<MouseGridMode>(MOUSE_DEFAULTS.deviceGridMode)
+const mouseDeviceGridW = ref<number>(MOUSE_DEFAULTS.deviceGridW)
+const mouseDeviceGridH = ref<number>(MOUSE_DEFAULTS.deviceGridH)
+
+function setDefaultMouseSendRate() {
+    mouseSendRate.value = MOUSE_DEFAULTS.sendRate
+}
+function setDefaultMouseSensitivity() {
+    mouseSensitivity.value = MOUSE_DEFAULTS.sensitivity
+}
+function setDefaultMouseSmoothing() {
+    mouseSmoothing.value = MOUSE_DEFAULTS.smoothing
+}
+function setDefaultMouseMaxDeltaPerSend() {
+    mouseMaxDeltaPerSend.value = MOUSE_DEFAULTS.maxDeltaPerSend
+}
+function setDefaultMouseInvertX() {
+    mouseInvertX.value = MOUSE_DEFAULTS.invertX
+}
+function setDefaultMouseInvertY() {
+    mouseInvertY.value = MOUSE_DEFAULTS.invertY
+}
+
+function setDefaultMouseDeviceAutoApply() {
+    mouseDeviceAutoApply.value = MOUSE_DEFAULTS.deviceAutoApply
+}
+function setDefaultMouseDeviceMode() {
+    mouseDeviceMode.value = MOUSE_DEFAULTS.deviceMode
+}
+function setDefaultMouseDeviceGain() {
+    mouseDeviceGain.value = MOUSE_DEFAULTS.deviceGain
+}
+function setDefaultMouseDeviceAccelEnabled() {
+    mouseDeviceAccelEnabled.value = MOUSE_DEFAULTS.deviceAccelEnabled
+}
+function setDefaultMouseDeviceAccelBaseGain() {
+    mouseDeviceAccelBaseGain.value = MOUSE_DEFAULTS.deviceAccelBaseGain
+}
+function setDefaultMouseDeviceAccelMaxGain() {
+    mouseDeviceAccelMaxGain.value = MOUSE_DEFAULTS.deviceAccelMaxGain
+}
+function setDefaultMouseDeviceAccelVelForMax() {
+    mouseDeviceAccelVelForMax.value = MOUSE_DEFAULTS.deviceAccelVelForMax
+}
+function setDefaultMouseDeviceGridMode() {
+    mouseDeviceGridMode.value = MOUSE_DEFAULTS.deviceGridMode
+}
+function setDefaultMouseDeviceGridW() {
+    mouseDeviceGridW.value = MOUSE_DEFAULTS.deviceGridW
+}
+function setDefaultMouseDeviceGridH() {
+    mouseDeviceGridH.value = MOUSE_DEFAULTS.deviceGridH
+}
+
+function resetAllMouseToDefaults() {
+    mouseSendRate.value = MOUSE_DEFAULTS.sendRate
+    mouseSensitivity.value = MOUSE_DEFAULTS.sensitivity
+    mouseSmoothing.value = MOUSE_DEFAULTS.smoothing
+    mouseMaxDeltaPerSend.value = MOUSE_DEFAULTS.maxDeltaPerSend
+    mouseInvertX.value = MOUSE_DEFAULTS.invertX
+    mouseInvertY.value = MOUSE_DEFAULTS.invertY
+
+    mouseDeviceAutoApply.value = MOUSE_DEFAULTS.deviceAutoApply
+    mouseDeviceMode.value = MOUSE_DEFAULTS.deviceMode
+    mouseDeviceGain.value = MOUSE_DEFAULTS.deviceGain
+
+    mouseDeviceAccelEnabled.value = MOUSE_DEFAULTS.deviceAccelEnabled
+    mouseDeviceAccelBaseGain.value = MOUSE_DEFAULTS.deviceAccelBaseGain
+    mouseDeviceAccelMaxGain.value = MOUSE_DEFAULTS.deviceAccelMaxGain
+    mouseDeviceAccelVelForMax.value = MOUSE_DEFAULTS.deviceAccelVelForMax
+
+    mouseDeviceGridMode.value = MOUSE_DEFAULTS.deviceGridMode
+    mouseDeviceGridW.value = MOUSE_DEFAULTS.deviceGridW
+    mouseDeviceGridH.value = MOUSE_DEFAULTS.deviceGridH
+
+    resetMouseFilterState()
+}
 
 function clampNum(n: number, min: number, max: number, fallback: number): number {
     if (!Number.isFinite(n)) return fallback
@@ -809,7 +1186,7 @@ const fpButtonsVisibility = ref<FrontPanelButtonsVisibility>('hover')
 /*  Front panel LED indicators (visibility + position)                        */
 /* -------------------------------------------------------------------------- */
 
-const fpLedsPosition = ref<FrontPanelLedsPosition>('top-left')
+const fpLedsPosition = ref<FrontPanelLedsPosition>('top-left-h')
 const fpLedsVisibility = ref<FrontPanelLedsVisibility>('hover')
 
 const isHoveringPane = ref(false)
@@ -1647,8 +2024,16 @@ function isValidFpVis(x: any): x is FrontPanelButtonsVisibility {
 }
 
 function isValidFpLedsPos(x: any): x is FrontPanelLedsPosition {
-    return x === 'top-left' || x === 'top-right'
+    return (
+        x === 'top-left-h' ||
+        x === 'top-left-v' ||
+        x === 'top-right-h' ||
+        x === 'top-right-v' ||
+        x === 'bottom-right-h' ||
+        x === 'bottom-right-v'
+    )
 }
+
 function isValidFpLedsVis(x: any): x is FrontPanelLedsVisibility {
     return x === 'always' || x === 'hover' || x === 'hidden'
 }
@@ -1706,7 +2091,7 @@ function migratePanePrefs(prefs: StreamPanePrefs): StreamPanePrefs {
 
     const out: StreamPanePrefs = { ...prefs, prefsRev: STREAM_PANE_PREFS_REV }
 
-    // Legacy defaults from your source (before this fix):
+    // Legacy defaults from older builds (before mouse batching fixes):
     //   mouseSendRate: '60'
     //   mouseMaxDeltaPerSend: 80
     //   mouseDeviceAutoApply: false
@@ -1717,7 +2102,7 @@ function migratePanePrefs(prefs: StreamPanePrefs): StreamPanePrefs {
     //   mouseDeviceAccelVelForMax: 1000
     //
     // These can cause micro-movements to batch into multi-count deltas, which then
-    // get amplified by device gain/accel (perceived as "snapping to a grid").
+    // get amplified by device gain/accel (perceived as “snapping to a grid”).
     const msr = (prefs as any).mouseSendRate
     const mdps = (prefs as any).mouseMaxDeltaPerSend
 
@@ -1737,11 +2122,11 @@ function migratePanePrefs(prefs: StreamPanePrefs): StreamPanePrefs {
         (typeof vel !== 'number' || vel === 1000)
 
     if (looksLikeLegacyDeviceDefaults) {
-        out.mouseDeviceAutoApply = true
-        out.mouseDeviceGain = 1
-        out.mouseDeviceAccelEnabled = false
-        out.mouseDeviceAccelBaseGain = 1
-        out.mouseDeviceAccelMaxGain = 1
+        out.mouseDeviceAutoApply = MOUSE_DEFAULTS.deviceAutoApply
+        out.mouseDeviceGain = MOUSE_DEFAULTS.deviceGain
+        out.mouseDeviceAccelEnabled = MOUSE_DEFAULTS.deviceAccelEnabled
+        out.mouseDeviceAccelBaseGain = MOUSE_DEFAULTS.deviceAccelBaseGain
+        out.mouseDeviceAccelMaxGain = MOUSE_DEFAULTS.deviceAccelMaxGain
         // keep velocityPxPerSecForMax as-is
     }
 
@@ -1750,11 +2135,11 @@ function migratePanePrefs(prefs: StreamPanePrefs): StreamPanePrefs {
         (typeof msr !== 'string' || msr === '60')
 
     if (looksLikeLegacyClientDefaults) {
-        out.mouseSendRate = '120'
-        out.mouseMaxDeltaPerSend = 2
+        out.mouseSendRate = MOUSE_DEFAULTS.sendRate
+        out.mouseMaxDeltaPerSend = MOUSE_DEFAULTS.maxDeltaPerSend
     } else {
-        if (typeof mdps !== 'number' || mdps === 80) out.mouseMaxDeltaPerSend = 2
-        if (typeof msr !== 'string') out.mouseSendRate = '120'
+        if (typeof mdps !== 'number' || mdps === 80) out.mouseMaxDeltaPerSend = MOUSE_DEFAULTS.maxDeltaPerSend
+        if (typeof msr !== 'string') out.mouseSendRate = MOUSE_DEFAULTS.sendRate
     }
 
     return out
@@ -1782,7 +2167,11 @@ function applyPanePrefs(prefs?: StreamPanePrefs | null) {
     if (isValidFpVis(nextFpVis)) fpButtonsVisibility.value = nextFpVis
 
     const nextLedsPos = (prefs as any).fpLedsPosition
-    if (isValidFpLedsPos(nextLedsPos)) fpLedsPosition.value = nextLedsPos
+    // normalize legacy values so the <select> always has a matching option
+    if (nextLedsPos === 'top-left') fpLedsPosition.value = 'top-left-h'
+    else if (nextLedsPos === 'top-right') fpLedsPosition.value = 'top-right-h'
+    else if (isValidFpLedsPos(nextLedsPos)) fpLedsPosition.value = nextLedsPos
+
 
     const nextLedsVis = (prefs as any).fpLedsVisibility
     if (isValidFpLedsVis(nextLedsVis)) fpLedsVisibility.value = nextLedsVis
@@ -2298,7 +2687,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* (styles unchanged) */
+/* (styles mostly unchanged; mouse panel expanded for per-setting descriptions) */
 .stream-pane {
     --pane-fg: #111;
     --panel-fg: #e6e6e6;
@@ -2588,6 +2977,8 @@ onBeforeUnmount(() => {
 }
 
 .mouse-panel {
+    --control-h: 30px;
+
     margin-top: 4px;
     padding: 8px 8px;
     border-radius: 6px;
@@ -2620,10 +3011,6 @@ onBeforeUnmount(() => {
     justify-content: flex-end;
 }
 
-.mouse-inline {
-    --control-h: 26px;
-}
-
 .mouse-btn {
     height: 28px;
     padding: 0 10px;
@@ -2637,6 +3024,13 @@ onBeforeUnmount(() => {
 .mouse-btn:hover {
     background: #0f172a;
 }
+.mouse-btn--secondary {
+    background: transparent;
+    border-color: #475569;
+}
+.mouse-btn--secondary:hover {
+    background: rgba(15, 23, 42, 0.35);
+}
 
 .mouse-subtitle {
     opacity: 0.82;
@@ -2644,10 +3038,99 @@ onBeforeUnmount(() => {
     margin-top: 2px;
 }
 
+.mouse-actions-note {
+    opacity: 0.76;
+    line-height: 1.35;
+    margin-top: -2px;
+    margin-bottom: 6px;
+}
+.mouse-actions-note code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    font-size: 0.72rem;
+}
+
 .mouse-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+@media (max-width: 760px) {
+    .mouse-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.mouse-setting {
+    border: 1px solid #1f2937;
+    border-radius: 8px;
+    background: rgba(2, 6, 23, 0.35);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.mouse-setting[data-disabled='true'] {
+    opacity: 0.55;
+}
+
+.mouse-setting-name {
+    font-weight: 600;
+    opacity: 0.92;
+}
+
+.mouse-setting-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.mouse-setting-control .select,
+.mouse-setting-control .input,
+.mouse-setting-control .checkbox.panel {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Make inputs/selects grow within cards */
+.mouse-setting-control .input input {
+    width: 100%;
+}
+.mouse-setting-control .select select {
+    width: 100%;
+}
+
+.mouse-default-btn {
+    height: var(--control-h);
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid #475569;
+    background: transparent;
+    color: var(--panel-fg);
+    cursor: pointer;
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+.mouse-default-btn:hover:not(:disabled) {
+    background: rgba(15, 23, 42, 0.35);
+}
+.mouse-default-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.mouse-setting-desc {
+    opacity: 0.76;
+    line-height: 1.35;
+    font-size: 0.72rem;
+}
+.mouse-setting-default {
+    display: inline-block;
+    margin-left: 6px;
+    opacity: 0.9;
+    font-weight: 500;
 }
 
 .mouse-note {
@@ -2821,10 +3304,6 @@ onBeforeUnmount(() => {
     min-height: 0;
 }
 
-.frontpanel-leds[data-pos='top-right'] {
-    justify-content: flex-end;
-}
-
 .frontpanel-leds--overlay {
     position: absolute;
     left: 8px;
@@ -2832,6 +3311,35 @@ onBeforeUnmount(() => {
     top: 8px;
     z-index: 6;
     pointer-events: none;
+}
+
+/* Right aligned (top-right + bottom-right) */
+.frontpanel-leds[data-pos='top-right-h'],
+.frontpanel-leds[data-pos='top-right-v'],
+.frontpanel-leds[data-pos='bottom-right-h'],
+.frontpanel-leds[data-pos='bottom-right-v'] {
+    justify-content: flex-end;
+}
+
+/* Vertical stack: power above hdd */
+.frontpanel-leds[data-pos='top-left-v'],
+.frontpanel-leds[data-pos='top-right-v'],
+.frontpanel-leds[data-pos='bottom-right-v'] {
+    flex-direction: column;
+    justify-content: flex-start;
+}
+
+/* For vertical stacks on the right, align the badges to the right edge */
+.frontpanel-leds[data-pos='top-right-v'],
+.frontpanel-leds[data-pos='bottom-right-v'] {
+    align-items: flex-end;
+}
+
+/* Move overlay to bottom for bottom-right variants */
+.frontpanel-leds--overlay[data-pos='bottom-right-h'],
+.frontpanel-leds--overlay[data-pos='bottom-right-v'] {
+    top: auto;
+    bottom: 8px;
 }
 
 .fp-led-badge {
