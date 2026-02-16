@@ -708,9 +708,14 @@
             </div>
         </transition>
 
-        <div class="viewport-stack">
-            <div class="viewport" :data-bg="bgMode" :data-kb-available="canCapture ? 'true' : 'false'">
-                <div v-if="enabled" class="viewport-inner">
+<div class="viewport-stack">
+    <div
+        ref="viewportRef"
+        class="viewport"
+        :data-bg="bgMode"
+        :data-kb-available="canCapture ? 'true' : 'false'"
+    >
+        <div v-if="enabled" class="viewport-inner">
                     <div
                         ref="captureRef"
                         class="kb-capture-layer"
@@ -805,6 +810,16 @@
                         @touchcancel.prevent="onResetHoldEnd"
                     >
                         Reset
+                    </button>
+
+                    <button
+                        class="fp-btn fp-btn--secondary"
+                        :disabled="!canCapture"
+                        @click.prevent.stop="enterFullscreenCapture"
+                        @mousedown.prevent.stop
+                        @touchstart.prevent.stop="enterFullscreenCapture"
+                    >
+                        Fullscreen
                     </button>
                 </div>
             </div>
@@ -1623,9 +1638,15 @@ watch(
 /*  Keyboard capture (pointer lock is the ONLY capture mode)                  */
 /* -------------------------------------------------------------------------- */
 
+const viewportRef = ref<HTMLElement | null>(null)
+
 const captureRef = ref<HTMLElement | null>(null)
 const isCapturing = ref(false)
 const armOnNextFocus = ref(false)
+
+// Fullscreen (only entered via the button)
+const isFullscreen = ref(false)
+const fullscreenArmedByButton = ref(false)
 
 const MODIFIER_CODES = new Set<string>([
     'ShiftLeft',
@@ -1645,6 +1666,57 @@ function isPointerLockedToCaptureEl(): boolean {
     const el = captureRef.value
     if (!el) return false
     return document.pointerLockElement === el
+}
+
+function isFullscreenActive(): boolean {
+    return !!(document as any).fullscreenElement
+}
+
+function requestFullscreen(el: HTMLElement) {
+    // Standard + vendor fallbacks (cheap + safe)
+    const anyEl = el as any
+    try {
+        ;(anyEl.requestFullscreen ?? anyEl.webkitRequestFullscreen ?? anyEl.mozRequestFullScreen ?? anyEl.msRequestFullscreen)?.call(
+            el
+        )
+    } catch {
+        // ignore
+    }
+}
+
+function exitFullscreen() {
+    const anyDoc = document as any
+    try {
+        ;(document.exitFullscreen ?? anyDoc.webkitExitFullscreen ?? anyDoc.mozCancelFullScreen ?? anyDoc.msExitFullscreen)?.call(
+            document
+        )
+    } catch {
+        // ignore
+    }
+}
+
+function maybeExitFullscreenFromButton() {
+    if (!fullscreenArmedByButton.value) return
+    if (isFullscreenActive()) exitFullscreen()
+    fullscreenArmedByButton.value = false
+}
+
+function enterFullscreenCapture() {
+    if (!canCapture.value) return
+
+    const v = viewportRef.value
+    const cap = captureRef.value
+    if (!v || !cap) return
+
+    fullscreenArmedByButton.value = true
+
+    // Do both synchronously inside the user gesture.
+    if (!isFullscreenActive()) requestFullscreen(v)
+
+    // Focus + pointer lock on the capture layer
+    refreshWsClient()
+    focusCaptureLayer()
+    requestPointerLock()
 }
 
 function requestPointerLock() {
@@ -1781,8 +1853,12 @@ function onPointerLockChange() {
 
     if (isCapturing.value || heldModifiers.size > 0 || armOnNextFocus.value || heldMouseButtons.size > 0) {
         releaseCapture({ fromBlur: true })
+        // If this capture session was entered via the fullscreen button, unwind fullscreen too.
+        maybeExitFullscreenFromButton()
     } else {
         armOnNextFocus.value = false
+        // Also unwind fullscreen if the lock dropped without capture state being set (edge cases).
+        maybeExitFullscreenFromButton()
     }
 }
 
@@ -1805,11 +1881,26 @@ function onVisibilityChange() {
     if (document.visibilityState !== 'visible') onWindowBlur()
 }
 
+function onFullscreenChange() {
+    isFullscreen.value = isFullscreenActive()
+    if (!isFullscreen.value) {
+        // If user exits fullscreen by other means, disarm the mode.
+        fullscreenArmedByButton.value = false
+    }
+}
+
+function onFullscreenError() {
+    fullscreenArmedByButton.value = false
+}
+
 onMounted(() => {
     document.addEventListener('pointerlockchange', onPointerLockChange)
     document.addEventListener('pointerlockerror', onPointerLockError)
     window.addEventListener('blur', onWindowBlur)
     document.addEventListener('visibilitychange', onVisibilityChange)
+
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    document.addEventListener('fullscreenerror', onFullscreenError)
 })
 
 function onFocusCapture() {
@@ -2664,6 +2755,9 @@ onBeforeUnmount(() => {
     window.removeEventListener('blur', onWindowBlur)
     document.removeEventListener('visibilitychange', onVisibilityChange)
 
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    document.removeEventListener('fullscreenerror', onFullscreenError)
+
     if (wsRetryTimer != null) window.clearInterval(wsRetryTimer)
     if (wsRetryStopTimer != null) window.clearTimeout(wsRetryStopTimer)
     wsRetryTimer = null
@@ -3495,5 +3589,21 @@ onBeforeUnmount(() => {
     border-color: #4b5563;
     background: #0b1120;
     box-shadow: none;
+}
+
+/* Fullscreen polish (we fullscreen the .viewport element itself) */
+.viewport:fullscreen {
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: #000;
+}
+
+/* Vendor fallback for older WebKit */
+.viewport:-webkit-full-screen {
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: #000;
 }
 </style>
