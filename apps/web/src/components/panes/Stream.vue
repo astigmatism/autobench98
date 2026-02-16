@@ -75,15 +75,6 @@
                                 </select>
                             </label>
 
-                            <!-- LED indicator overlay settings (position/visibility only) -->
-                            <label class="select panel-text">
-                                <span>LEDs</span>
-                                <select v-model="fpLedsPosition">
-                                    <option value="top-left">Top left</option>
-                                    <option value="top-right">Top right</option>
-                                </select>
-                            </label>
-
                             <label class="select panel-text">
                                 <span>LED visibility</span>
                                 <select v-model="fpLedsVisibility">
@@ -2795,6 +2786,13 @@ onBeforeUnmount(() => {
     display: flex;
     flex-direction: column;
     gap: 8px;
+
+    /* Scroll only the advanced settings panel (⚙️ menu), not the whole pane */
+    max-height: 55%;
+    overflow: auto;              /* vertical + horizontal if needed */
+    overscroll-behavior: contain; /* prevent wheel from “falling through” */
+    scrollbar-gutter: stable;     /* avoid layout shift when scrollbar appears */
+    padding-right: 6px;           /* keep content off the scrollbar */
 }
 
 .toolbar {
@@ -3323,7 +3321,9 @@ onBeforeUnmount(() => {
 
 /* Vertical stack: power above hdd */
 .frontpanel-leds[data-pos='top-left-v'],
-.frontpanel-leds[data-pos='top-right-v'],
+.frontpanel-leds[data-pos='top-left-v'] {
+    align-items: flex-start;
+}
 .frontpanel-leds[data-pos='bottom-right-v'] {
     flex-direction: column;
     justify-content: flex-start;
