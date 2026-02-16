@@ -3321,13 +3321,23 @@ onBeforeUnmount(() => {
 
 /* Vertical stack: power above hdd */
 .frontpanel-leds[data-pos='top-left-v'],
-.frontpanel-leds[data-pos='top-left-v'] {
-    align-items: flex-start;
-}
+.frontpanel-leds[data-pos='top-right-v'],
 .frontpanel-leds[data-pos='bottom-right-v'] {
     flex-direction: column;
     justify-content: flex-start;
 }
+
+/* Left vertical: hug left edge */
+.frontpanel-leds[data-pos='top-left-v'] {
+    align-items: flex-start;
+}
+
+/* Right vertical: hug right edge */
+.frontpanel-leds[data-pos='top-right-v'],
+.frontpanel-leds[data-pos='bottom-right-v'] {
+    align-items: flex-end;
+}
+
 
 /* For vertical stacks on the right, align the badges to the right edge */
 .frontpanel-leds[data-pos='top-right-v'],
