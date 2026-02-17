@@ -14,9 +14,13 @@ export type MousePowerState = 'on' | 'off' | 'unknown'
 
 /**
  * Movement modes (spec v0.3 §7.4 / §8):
- * - absolute: normalized [0..1] mapped into a resolved grid
+ * - absolute: normalized [0..1] mapped into a resolved grid (service steps toward target)
  * - relative-gain: raw deltas multiplied by a gain
  * - relative-accel: gain increases with velocity, bounded by config
+ *
+ * NOTE (wire protocol):
+ * The firmware clamps deltas to ±255, so the service ultimately emits per-tick **dx,dy** steps to firmware
+ * even when operating in "absolute" mode (absolute is a service-local mapping mode).
  */
 export type MouseMoveMode = 'absolute' | 'relative-gain' | 'relative-accel'
 
@@ -34,6 +38,13 @@ export type ErrorLike = {
 
 /**
  * Absolute mapping grid configuration (spec v0.3 §9).
+ *
+ * NOTE (IMPORTANT):
+ * Previously this type was artificially restricted to a tiny set of resolutions.
+ * That restriction prevents correct absolute mapping for common modes like 800x600,
+ * 1280x1024, etc. The service already clamps safely, so we allow any positive integers.
+ *
+ * Validation of "reasonable" sizes should occur at config-build time and/or when applying patches.
  */
 export type MouseAbsoluteGridConfig =
   | {
@@ -42,7 +53,7 @@ export type MouseAbsoluteGridConfig =
     }
   | {
       mode: 'fixed'
-      fixed: { w: 640 | 1024; h: 480 | 768 }
+      fixed: { w: number; h: number }
     }
 
 export type MouseAccelConfig = {
@@ -358,12 +369,15 @@ export type PS2MouseEvent =
   | {
       kind: 'mouse-move-tick'
       /**
-       * Service-local virtual cursor position after tick flush (grid coords).
+       * Service-local virtual cursor position after tick flush.
+       *
+       * - absolute mode: grid coords (bounded by resolved grid)
+       * - relative modes: service-local running position (diagnostic; not host pixels; may be unbounded)
        */
       x: number
       y: number
       /**
-       * Optional: include step delta if available.
+       * Per-tick step delta actually emitted to firmware (bounded by perTickMaxDelta).
        */
       dx?: number
       dy?: number
@@ -507,7 +521,7 @@ export type PS2MouseStateSlice = {
   }
   absoluteGrid: {
     mode: 'auto' | 'fixed'
-    fixed?: { w: 640 | 1024; h: 480 | 768 }
+    fixed?: { w: number; h: number }
     resolved?: { w: number; h: number }
   }
   mappingStatus: MouseMappingStatus

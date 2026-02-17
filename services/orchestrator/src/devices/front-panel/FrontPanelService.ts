@@ -504,8 +504,7 @@ export class FrontPanelService {
       for (let attempt = 1; attempt <= this.cfg.identify.retries; attempt++) {
         try {
           await this.writeLine(this.cfg.identify.request)
-          const t = await this.readLine(this.cfg.identify.timeoutMs)
-          token = t
+          token = await this.readForExpectedToken(expected, this.cfg.identify.timeoutMs)
           break
         } catch (err) {
           lastErr = err
@@ -514,10 +513,6 @@ export class FrontPanelService {
 
       if (!token) {
         throw lastErr ?? new Error('identify failed')
-      }
-
-      if (token !== expected) {
-        throw new Error(`unexpected identify token: ${token}`)
       }
 
       await this.writeLine(this.cfg.identify.completion)
@@ -530,7 +525,7 @@ export class FrontPanelService {
         token,
       })
 
-      // Explicitly refresh AppState at connection startup even if firmware never emits POWER_LED_ON/OFF.
+      // Explicitly refresh AppState at connection startup even if firmware never emits a power sense line.
       if (!this.emittedPowerSenseSinceConnect) {
         this.events.publish({
           kind: 'frontpanel-power-sense-changed',
@@ -566,13 +561,14 @@ export class FrontPanelService {
   }
 
   /**
-   * Identify-time line reader.
+   * Identify-time token reader.
    *
    * Safety-critical note:
    * Firmware may emit telemetry (e.g., POWER_LED_OFF) before the ID token.
-   * Those lines must not be treated as the identify token, or the device will flap.
+   * We must scan until the expected token appears (within timeout), not just
+   * return the first non-noise line.
    */
-  private async readLine(timeoutMs: number): Promise<string> {
+  private async readForExpectedToken(expected: string, timeoutMs: number): Promise<string> {
     const start = now()
     let buf = ''
 
@@ -585,11 +581,17 @@ export class FrontPanelService {
       const port = this.port
       let finished = false
 
+      const cleanup = () => {
+        port.off('data', onData)
+      }
+
       const onData = (data: Buffer) => {
         if (finished) return
         buf += data.toString('utf8')
+
         const lines = buf.split(/\r?\n/)
         buf = lines.pop() ?? ''
+
         for (const l of lines) {
           const line = l.trim()
           if (!line) continue
@@ -597,15 +599,16 @@ export class FrontPanelService {
           // Ignore identify-noise lines that can arrive before the expected token.
           if (this.isIdentifyNoiseLine(line)) continue
 
-          cleanup()
-          finished = true
-          resolve(line)
-          return
-        }
-      }
+          // Only succeed when the expected token is observed.
+          if (line === expected) {
+            cleanup()
+            finished = true
+            resolve(line)
+            return
+          }
 
-      const cleanup = () => {
-        port.off('data', onData)
+          // Otherwise keep scanning within the same timeout window.
+        }
       }
 
       port.on('data', onData)
@@ -620,6 +623,7 @@ export class FrontPanelService {
           setTimeout(tick, 25)
         }
       }
+
       tick()
     })
   }
@@ -633,26 +637,23 @@ export class FrontPanelService {
       const line = raw.trim()
       if (!line) continue
 
-      // Avoid log noise: during identify, token line can arrive and would otherwise show as debug.
+      // During identify, the token line may arrive; ignore it here so it doesn't appear as debug noise.
       if (!this.identified && line === this.cfg.expectedIdToken) {
         continue
       }
 
-      if (line === 'POWER_LED_ON') {
-        this.setPowerSense('on')
-        continue
-      }
-      if (line === 'POWER_LED_OFF') {
-        this.setPowerSense('off')
-        continue
-      }
-      if (line === 'HDD_ACTIVE_ON') {
-        this.setHddActive(true)
-        continue
-      }
-      if (line === 'HDD_ACTIVE_OFF') {
-        this.setHddActive(false)
-        continue
+      // Telemetry parsing is intentionally tolerant:
+      // accept multiple firmware spellings and normalize to the internal model.
+      const tele = this.classifyTelemetryLine(line)
+      if (tele) {
+        if (tele.kind === 'powerSense') {
+          this.setPowerSense(tele.value)
+          continue
+        }
+        if (tele.kind === 'hddActive') {
+          this.setHddActive(tele.value)
+          continue
+        }
       }
 
       this.events.publish({
@@ -816,16 +817,99 @@ export class FrontPanelService {
     return { at: now(), scope, message: 'unknown error', retryable }
   }
 
+  /* ---------------------------------------------------------------------- */
+  /*  Telemetry parsing                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Tolerant telemetry classifier.
+   *
+   * Goal: prevent "power sense stuck unknown" due to minor firmware string drift.
+   * This file normalizes multiple firmware spellings into:
+   * - powerSense: 'on' | 'off'
+   * - hddActive: boolean
+   *
+   * IMPORTANT: we do NOT invent new FrontPanelPowerSense literals here; we normalize
+   * to the existing 'on'/'off'/'unknown' model the rest of the stack expects.
+   */
+  private classifyTelemetryLine(
+    lineRaw: string
+  ): { kind: 'powerSense'; value: FrontPanelPowerSense } | { kind: 'hddActive'; value: boolean } | null {
+    const line = lineRaw.trim()
+    if (!line) return null
+
+    const u = line.toUpperCase()
+
+    // --- Power sense / power LED (normalize to on/off) --------------------
+    if (
+      u === 'POWER_LED_ON' ||
+      u === 'POWER_SENSE_ON' ||
+      u === 'POWER_ON' ||
+      u === 'PWR_ON' ||
+      u === 'POWER_STATUS_ON'
+    ) {
+      return { kind: 'powerSense', value: 'on' }
+    }
+
+    if (
+      u === 'POWER_LED_OFF' ||
+      u === 'POWER_SENSE_OFF' ||
+      u === 'POWER_OFF' ||
+      u === 'PWR_OFF' ||
+      u === 'POWER_STATUS_OFF'
+    ) {
+      return { kind: 'powerSense', value: 'off' }
+    }
+
+    // POWER_SENSE=1 / POWER_SENSE:0 / POWER_SENSE 1 / POWER=ON, etc.
+    const kv = u.match(/^(POWER_SENSE|POWER_STATUS|POWER_LED|POWER)\s*[:= ]\s*(.+)$/)
+    if (kv) {
+      const rhs = kv[2].trim()
+      if (rhs === '1' || rhs === 'ON' || rhs === 'TRUE' || rhs === 'HIGH' || rhs === 'ACTIVE') {
+        return { kind: 'powerSense', value: 'on' }
+      }
+      if (rhs === '0' || rhs === 'OFF' || rhs === 'FALSE' || rhs === 'LOW' || rhs === 'INACTIVE') {
+        return { kind: 'powerSense', value: 'off' }
+      }
+    }
+
+    // --- HDD activity -----------------------------------------------------
+    if (u === 'HDD_ACTIVE_ON' || u === 'HDD_ON' || u === 'HDD_ACTIVITY_ON') {
+      return { kind: 'hddActive', value: true }
+    }
+    if (u === 'HDD_ACTIVE_OFF' || u === 'HDD_OFF' || u === 'HDD_ACTIVITY_OFF') {
+      return { kind: 'hddActive', value: false }
+    }
+
+    const hkv = u.match(/^(HDD_ACTIVE|HDD_ACTIVITY|HDD)\s*[:= ]\s*(.+)$/)
+    if (hkv) {
+      const rhs = hkv[2].trim()
+      if (rhs === '1' || rhs === 'ON' || rhs === 'TRUE' || rhs === 'HIGH' || rhs === 'ACTIVE') {
+        return { kind: 'hddActive', value: true }
+      }
+      if (rhs === '0' || rhs === 'OFF' || rhs === 'FALSE' || rhs === 'LOW' || rhs === 'INACTIVE') {
+        return { kind: 'hddActive', value: false }
+      }
+    }
+
+    return null
+  }
+
   /**
    * Identify handshake noise filter.
    *
-   * We must not treat early telemetry as the ID token.
-   * Known offenders observed in your logs: POWER_LED_OFF / POWER_LED_ON.
+   * We must not treat early telemetry / chatter as an ID token.
    */
   private isIdentifyNoiseLine(line: string): boolean {
+    if (!line) return true
+
+    // Common firmware chatter formats.
     if (line.startsWith('debug:')) return true
-    if (line.startsWith('POWER_LED_')) return true
-    if (line.startsWith('HDD_ACTIVE_')) return true
+    if (line.startsWith('done:')) return true
+
+    // If it's a known telemetry line (power/hdd), it is NOT an identify token.
+    if (this.classifyTelemetryLine(line) != null) return true
+
     return false
   }
 }

@@ -1,10 +1,6 @@
 // services/orchestrator/src/devices/ps2-mouse/utils.ts
 
-import type {
-  PS2MouseConfig,
-  MouseMoveMode,
-  MouseAbsoluteGridConfig,
-} from './types.js'
+import type { PS2MouseConfig, MouseMoveMode, MouseAbsoluteGridConfig } from './types.js'
 
 /* -------------------------------------------------------------------------- */
 /*  Env parsing helpers (safety-first)                                        */
@@ -65,14 +61,22 @@ function parseMoveMode(raw: string | undefined, def: MouseMoveMode): MouseMoveMo
 /*  Absolute grid parsing (spec v0.3 §9)                                      */
 /* -------------------------------------------------------------------------- */
 
-type FixedW = 640 | 1024
-type FixedH = 480 | 768
+function parseFixedGridAnyPositive(w: number, h: number): { w: number; h: number } | null {
+  // Spec v0.3 §9: allow any positive integers for fixed grids.
+  // Safety: reject non-finite or non-positive values; cap extreme values to a sane ceiling.
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null
+  const iw = Math.trunc(w)
+  const ih = Math.trunc(h)
+  if (iw <= 0 || ih <= 0) return null
 
-function parseFixedGrid(w: number, h: number): { w: FixedW; h: FixedH } | null {
-  // Only accept the two supported pairs.
-  if (w === 640 && h === 480) return { w: 640, h: 480 }
-  if (w === 1024 && h === 768) return { w: 1024, h: 768 }
-  return null
+  // Safety ceiling: prevents accidental enormous numbers from creating pathological clamp behavior.
+  // This is intentionally generous (covers all common desktop resolutions).
+  const MAX_DIM = 16384
+
+  return {
+    w: Math.min(iw, MAX_DIM),
+    h: Math.min(ih, MAX_DIM),
+  }
 }
 
 function parseAbsoluteGrid(env: NodeJS.ProcessEnv): MouseAbsoluteGridConfig {
@@ -81,9 +85,10 @@ function parseAbsoluteGrid(env: NodeJS.ProcessEnv): MouseAbsoluteGridConfig {
 
   const w = int(env, 'PS2_MOUSE_ABS_GRID_W', 1024)
   const h = int(env, 'PS2_MOUSE_ABS_GRID_H', 768)
-  const fixed = parseFixedGrid(w, h)
+
+  const fixed = parseFixedGridAnyPositive(w, h)
   if (!fixed) {
-    // Safety: if invalid fixed dims are provided, fall back to auto.
+    // Safety: if invalid fixed dims are provided, fall back to auto (unchanged behavior).
     return { mode: 'auto' }
   }
 
@@ -110,15 +115,20 @@ function parseAbsoluteGrid(env: NodeJS.ProcessEnv): MouseAbsoluteGridConfig {
  * - PS2_MOUSE_TICK_HZ                      (default: 60)
  * - PS2_MOUSE_PER_TICK_MAX_DELTA           (default: 255)  // must be <= 255
  * - PS2_MOUSE_CLAMP_ABS_TO_UNIT            (default: true)
- * - PS2_MOUSE_DEFAULT_MODE                 (default: "absolute")  // absolute|relative-gain|relative-accel
+ *
+ * Precision-first defaults (IMPORTANT):
+ * Your Stream pane uses pointer-lock RELATIVE moves (mouse.move.relative), so defaulting to
+ * amplified motion (gain=10 / accel baseGain=5) causes visible “grid snapping” even at slow speeds.
+ *
+ * - PS2_MOUSE_DEFAULT_MODE                 (default: "relative-gain")  // absolute|relative-gain|relative-accel
  *
  * Relative-gain:
- * - PS2_MOUSE_GAIN                         (default: 10)  // presets MUST include 2,5,10,20 (service may accept any)
+ * - PS2_MOUSE_GAIN                         (default: 1)
  *
- * Relative-accel:
- * - PS2_MOUSE_ACCEL_ENABLED                (default: true)
- * - PS2_MOUSE_ACCEL_BASE_GAIN              (default: 5)
- * - PS2_MOUSE_ACCEL_MAX_GAIN               (default: 20)
+ * Relative-accel (opt-in):
+ * - PS2_MOUSE_ACCEL_ENABLED                (default: false)
+ * - PS2_MOUSE_ACCEL_BASE_GAIN              (default: 1)
+ * - PS2_MOUSE_ACCEL_MAX_GAIN               (default: 1)
  * - PS2_MOUSE_ACCEL_VEL_PX_PER_SEC_FOR_MAX (default: 1500)
  *
  * Absolute grid (spec v0.3 §9):
@@ -142,13 +152,16 @@ export function buildPS2MouseConfigFromEnv(env: NodeJS.ProcessEnv): PS2MouseConf
 
   const clampAbs = bool(env, 'PS2_MOUSE_CLAMP_ABS_TO_UNIT', true)
 
-  const defaultMode = parseMoveMode(optStr(env, 'PS2_MOUSE_DEFAULT_MODE'), 'absolute')
+  // Precision-first default: 1:1 relative motion unless user explicitly configures otherwise.
+  const defaultMode = parseMoveMode(optStr(env, 'PS2_MOUSE_DEFAULT_MODE'), 'relative-gain')
 
-  const gain = Math.max(1, int(env, 'PS2_MOUSE_GAIN', 10))
+  // Gain default: 1 (no amplification).
+  const gain = Math.max(1, int(env, 'PS2_MOUSE_GAIN', 1))
 
-  const accelEnabled = bool(env, 'PS2_MOUSE_ACCEL_ENABLED', true)
-  const accelBaseGain = Math.max(1, int(env, 'PS2_MOUSE_ACCEL_BASE_GAIN', 5))
-  const accelMaxGain = Math.max(accelBaseGain, int(env, 'PS2_MOUSE_ACCEL_MAX_GAIN', 20))
+  // Accel defaults: disabled (opt-in), with benign gains.
+  const accelEnabled = bool(env, 'PS2_MOUSE_ACCEL_ENABLED', false)
+  const accelBaseGain = Math.max(1, int(env, 'PS2_MOUSE_ACCEL_BASE_GAIN', 1))
+  const accelMaxGain = Math.max(accelBaseGain, int(env, 'PS2_MOUSE_ACCEL_MAX_GAIN', 1))
   const velForMax = Math.max(1, int(env, 'PS2_MOUSE_ACCEL_VEL_PX_PER_SEC_FOR_MAX', 1500))
 
   const absoluteGrid = parseAbsoluteGrid(env)

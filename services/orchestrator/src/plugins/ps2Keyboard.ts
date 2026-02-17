@@ -222,14 +222,12 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
         const key = evt.identity?.key ?? 'unknown'
         const scan = this.fmtScan(evt.scan as any)
 
-        this.logKb.info(
-          `kind=${evt.kind} action=${evt.action} code=${code} key=${key} scan=${scan}`
-        )
+        this.logKb.info(`kind=${evt.kind} action=${evt.action} code=${code} key=${key} scan=${scan}`)
         break
       }
 
       /* ---------------- Firmware/Arduino-emitted sequence lines ------ */
-    case 'keyboard-debug-line': {
+      case 'keyboard-debug-line': {
         const raw = String(evt.line ?? '')
         const line = this.enrichFirmwareLine(raw).trim()
         if (!line) break
@@ -238,8 +236,7 @@ class PS2KeyboardLoggerEventSink implements PS2KeyboardEventSink {
         // If you later decide "done:" is too noisy, we can downshift those to debug.
         this.logKb.info(`kind=kb-fireware line=${JSON.stringify(line)}`)
         break
-    }
-
+      }
 
       /* ---------------- Failures / cancellations / errors ----------- */
       case 'keyboard-operation-cancelled': {
@@ -305,12 +302,26 @@ class FanoutPS2KeyboardEventSink implements PS2KeyboardEventSink {
 /*  - when powerSense transitions to OFF, drop queued key operations           */
 /*                                                                            */
 /*  Safety-critical note: until we verify the exact FrontPanel powerSense      */
-/*  string literals, we only treat the exact strings 'on' and 'off' as known.  */
+/*  string literals, we only treat known values as known.                      */
 /* -------------------------------------------------------------------------- */
 
 function mapFrontPanelPowerSenseToHostPower(powerSense: unknown): KeyboardPowerState {
-  if (powerSense === 'off') return 'off'
-  if (powerSense === 'on') return 'on'
+  // Primary expected interface: string literals.
+  if (typeof powerSense === 'string') {
+    const v = powerSense.trim().toLowerCase()
+    if (v === 'off') return 'off'
+    if (v === 'on') return 'on'
+
+    // Back-compat / common UI naming (you standardized “off/active” elsewhere):
+    if (v === 'inactive') return 'off'
+    if (v === 'active') return 'on'
+  }
+
+  // Some implementations use boolean power sense.
+  if (typeof powerSense === 'boolean') {
+    return powerSense ? 'on' : 'off'
+  }
+
   return 'unknown'
 }
 
@@ -326,7 +337,6 @@ function fmt(v: unknown): string {
   }
 }
 
-
 // ---- Plugin implementation -------------------------------------------------
 
 const ps2KeyboardPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
@@ -341,15 +351,12 @@ const ps2KeyboardPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
   const loggerSink = new PS2KeyboardLoggerEventSink(app)
   const stateAdapter = new PS2KeyboardStateAdapter()
 
-  const events: PS2KeyboardEventSink = new FanoutPS2KeyboardEventSink(
-    loggerSink,
-    {
-      publish(evt: PS2KeyboardEvent): void {
-        stateAdapter.handle(evt)
-        updatePS2KeyboardSnapshot(stateAdapter.getState())
-      },
-    }
-  )
+  const events: PS2KeyboardEventSink = new FanoutPS2KeyboardEventSink(loggerSink, {
+    publish(evt: PS2KeyboardEvent): void {
+      stateAdapter.handle(evt)
+      updatePS2KeyboardSnapshot(stateAdapter.getState())
+    },
+  })
 
   // 3) Instantiate service
   const kb = new PS2KeyboardService(cfg, { events } as any)
@@ -371,13 +378,13 @@ const ps2KeyboardPlugin: FastifyPluginAsync = async (app: FastifyInstance) => {
     kb.setHostPower(hostPower)
 
     if (hostPower === 'off') {
-        logPlugin.warn(
-            `host power is OFF; keyboard key ops will be dropped from=${prev} to=${hostPower} powerSense=${fmt(powerSense)} why=${why}`
-        )
-        } else {
-        logPlugin.info(
-            `host power updated for keyboard service from=${prev} to=${hostPower} powerSense=${fmt(powerSense)} why=${why}`
-        )
+      logPlugin.warn(
+        `host power is OFF; keyboard key ops will be dropped from=${prev} to=${hostPower} powerSense=${fmt(powerSense)} why=${why}`
+      )
+    } else {
+      logPlugin.info(
+        `host power updated for keyboard service from=${prev} to=${hostPower} powerSense=${fmt(powerSense)} why=${why}`
+      )
     }
   }
 
