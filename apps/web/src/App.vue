@@ -1,8 +1,18 @@
 <!-- apps/web/src/App.vue -->
 <script setup lang="ts">
-import { onMounted, ref, reactive, computed, watch } from 'vue'
+import {
+    onMounted,
+    onBeforeUnmount,
+    ref,
+    reactive,
+    computed,
+    watch,
+    defineComponent,
+    h,
+    type VNode
+} from 'vue'
 import { startRealtime } from './bootstrap'
-import { listPanes, hasPane, listPanePrefsSpecs } from './panes/registry'
+import { listPanes, hasPane, listPanePrefsSpecs, resolvePane, getPaneLabel } from './panes/registry'
 import PaneSettingsModal from './components/PaneSettingsModal.vue'
 import { useLogs } from '@/stores/logs'
 
@@ -48,12 +58,29 @@ type Profile = {
     layout: LayoutNode
 }
 
+/** Local-only pane info type (exported version is in the non-setup script block) */
+type PaneInfoLocal = {
+    id: string
+    isRoot: boolean
+    parentDir: Direction | null
+    constraints: Constraints
+    appearance: Appearance
+    container: {
+        constraints: Constraints | null
+        direction: Direction | null
+    }
+}
+
 /** Utils */
 const uid = () => Math.random().toString(36).slice(2, 10)
 const deepClone = <T>(x: T): T => JSON.parse(JSON.stringify(x))
 
 /** Local layout persistence */
 const LAYOUT_LS = 'ab98:studio:layout'
+
+/** Resizing (gutters) configuration */
+const GUTTER_PX = 2
+const MIN_RESIZABLE_PANE_PX = 48
 
 /** Base layout */
 function makeSinglePane(): LeafNode {
@@ -111,11 +138,6 @@ async function refreshLayouts() {
 
 /* -----------------------------------------
    Per-pane UI prefs (profile persistence)
-   Data-driven via panes/registry:
-   - Each spec defines:
-     - storagePrefix: localStorage key prefix
-     - propsKey:     where prefs are embedded into leaf.props
-     - profileRevKey: monotonic stamp key so panes can detect profile loads
 ------------------------------------------ */
 
 function isObject(x: any): x is Record<string, unknown> {
@@ -169,10 +191,6 @@ function embedPanePrefsIntoLayout(layout: LayoutNode): LayoutNode {
 
 /**
  * After loading a profile, make the profile authoritative for per-pane prefs:
- * For each known prefs spec:
- * - If a leaf has embedded prefs for that spec, write them to localStorage
- * - If a leaf does NOT have embedded prefs for that spec, remove any existing localStorage entry
- *   so "recent modifications" don't leak into the loaded profile.
  */
 function restorePanePrefsFromLayout(layout: LayoutNode) {
     const specs = listPanePrefsSpecs()
@@ -199,10 +217,7 @@ function restorePanePrefsFromLayout(layout: LayoutNode) {
 }
 
 /**
- * Stamp a monotonic "profile revision" on all leaves so panes can detect
- * that a profile was (re)loaded and re-apply profile-driven prefs.
- *
- * Each pane type keys off its own spec.profileRevKey.
+ * Stamp a monotonic "profile revision" on all leaves so panes can detect loads.
  */
 function stampProfileRevsOnLayout(layout: LayoutNode, rev: number) {
     const specs = listPanePrefsSpecs()
@@ -221,20 +236,15 @@ async function loadProfile(id: string) {
     if (!id) return
     const data = await apiJSON<{ ok: boolean; profile: Profile }>(`/api/layouts/${id}`)
 
-    // Apply layout
     const loaded = data.profile?.layout
     if (loaded && typeof loaded === 'object') {
-        // Work with a plain cloned layout first (so we can safely walk + mutate it)
         const cloned = deepClone(loaded)
 
-        // 1) Make profile authoritative for per-pane prefs via localStorage
         restorePanePrefsFromLayout(cloned)
 
-        // 2) Bump profile revision and stamp onto leaf.props for ALL registered specs
         panePrefsProfileRev += 1
         stampProfileRevsOnLayout(cloned, panePrefsProfileRev)
 
-        // 3) Replace reactive root with the cloned layout
         Object.keys(root as any).forEach((k) => delete (root as any)[k])
         Object.assign(root as any, cloned)
     }
@@ -244,7 +254,6 @@ async function saveCurrentAs(name: string) {
     if (!canEdit.value) return
     const body = {
         name: String(name || '').trim(),
-        // Embed per-pane prefs into the layout snapshot we save
         layout: embedPanePrefsIntoLayout(root)
     }
     const data = await apiJSON<{ ok: boolean; profile: Profile }>('/api/layouts', {
@@ -260,7 +269,6 @@ async function overwriteSelected() {
     const id = selectedProfileId.value
     if (!id) return
     const body = {
-        // Embed per-pane prefs into the layout snapshot we save
         layout: embedPanePrefsIntoLayout(root)
     }
     await apiJSON<{ ok: boolean; profile: Profile }>(`/api/layouts/${id}`, {
@@ -289,14 +297,11 @@ const isModalOpen = ref(false)
 const modalTargetId = ref<string | null>(null)
 type ModalModel = {
     componentKey: string
-    // unified inputs with unit for width/height
     widthValue: string | number
     widthUnit: 'px' | 'pct'
     heightValue: string | number
     heightUnit: 'px' | 'pct'
-    // split configuration (single count for both row/col)
     splitCount: string | number
-    // existing
     bgEnabled: boolean
     bgHex: string
     mTop: string | number
@@ -317,7 +322,6 @@ const initialModel = ref<ModalModel>({
     widthUnit: 'px',
     heightValue: '',
     heightUnit: 'px',
-    // single split count used by the modal
     splitCount: 2,
     bgEnabled: false,
     bgHex: '#ffffff',
@@ -352,6 +356,104 @@ function findNodeAndParent(
 function getParentSplit(leafId: string): SplitNode | null {
     const fp = findNodeAndParent(leafId, root, null)
     return fp ? fp.parent ?? null : null
+}
+function findSplitById(splitId: string): SplitNode | null {
+    const fp = findNodeAndParent(splitId, root, null)
+    if (!fp) return null
+    return fp.node?.kind === 'split' ? (fp.node as SplitNode) : null
+}
+
+/** Split sizing helpers (for resizable gutters) */
+function getNodeConstraints(node: LayoutNode): Constraints {
+    return ((node as any)?.constraints ?? {}) as Constraints
+}
+function isFixedOnSplitAxis(node: LayoutNode, splitDir: Direction): boolean {
+    const c = getNodeConstraints(node)
+    if (splitDir === 'row') return c.widthPx != null || c.widthPct != null
+    return c.heightPx != null || c.heightPct != null
+}
+
+function computeSplitWeightsForRender(split: SplitNode): number[] {
+    const kids: LayoutNode[] = Array.isArray(split?.children) ? split.children : []
+    const len = kids.length
+    const raw = Array.isArray(split?.sizes) ? split.sizes : []
+    const weights = Array.from({ length: len }, () => 0)
+
+    const flexIdx: number[] = []
+    for (let i = 0; i < len; i++) {
+        const kid = kids[i]
+        if (!kid) continue
+        if (!isFixedOnSplitAxis(kid, split.direction)) flexIdx.push(i)
+    }
+    if (flexIdx.length === 0) return weights
+
+    const valid: number[] = []
+    const missing: number[] = []
+    for (const i of flexIdx) {
+        const v = Number(raw[i] ?? 0)
+        if (Number.isFinite(v) && v > 0) {
+            weights[i] = v
+            valid.push(i)
+        } else {
+            missing.push(i)
+        }
+    }
+
+    if (valid.length === 0) {
+        const eq = 100 / flexIdx.length
+        for (const i of flexIdx) weights[i] = eq
+        return weights
+    }
+
+    if (missing.length > 0) {
+        const sumValid = valid.reduce((acc, i) => acc + (weights[i] ?? 0), 0)
+        const avg = Math.max(1, sumValid / valid.length)
+        for (const i of missing) weights[i] = avg
+    }
+
+    return weights
+}
+
+function ensureSplitSizes(split: SplitNode): number[] {
+    const kids: LayoutNode[] = Array.isArray(split?.children) ? split.children : []
+    const len = kids.length
+    const raw = Array.isArray(split?.sizes) ? split.sizes : []
+    const next = Array.from({ length: len }, (_, i) => {
+        const v = Number(raw[i] ?? 0)
+        return Number.isFinite(v) ? v : 0
+    })
+
+    const flexIdx: number[] = []
+    for (let i = 0; i < len; i++) {
+        const kid = kids[i]
+        if (!kid) continue
+        if (!isFixedOnSplitAxis(kid, split.direction)) flexIdx.push(i)
+    }
+
+    if (flexIdx.length === 0) {
+        split.sizes = next
+        return next
+    }
+
+    const valid: number[] = []
+    const missing: number[] = []
+    for (const i of flexIdx) {
+        const v = next[i] ?? 0
+        if (v > 0) valid.push(i)
+        else missing.push(i)
+    }
+
+    if (valid.length === 0) {
+        const eq = 100 / flexIdx.length
+        for (const i of flexIdx) next[i] = eq
+    } else if (missing.length > 0) {
+        const sumValid = valid.reduce((acc, i) => acc + (next[i] ?? 0), 0)
+        const avg = Math.max(1, sumValid / valid.length)
+        for (const i of missing) next[i] = avg
+    }
+
+    split.sizes = next
+    return next
 }
 
 /** Split/Delete helpers */
@@ -396,13 +498,6 @@ function splitLeafBinary(targetId: string, direction: Direction) {
     }
 }
 
-/**
- * N-way split of a leaf into `count` children.
- * - direction 'row'  → columns (side-by-side)
- * - direction 'col'  → rows (stacked)
- * The first child inherits the original leaf's component/props/appearance.
- * All child constraints are reset to auto; container constraints stay on the split.
- */
 function splitLeafN(targetId: string, direction: Direction, count: number) {
     if (!canEdit.value) return
     if (count <= 1) return
@@ -417,18 +512,11 @@ function splitLeafN(targetId: string, direction: Direction, count: number) {
     )
 
     const baseAppearance: Appearance = deepClone(
-        (node as LeafNode).appearance ?? {
-            bg: null,
-            mTop: 1,
-            mRight: 1,
-            mBottom: 1,
-            mLeft: 1
-        }
+        (node as LeafNode).appearance ?? { bg: null, mTop: 1, mRight: 1, mBottom: 1, mLeft: 1 }
     )
 
     const children: LeafNode[] = []
 
-    // First child inherits component/props/appearance
     const first: LeafNode = {
         id: uid(),
         kind: 'leaf',
@@ -439,14 +527,13 @@ function splitLeafN(targetId: string, direction: Direction, count: number) {
     }
     children.push(first)
 
-    // Remaining children are fresh panes
     for (let i = 1; i < count; i++) {
         const child = makeSinglePane()
         child.constraints = { widthPx: null, heightPx: null, widthPct: null, heightPct: null }
         children.push(child)
     }
 
-    const equalSize = Math.floor((100 / count) * 100) / 100 // keep a sane number, though sizes aren't used yet
+    const equalSize = Math.floor((100 / count) * 100) / 100
     const sizes = Array.from({ length: count }, () => equalSize)
 
     const replacement: SplitNode = {
@@ -473,16 +560,12 @@ function deleteLeaf(targetId: string) {
         if ((root as any).kind === 'leaf') {
             ;(root as LeafNode).component = null
             ;(root as LeafNode).props = {}
-            ;(root as LeafNode).constraints = {
-                widthPx: null,
-                heightPx: null,
-                widthPct: null,
-                heightPct: null
-            }
+            ;(root as LeafNode).constraints = { widthPx: null, heightPx: null, widthPct: null, heightPct: null }
             ;(root as LeafNode).appearance = { bg: null, mTop: 1, mRight: 1, mBottom: 1, mLeft: 1 }
         }
         return
     }
+
     const found = findNodeAndParent(targetId, root, null)
     if (!found) return
     const { node, parent } = found
@@ -491,8 +574,12 @@ function deleteLeaf(targetId: string) {
     if (idx === -1) return
 
     parent.children.splice(idx, 1)
+    if (Array.isArray(parent.sizes)) parent.sizes.splice(idx, 1)
+
     if (parent.children.length === 1) {
-        const survivor = parent.children[0] as LayoutNode
+        const survivor = parent.children[0]
+        if (!survivor) return
+
         const parentConstraints = deepClone(parent.constraints ?? undefined)
         if (parentConstraints) {
             if ((survivor as any).kind === 'leaf') {
@@ -532,12 +619,7 @@ function computeMainAxisFluidRule(parent: SplitNode | null, currentId: string) {
 function getAxisLocksForLeaf(leafId: string) {
     const parent = getParentSplit(leafId)
     if (!parent) {
-        return {
-            lockWidthCross: false,
-            lockHeightCross: false,
-            mustBeFluidWidth: false,
-            mustBeFluidHeight: false
-        }
+        return { lockWidthCross: false, lockHeightCross: false, mustBeFluidWidth: false, mustBeFluidHeight: false }
     }
     const isRow = parent.direction === 'row'
     const crossWidthLock = !isRow
@@ -555,11 +637,9 @@ function getAxisLocksForLeaf(leafId: string) {
 function openModalForLeaf(leaf: LeafNode) {
     modalTargetId.value = leaf.id
 
-    const currentKey =
-        leaf.component && hasPane(String(leaf.component)) ? String(leaf.component) : 'none'
+    const currentKey = leaf.component && hasPane(String(leaf.component)) ? String(leaf.component) : 'none'
     const locks = getAxisLocksForLeaf(leaf.id)
 
-    // decide units from constraints
     const wPx = leaf.constraints?.widthPx
     const wPct = leaf.constraints?.widthPct
     const hPx = leaf.constraints?.heightPx
@@ -573,13 +653,9 @@ function openModalForLeaf(leaf: LeafNode) {
     const parent = getParentSplit(leaf.id)
     const hasContainer = !!parent
     const containerWidthPx =
-        hasContainer && parent?.constraints?.widthPx != null
-            ? String(parent!.constraints!.widthPx)
-            : ''
+        hasContainer && parent?.constraints?.widthPx != null ? String(parent!.constraints!.widthPx) : ''
     const containerHeightPx =
-        hasContainer && parent?.constraints?.heightPx != null
-            ? String(parent!.constraints!.heightPx)
-            : ''
+        hasContainer && parent?.constraints?.heightPx != null ? String(parent!.constraints!.heightPx) : ''
 
     initialModel.value = {
         componentKey: currentKey,
@@ -587,8 +663,6 @@ function openModalForLeaf(leaf: LeafNode) {
         widthUnit,
         heightValue,
         heightUnit,
-
-        // single split count (default = 2)
         splitCount: 2,
 
         bgEnabled: !!leaf.appearance?.bg,
@@ -609,10 +683,8 @@ function openModalForLeaf(leaf: LeafNode) {
         containerHeightPx
     }
 
-    if (initialModel.value.lockWidthCross || initialModel.value.mustBeFluidWidth)
-        initialModel.value.widthValue = ''
-    if (initialModel.value.lockHeightCross || initialModel.value.mustBeFluidHeight)
-        initialModel.value.heightValue = ''
+    if (initialModel.value.lockWidthCross || initialModel.value.mustBeFluidWidth) initialModel.value.widthValue = ''
+    if (initialModel.value.lockHeightCross || initialModel.value.mustBeFluidHeight) initialModel.value.heightValue = ''
 
     isModalOpen.value = true
 }
@@ -678,7 +750,6 @@ function applyModal(model: any) {
     const key = String(model.componentKey || 'none')
     ;(node as LeafNode).component = key === 'none' ? null : key
 
-    // Resolve width/height to px or %
     let widthPx: number | null = null
     let heightPx: number | null = null
     let widthPct: number | null = null
@@ -703,7 +774,6 @@ function applyModal(model: any) {
         }
     }
 
-    // If locked or must-be-fluid, force auto (null for both px/pct)
     if (model.lockWidthCross || model.mustBeFluidWidth) {
         widthPx = null
         widthPct = null
@@ -717,9 +787,7 @@ function applyModal(model: any) {
 
     const useBg = !!model.bgEnabled
     const hex =
-        typeof model.bgHex === 'string' && /^#[0-9a-fA-F]{6}$/.test(model.bgHex)
-            ? model.bgHex
-            : '#ffffff'
+        typeof model.bgHex === 'string' && /^#[0-9a-fA-F]{6}$/.test(model.bgHex) ? model.bgHex : '#ffffff'
     const pTop = toIntOrNull(model.mTop) ?? 0
     const pRight = toIntOrNull(model.mRight) ?? 0
     const pBottom = toIntOrNull(model.mBottom) ?? 0
@@ -737,19 +805,19 @@ function applyModal(model: any) {
         if (parent) {
             const cWidthPx = toIntOrNull(model.containerWidthPx)
             const cHeightPx = toIntOrNull(model.containerHeightPx)
-            parent.constraints = {
-                widthPx: cWidthPx,
-                heightPx: cHeightPx,
-                widthPct: null,
-                heightPct: null
-            }
+            parent.constraints = { widthPx: cWidthPx, heightPx: cHeightPx, widthPct: null, heightPct: null }
         }
     }
 
     closeModal()
 }
 
-/** Bootstrap */
+/** Ref-safe handler for selectedProfileId updates */
+function onUpdateSelectedProfileId(val: any) {
+    selectedProfileId.value = String(val ?? '')
+}
+
+/** Bootstrap: URL + local storage hydration */
 const urlParams = new URLSearchParams(window.location.search)
 const layoutParam = urlParams.get('layout')
 if (layoutParam) {
@@ -779,109 +847,258 @@ if (ls) {
         if (parsed && typeof parsed === 'object') Object.assign(root as any, parsed)
     } catch {}
 }
+
+/** Debounced local persistence (prevents jank during resize drags) */
+let persistTimer: number | null = null
+function schedulePersistLayout() {
+    try {
+        if (persistTimer != null) window.clearTimeout(persistTimer)
+        persistTimer = window.setTimeout(() => {
+            persistTimer = null
+            try {
+                localStorage.setItem(LAYOUT_LS, JSON.stringify(root))
+            } catch {}
+        }, 200)
+    } catch {}
+}
+function flushPersistLayout() {
+    try {
+        if (persistTimer != null) {
+            window.clearTimeout(persistTimer)
+            persistTimer = null
+        }
+        localStorage.setItem(LAYOUT_LS, JSON.stringify(root))
+    } catch {}
+}
+
 watch(
     () => root,
-    () => localStorage.setItem(LAYOUT_LS, JSON.stringify(root)),
+    () => schedulePersistLayout(),
     { deep: true }
 )
 
-onMounted(async () => {
-    // Local fallback hydration (profile-driven pane prefs override via localStorage when a profile is loaded)
-    logs.hydrate()
+/** -------------------------------
+ *  Gutter resizing (pointer drag)
+ *  -------------------------------
+ */
+type ResizeState = {
+    splitId: string
+    gutterIndex: number
+    direction: Direction
+    pointerId: number
+    startClient: number
+    startA: number
+    startB: number
+    total: number
+    wSum: number
+}
+const resizeState = ref<ResizeState | null>(null)
 
+let rafId = 0
+let pendingMove: PointerEvent | null = null
+let priorBodyCursor: string | null = null
+let priorBodyUserSelect: string | null = null
+
+function teardownResizeListeners() {
+    try {
+        window.removeEventListener('pointermove', onWindowPointerMove)
+        window.removeEventListener('pointerup', onWindowPointerUp)
+        window.removeEventListener('pointercancel', onWindowPointerUp)
+    } catch {}
+
+    if (rafId) {
+        try {
+            window.cancelAnimationFrame(rafId)
+        } catch {}
+        rafId = 0
+    }
+    pendingMove = null
+
+    try {
+        if (priorBodyCursor != null) document.body.style.cursor = priorBodyCursor
+        else document.body.style.cursor = ''
+        if (priorBodyUserSelect != null) document.body.style.userSelect = priorBodyUserSelect
+        else document.body.style.userSelect = ''
+    } catch {}
+    priorBodyCursor = null
+    priorBodyUserSelect = null
+}
+
+function endResize() {
+    if (!resizeState.value) return
+    resizeState.value = null
+    teardownResizeListeners()
+    flushPersistLayout()
+}
+
+function applyResizeFromEvent(ev: PointerEvent) {
+    const st = resizeState.value
+    if (!st) return
+    if (ev.pointerId !== st.pointerId) return
+
+    const split = findSplitById(st.splitId)
+    if (!split) return
+
+    const kids: LayoutNode[] = Array.isArray(split.children) ? split.children : []
+    const i = st.gutterIndex
+
+    const left = kids[i]
+    const right = kids[i + 1]
+    if (!left || !right) return
+
+    // If something became fixed mid-drag, stop safely
+    if (isFixedOnSplitAxis(left, split.direction) || isFixedOnSplitAxis(right, split.direction)) {
+        endResize()
+        return
+    }
+
+    const cur = st.direction === 'row' ? ev.clientX : ev.clientY
+    const delta = cur - st.startClient
+
+    const minPx = MIN_RESIZABLE_PANE_PX
+    let newA = st.startA + delta
+    if (newA < minPx) newA = minPx
+    if (newA > st.total - minPx) newA = st.total - minPx
+
+    const ratioA = st.total > 0 ? newA / st.total : 0.5
+    const minW = st.total > 0 ? (minPx / st.total) * st.wSum : 0.01
+
+    let newWA = ratioA * st.wSum
+    let newWB = st.wSum - newWA
+
+    const clampW = Math.max(0.01, minW)
+    if (newWA < clampW) {
+        newWA = clampW
+        newWB = st.wSum - newWA
+    }
+    if (newWB < clampW) {
+        newWB = clampW
+        newWA = st.wSum - newWB
+    }
+
+    newWA = Math.round(newWA * 100) / 100
+    newWB = Math.round(newWB * 100) / 100
+
+    if (!Array.isArray(split.sizes) || split.sizes.length !== kids.length) {
+        ensureSplitSizes(split)
+    }
+
+    // These indices are valid because left/right exist
+    split.sizes![i] = newWA
+    split.sizes![i + 1] = newWB
+}
+
+function onWindowPointerMove(ev: PointerEvent) {
+    const st = resizeState.value
+    if (!st) return
+    if (ev.pointerId !== st.pointerId) return
+
+    try {
+        ev.preventDefault()
+    } catch {}
+
+    pendingMove = ev
+    if (rafId) return
+    rafId = window.requestAnimationFrame(() => {
+        rafId = 0
+        const e = pendingMove
+        pendingMove = null
+        if (e) applyResizeFromEvent(e)
+    })
+}
+
+function onWindowPointerUp(ev: PointerEvent) {
+    const st = resizeState.value
+    if (!st) return
+    if (ev.pointerId !== st.pointerId) return
+    endResize()
+}
+
+function startGutterResize(splitId: string, gutterIndex: number, ev: PointerEvent) {
+    if (!canEdit.value) return
+
+    const split = findSplitById(splitId)
+    if (!split) return
+
+    const kids: LayoutNode[] = Array.isArray(split.children) ? split.children : []
+    if (gutterIndex < 0 || gutterIndex >= kids.length - 1) return
+
+    const left = kids[gutterIndex]
+    const right = kids[gutterIndex + 1]
+    if (!left || !right) return
+
+    // Only allow resizing if BOTH adjacent items are flexible on the split axis
+    if (isFixedOnSplitAxis(left, split.direction)) return
+    if (isFixedOnSplitAxis(right, split.direction)) return
+
+    const gutterEl = ev.currentTarget as HTMLElement | null
+    if (!gutterEl) return
+    const prevEl = gutterEl.previousElementSibling as HTMLElement | null
+    const nextEl = gutterEl.nextElementSibling as HTMLElement | null
+    if (!prevEl || !nextEl) return
+
+    const prevRect = prevEl.getBoundingClientRect()
+    const nextRect = nextEl.getBoundingClientRect()
+    const startA = split.direction === 'row' ? prevRect.width : prevRect.height
+    const startB = split.direction === 'row' ? nextRect.width : nextRect.height
+    const total = startA + startB
+    if (!(total > 0)) return
+
+    const sizes = ensureSplitSizes(split)
+    const wA = sizes[gutterIndex] ?? 0
+    const wB = sizes[gutterIndex + 1] ?? 0
+    const wSum = wA + wB
+    if (!(wSum > 0)) return
+
+    resizeState.value = {
+        splitId,
+        gutterIndex,
+        direction: split.direction,
+        pointerId: ev.pointerId,
+        startClient: split.direction === 'row' ? ev.clientX : ev.clientY,
+        startA,
+        startB,
+        total,
+        wSum
+    }
+
+    try {
+        gutterEl.setPointerCapture(ev.pointerId)
+    } catch {}
+
+    try {
+        priorBodyCursor = document.body.style.cursor
+        priorBodyUserSelect = document.body.style.userSelect
+        document.body.style.cursor = split.direction === 'row' ? 'col-resize' : 'row-resize'
+        document.body.style.userSelect = 'none'
+    } catch {}
+
+    window.addEventListener('pointermove', onWindowPointerMove, { passive: false })
+    window.addEventListener('pointerup', onWindowPointerUp, { passive: true })
+    window.addEventListener('pointercancel', onWindowPointerUp, { passive: true })
+
+    try {
+        ev.preventDefault()
+    } catch {}
+}
+
+/** Bootstrap */
+onMounted(async () => {
+    logs.hydrate()
     startRealtime('/ws')
     await refreshLayouts()
+    try {
+        window.addEventListener('beforeunload', flushPersistLayout)
+    } catch {}
 })
-</script>
 
-<template>
-    <div class="studio-root">
-        <div class="tree-root">
-            <RenderNode
-                :node="root"
-                :is-root="true"
-                :parent-dir="null"
-                :can-edit="canEdit"
-                @split="splitLeafBinary"
-                @configure="openModalForLeaf"
-                @delete="deleteLeaf"
-            />
-        </div>
-
-        <!-- Modal (no custom @importedProfile; we use refreshLayouts + select + load) -->
-        <PaneSettingsModal
-            :is-open="isModalOpen"
-            :can-edit="canEdit"
-            :target-id="modalTargetId"
-            :root-id="rootId"
-            :pane-options="paneOptions"
-            :layout-list="layoutList"
-            :selected-profile-id="selectedProfileId"
-            :initial-model="initialModel"
-            @close="closeModal"
-            @clearLayout="clearLayout"
-            @splitRow="splitRowFromModal"
-            @splitCol="splitColFromModal"
-            @deletePane="deleteFromModal"
-            @apply="applyModal"
-            @loadProfile="loadProfile"
-            @overwriteSelected="overwriteSelected"
-            @deleteSelected="deleteSelected"
-            @saveCurrentAs="saveCurrentAs"
-            @update:selectedProfileId="(val) => (selectedProfileId = val)"
-            @refreshLayouts="refreshLayouts"
-        />
-    </div>
-</template>
-
-<script lang="ts">
-import { defineComponent, h, type VNode } from 'vue'
-import { resolvePane, getPaneLabel } from './panes/registry'
-export default { name: 'App' }
-
-/** Keep a local copy of UI-facing types for this renderer block */
-type Direction = 'row' | 'col'
-type Constraints = {
-    widthPx?: number | null
-    heightPx?: number | null
-    widthPct?: number | null
-    heightPct?: number | null
-}
-type Appearance = {
-    bg?: string | null
-    mTop?: number | null
-    mRight?: number | null
-    mBottom?: number | null
-    mLeft?: number | null
-}
-type LeafNode = {
-    id: string
-    kind: 'leaf'
-    component?: string | null
-    props?: Record<string, unknown>
-    constraints?: Constraints
-    appearance?: Appearance
-}
-type SplitNode = {
-    id: string
-    kind: 'split'
-    direction: Direction
-    children: any[]
-    constraints?: Constraints
-}
-
-/** Pane context passed to children */
-export type PaneInfo = {
-    id: string
-    isRoot: boolean
-    parentDir: Direction | null
-    constraints: Constraints
-    appearance: Appearance
-    container: {
-        constraints: Constraints | null
-        direction: Direction | null
-    }
-}
+onBeforeUnmount(() => {
+    try {
+        window.removeEventListener('beforeunload', flushPersistLayout)
+    } catch {}
+    teardownResizeListeners()
+    flushPersistLayout()
+})
 
 /* -------------------------------
    Contrast + HUD helpers
@@ -922,10 +1139,7 @@ function contrastRatio(L1: number, L2: number): number {
     return (a + 0.05) / (b + 0.05)
 }
 type DimKind = 'px' | 'pct' | 'auto'
-function fmtDim(
-    px: number | null | undefined,
-    pct: number | null | undefined
-): { text: string; kind: DimKind } {
+function fmtDim(px: number | null | undefined, pct: number | null | undefined): { text: string; kind: DimKind } {
     if (px != null) return { text: `${px}px`, kind: 'px' }
     if (pct != null) return { text: `${pct}%`, kind: 'pct' }
     return { text: 'auto', kind: 'auto' }
@@ -947,7 +1161,8 @@ function renderLeaf(
     isRoot: boolean,
     emit: any,
     canEdit: boolean,
-    containerConstraints: Constraints | null
+    containerConstraints: Constraints | null,
+    flexWeight: number | null = null
 ): VNode {
     const inColumns = parentDir === 'row'
     const inRows = parentDir === 'col'
@@ -981,7 +1196,7 @@ function renderLeaf(
             style.flex = '0 0 auto'
             style.width = `${widthPct}%`
         } else {
-            style.flex = '1 1 0%'
+            style.flex = flexWeight != null && flexWeight > 0 ? `${flexWeight} 1 0%` : '1 1 0%'
             style.width = 'auto'
         }
     }
@@ -993,7 +1208,7 @@ function renderLeaf(
             style.flex = '0 0 auto'
             style.height = `${heightPct}%`
         } else {
-            style.flex = '1 1 0%'
+            style.flex = flexWeight != null && flexWeight > 0 ? `${flexWeight} 1 0%` : '1 1 0%'
             style.height = 'auto'
         }
     }
@@ -1006,34 +1221,23 @@ function renderLeaf(
         applyHeight()
     } else {
         style.width = widthPx != null ? `${widthPx}px` : widthPct != null ? `${widthPct}%` : '100%'
-        style.height =
-            heightPx != null ? `${heightPx}px` : heightPct != null ? `${heightPct}%` : '100%'
+        style.height = heightPx != null ? `${heightPx}px` : heightPct != null ? `${heightPct}%` : '100%'
         style.flex =
-            widthPx != null || widthPct != null || heightPx != null || heightPct != null
-                ? '0 0 auto'
-                : '1 1 0%'
-        if (widthPx != null || widthPct != null || heightPx != null || heightPct != null)
-            style.alignSelf = 'center'
+            widthPx != null || widthPct != null || heightPx != null || heightPct != null ? '0 0 auto' : '1 1 0%'
+        if (widthPx != null || widthPct != null || heightPx != null || heightPct != null) style.alignSelf = 'center'
     }
 
-    const paneInfo: PaneInfo = {
+    const paneInfo: PaneInfoLocal = {
         id: String(leaf?.id ?? ''),
         isRoot,
         parentDir,
         constraints: { widthPx, heightPx, widthPct, heightPct },
-        appearance: {
-            bg: bgHexNormalized,
-            mTop: pTop,
-            mRight: pRight,
-            mBottom: pBottom,
-            mLeft: pLeft
-        },
+        appearance: { bg: bgHexNormalized, mTop: pTop, mRight: pRight, mBottom: pBottom, mLeft: pLeft },
         container: { constraints: containerConstraints ?? null, direction: parentDir }
     }
 
     const Comp = leaf?.component ? resolvePane(String(leaf.component)) : null
 
-    // HUD content (name + size badges)
     const paneName = getPaneLabel(leaf?.component ?? null)
     const wBadge = fmtDim(widthPx, widthPct)
     const hBadge = fmtDim(heightPx, heightPct)
@@ -1059,7 +1263,6 @@ function renderLeaf(
         ]
     )
 
-    // Gear button (pane menu trigger)
     const gearButton = canEdit
         ? h(
               'button',
@@ -1073,42 +1276,36 @@ function renderLeaf(
           )
         : null
 
-    // Hotspot area: only hovering this region shows the gear + HUD;
-    // z-index ensures it sits above any pane component content.
-    const menuHotspot =
-        canEdit &&
-        h('div', { class: 'pane-menu-hotspot' }, [
-            gearButton,
-            // HUD next to the gear
-            hud
-        ])
+    const menuHotspot = canEdit && h('div', { class: 'pane-menu-hotspot' }, [gearButton, hud])
 
     const content = h('div', { style, class: 'studio-leaf' }, [
         menuHotspot,
-        // SR-only live text
         h('span', { class: 'sr-only', 'aria-live': 'polite' }, ariaText),
-        Comp
-            ? h(Comp as any, { pane: paneInfo, ...(leaf?.props ?? {}) })
-            : h('div', { class: 'empty', style: { color: textColor } }, 'Empty pane')
+        Comp ? h(Comp as any, { pane: paneInfo, ...(leaf?.props ?? {}) }) : h('div', { class: 'empty', style: { color: textColor } }, 'Empty pane')
     ])
 
     const isRootConstrained =
         isRoot && (widthPx != null || widthPct != null || heightPx != null || heightPct != null)
     if (isRootConstrained) {
-        return h(
-            'div',
-            { style: { width: '100%', height: '100%', display: 'grid', placeItems: 'center' } },
-            [content]
-        )
+        return h('div', { style: { width: '100%', height: '100%', display: 'grid', placeItems: 'center' } }, [content])
     }
     return content
 }
 
-function renderSplit(split: SplitNode, isRoot: boolean, emit: any, canEdit: boolean): VNode {
-    const cW: number | null | undefined = split?.constraints?.widthPx
-    const cH: number | null | undefined = split?.constraints?.heightPx
-    const hasW = cW != null
-    const hasH = cH != null
+function renderSplit(
+    split: SplitNode,
+    parentDir: Direction | null,
+    isRoot: boolean,
+    emit: any,
+    canEdit: boolean,
+    flexWeight: number | null = null
+): VNode {
+    const kids: LayoutNode[] = Array.isArray(split?.children) ? split.children : []
+
+    const widthPx = split?.constraints?.widthPx ?? null
+    const heightPx = split?.constraints?.heightPx ?? null
+    const widthPct = split?.constraints?.widthPct ?? null
+    const heightPct = split?.constraints?.heightPct ?? null
 
     const containerStyle: Record<string, string> = {
         display: 'flex',
@@ -1119,31 +1316,94 @@ function renderSplit(split: SplitNode, isRoot: boolean, emit: any, canEdit: bool
         boxSizing: 'border-box'
     }
 
-    containerStyle.width = hasW ? `${cW as number}px` : '100%'
-    containerStyle.height = hasH ? `${cH as number}px` : '100%'
-    containerStyle.flex = hasW || hasH ? '0 0 auto' : '1 1 0%'
-    if (isRoot && (hasW || hasH)) containerStyle.alignSelf = 'center'
+    function applyWidth() {
+        if (widthPx != null) {
+            containerStyle.flex = '0 0 auto'
+            containerStyle.width = `${widthPx}px`
+        } else if (widthPct != null) {
+            containerStyle.flex = '0 0 auto'
+            containerStyle.width = `${widthPct}%`
+        } else {
+            containerStyle.flex = flexWeight != null && flexWeight > 0 ? `${flexWeight} 1 0%` : '1 1 0%'
+            containerStyle.width = 'auto'
+        }
+    }
+    function applyHeight() {
+        if (heightPx != null) {
+            containerStyle.flex = '0 0 auto'
+            containerStyle.height = `${heightPx}px`
+        } else if (heightPct != null) {
+            containerStyle.flex = '0 0 auto'
+            containerStyle.height = `${heightPct}%`
+        } else {
+            containerStyle.flex = flexWeight != null && flexWeight > 0 ? `${flexWeight} 1 0%` : '1 1 0%'
+            containerStyle.height = 'auto'
+        }
+    }
 
-    const kids: any[] = Array.isArray(split?.children) ? split.children : []
-    const childrenV: VNode[] = kids.map((child: any) =>
-        renderNode(
-            child,
-            split?.direction === 'row' ? 'row' : 'col',
-            false,
-            emit,
-            canEdit,
-            split?.constraints ?? null
-        )
-    )
+    if (parentDir === 'row') {
+        containerStyle.height = '100%'
+        applyWidth()
+    } else if (parentDir === 'col') {
+        containerStyle.width = '100%'
+        applyHeight()
+    } else {
+        containerStyle.width = widthPx != null ? `${widthPx}px` : widthPct != null ? `${widthPct}%` : '100%'
+        containerStyle.height = heightPx != null ? `${heightPx}px` : heightPct != null ? `${heightPct}%` : '100%'
+        containerStyle.flex =
+            widthPx != null || widthPct != null || heightPx != null || heightPct != null ? '0 0 auto' : '1 1 0%'
+        if (isRoot && (widthPx != null || widthPct != null || heightPx != null || heightPct != null)) {
+            containerStyle.alignSelf = 'center'
+        }
+    }
 
-    const container: VNode = h('div', { style: containerStyle }, childrenV)
+    const weights = computeSplitWeightsForRender(split)
 
-    if (isRoot && (hasW || hasH)) {
-        return h(
-            'div',
-            { style: { width: '100%', height: '100%', display: 'grid', placeItems: 'center' } },
-            [container]
-        )
+    const nodes: VNode[] = []
+    for (let i = 0; i < kids.length; i++) {
+        const child = kids[i]
+        if (!child) continue
+
+        const childIsFlexible = !isFixedOnSplitAxis(child, split.direction)
+        const w = weights[i] ?? 0
+        const childWeight = childIsFlexible && w > 0 ? w : null
+
+        nodes.push(renderNode(child, split.direction, false, emit, canEdit, split?.constraints ?? null, childWeight))
+
+        if (i < kids.length - 1) {
+            const nextChild = kids[i + 1]
+            if (!nextChild) continue
+
+            const leftFixed = isFixedOnSplitAxis(child, split.direction)
+            const rightFixed = isFixedOnSplitAxis(nextChild, split.direction)
+            const disabled = !canEdit || leftFixed || rightFixed
+            const active = resizeState.value?.splitId === split.id && resizeState.value?.gutterIndex === i
+
+            nodes.push(
+                h('div', {
+                    class: [
+                        'split-gutter',
+                        split.direction === 'row' ? 'row' : 'col',
+                        disabled ? 'split-gutter--disabled' : '',
+                        active ? 'split-gutter--active' : ''
+                    ],
+                    style: split.direction === 'row' ? { width: `${GUTTER_PX}px` } : { height: `${GUTTER_PX}px` },
+                    role: 'separator',
+                    'aria-orientation': split.direction === 'row' ? 'vertical' : 'horizontal',
+                    'data-split-id': split.id,
+                    'data-gutter-index': String(i),
+                    onPointerdown: disabled ? undefined : (ev: PointerEvent) => startGutterResize(split.id, i, ev)
+                })
+            )
+        }
+    }
+
+    const container: VNode = h('div', { style: containerStyle, class: 'studio-split', 'data-split-id': split.id }, nodes)
+
+    const isRootConstrained =
+        isRoot && (widthPx != null || widthPct != null || heightPx != null || heightPct != null)
+    if (isRootConstrained) {
+        return h('div', { style: { width: '100%', height: '100%', display: 'grid', placeItems: 'center' } }, [container])
     }
     return container
 }
@@ -1154,14 +1414,15 @@ function renderNode(
     isRoot: boolean,
     emit: any,
     canEdit: boolean,
-    containerConstraints: Constraints | null
+    containerConstraints: Constraints | null,
+    flexWeight: number | null = null
 ): VNode {
     return node?.kind === 'split'
-        ? renderSplit(node as SplitNode, isRoot, emit, canEdit)
-        : renderLeaf(node as LeafNode, parentDir, isRoot, emit, canEdit, containerConstraints)
+        ? renderSplit(node as SplitNode, parentDir, isRoot, emit, canEdit, flexWeight)
+        : renderLeaf(node as LeafNode, parentDir, isRoot, emit, canEdit, containerConstraints, flexWeight)
 }
 
-export const RenderNode = defineComponent({
+const RenderNode = defineComponent({
     name: 'RenderNode',
     props: {
         node: { type: Object, required: true },
@@ -1171,10 +1432,86 @@ export const RenderNode = defineComponent({
     },
     emits: ['split', 'configure', 'delete'],
     setup(props, { emit }) {
-        return (): VNode =>
-            renderNode(props.node, props.parentDir, props.isRoot, emit, props.canEdit, null)
+        return (): VNode => renderNode(props.node, props.parentDir, props.isRoot, emit, props.canEdit, null, null)
     }
 })
+</script>
+
+<template>
+    <div class="studio-root">
+        <div class="tree-root">
+            <RenderNode
+                :node="root"
+                :is-root="true"
+                :parent-dir="null"
+                :can-edit="canEdit"
+                @split="splitLeafBinary"
+                @configure="openModalForLeaf"
+                @delete="deleteLeaf"
+            />
+        </div>
+
+        <PaneSettingsModal
+            :is-open="isModalOpen"
+            :can-edit="canEdit"
+            :target-id="modalTargetId"
+            :root-id="rootId"
+            :pane-options="paneOptions"
+            :layout-list="layoutList"
+            :selected-profile-id="selectedProfileId"
+            :initial-model="initialModel"
+            @close="closeModal"
+            @clearLayout="clearLayout"
+            @splitRow="splitRowFromModal"
+            @splitCol="splitColFromModal"
+            @deletePane="deleteFromModal"
+            @apply="applyModal"
+            @loadProfile="loadProfile"
+            @overwriteSelected="overwriteSelected"
+            @deleteSelected="deleteSelected"
+            @saveCurrentAs="saveCurrentAs"
+            @update:selectedProfileId="onUpdateSelectedProfileId"
+            @refreshLayouts="refreshLayouts"
+        />
+    </div>
+</template>
+
+<script lang="ts">
+export default { name: 'App' }
+
+/**
+ * Exported type for panes to import.
+ * Kept out of <script setup> to avoid toolchain parsing errors around `export`.
+ */
+export type PaneInfo = {
+    id: string
+    isRoot: boolean
+    parentDir: 'row' | 'col' | null
+    constraints: {
+        widthPx?: number | null
+        heightPx?: number | null
+        widthPct?: number | null
+        heightPct?: number | null
+    }
+    appearance: {
+        bg?: string | null
+        mTop?: number | null
+        mRight?: number | null
+        mBottom?: number | null
+        mLeft?: number | null
+    }
+    container: {
+        constraints:
+            | {
+                  widthPx?: number | null
+                  heightPx?: number | null
+                  widthPct?: number | null
+                  heightPct?: number | null
+              }
+            | null
+        direction: 'row' | 'col' | null
+    }
+}
 </script>
 
 <style>
@@ -1185,7 +1522,8 @@ body,
     height: 100%;
     margin: 0;
     overflow: hidden;
-    background: #000;
+    /* background: #000; */
+    background: #008080;
     color-scheme: dark;
 }
 
@@ -1206,6 +1544,39 @@ body,
     min-height: 0;
 }
 
+/* Split containers */
+.studio-split {
+    min-width: 0;
+    min-height: 0;
+}
+
+/* Gutter styling (between panes) */
+.split-gutter {
+    flex: 0 0 auto;
+    /* background: rgba(255, 255, 255, 0.06); */
+    position: relative;
+    z-index: 20;
+    touch-action: none; /* important for touch drag */
+}
+.split-gutter.row {
+    cursor: col-resize;
+    height: 100%;
+}
+.split-gutter.col {
+    cursor: row-resize;
+    width: 100%;
+}
+.split-gutter:hover {
+    /* background: rgba(255, 255, 255, 0.12); */
+}
+.split-gutter--active {
+    /* background: rgba(59, 130, 246, 0.28); */
+}
+.split-gutter--disabled {
+    cursor: default;
+    opacity: 0.35;
+}
+
 /* Leaf content */
 .studio-leaf {
     display: flex;
@@ -1219,19 +1590,17 @@ body,
     place-items: center;
     width: 100%;
     height: 100%;
-    color: #6b7280; /* overridden inline when a bg is set */
+    color: #6b7280;
     font-size: 0.95rem;
 }
 
-/* Hotspot area for the pane menu (top-left).
-   Only hovering this region will reveal the gear + HUD.
-   z-index ensures it sits above any pane component content. */
+/* Hotspot area for the pane menu (top-left). */
 .pane-menu-hotspot {
     position: absolute;
     top: 0;
     left: 0;
-    width: 3.2rem; /* hit area width for the gear */
-    height: 2.2rem; /* hit area height */
+    width: 3.2rem;
+    height: 2.2rem;
     pointer-events: auto;
     z-index: 30;
 }
@@ -1249,7 +1618,7 @@ body,
     visibility: hidden;
     pointer-events: none;
     transition: opacity 0.15s ease, transform 0.1s ease;
-    z-index: 31; /* above hotspot and HUD */
+    z-index: 31;
     font-size: 0.95rem;
     line-height: 1;
 }
@@ -1270,11 +1639,11 @@ body,
     transform: translateY(-1px);
 }
 
-/* Pane HUD, displayed next to the gear on hover/focus */
+/* Pane HUD */
 .pane-hud {
     position: absolute;
     top: 0.5rem;
-    left: 2.4rem; /* just to the right of the gear */
+    left: 2.4rem;
     padding: 0.2rem 0.5rem;
     border-radius: 8px;
     font-size: 12px;
@@ -1282,8 +1651,8 @@ body,
     visibility: hidden;
     pointer-events: none;
     transition: opacity 0.15s ease;
-    z-index: 29; /* beneath the gear, above pane content */
-    white-space: nowrap; /* keep name + dimensions on a single line */
+    z-index: 29;
+    white-space: nowrap;
 }
 
 /* Show HUD only when hotspot hovered or gear focused */
