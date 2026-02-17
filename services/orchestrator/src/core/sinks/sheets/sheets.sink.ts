@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/sinks/sheets/sheets.sink.ts
 import type {
   ArtifactRefs,
   MetricMap,
@@ -32,6 +33,10 @@ const noopLog: SheetsSinkLogger = {
  * - All Google Sheets I/O must occur in worker threads.
  * - Supports two pools: blocking + background.
  * - Supports a "barrier" mode that drains background work, then runs blocking publishes exclusively.
+ *
+ * Logging format convention:
+ * - Prefer message strings in "key=value key=value" format to match other subsystems.
+ * - Avoid structured objects in logs unless explicitly needed.
  */
 export class SheetsSink implements ResultSink {
   public readonly id = 'sheets'
@@ -59,7 +64,7 @@ export class SheetsSink implements ResultSink {
     this.cfg = cfg
 
     if (!cfg.enabled) {
-      this.log.info('SheetsSink disabled (SHEETS_ENABLED=false)')
+      this.log.info('kind=sheets-sink-disabled enabled=false')
       return
     }
 
@@ -67,10 +72,14 @@ export class SheetsSink implements ResultSink {
     if (!v.ok) {
       // Safety gate: refuse to start in write mode when required config is missing.
       // Dry-run still allowed.
-      this.log.error('SheetsSink config invalid for writes', { errors: v.errors })
+      this.log.error(`kind=sheets-sink-config-invalid-for-writes errorsCount=${v.errors.length}`)
+      for (let i = 0; i < v.errors.length; i++) {
+        this.log.error(`kind=sheets-sink-config-error idx=${i} msg=${JSON.stringify(v.errors[i])}`)
+      }
+
       // Keep running, but in dry-run to avoid unsafe/undefined behavior.
       cfg.dryRun = true
-      this.log.warn('Forcing SHEETS_DRY_RUN=true due to invalid config for writes')
+      this.log.warn('kind=sheets-sink-forced-dry-run dryRun=true reason=config-invalid')
     }
 
     // Worker entrypoint (compiled .js under NodeNext)
@@ -101,24 +110,27 @@ export class SheetsSink implements ResultSink {
     // NOTE: This may include secrets; worker must not log these.
     await this.initWorkers(cfg)
 
-    this.log.info('SheetsSink initialized', {
-      dryRun: cfg.dryRun,
-      lockMode: cfg.lockMode,
-      workersBlocking: cfg.workersBlocking,
-      workersBackground: bgSize,
-    })
+    this.log.info(
+      [
+        'kind=sheets-sink-initialized',
+        `dryRun=${cfg.dryRun}`,
+        `lockMode=${cfg.lockMode}`,
+        `workersBlocking=${cfg.workersBlocking}`,
+        `workersBackground=${bgSize}`,
+      ].join(' ')
+    )
   }
 
   private async initWorkers(cfg: SheetsConfig): Promise<void> {
-  if (!this.blockingPool) throw new Error('Blocking pool not created')
+    if (!this.blockingPool) throw new Error('Blocking pool not created')
 
-  // SAFETY: each worker thread must receive init/config before it can handle publish requests.
-  await this.blockingPool.broadcast((taskId) => ({ kind: 'init', taskId, config: cfg }))
+    // SAFETY: each worker thread must receive init/config before it can handle publish requests.
+    await this.blockingPool.broadcast((taskId) => ({ kind: 'init', taskId, config: cfg }))
 
-  if (this.backgroundPool && this.backgroundPool.stats().size > 0) {
-    await this.backgroundPool.broadcast((taskId) => ({ kind: 'init', taskId, config: cfg }))
+    if (this.backgroundPool && this.backgroundPool.stats().size > 0) {
+      await this.backgroundPool.broadcast((taskId) => ({ kind: 'init', taskId, config: cfg }))
+    }
   }
-}
 
   async healthy(): Promise<boolean> {
     const cfg = this.cfg

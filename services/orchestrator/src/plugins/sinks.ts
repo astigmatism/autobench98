@@ -31,9 +31,9 @@ declare module 'fastify' {
  * - Decorate app with { sinkManager, sheetsSink }
  * - Manage sink lifecycle via onReady/onClose
  *
- * NOTE:
- * - HTTP routes for sinks live in app.ts (by your current convention)
- * - This plugin must use the *shared* app.clientBuf (do not call makeClientBuffer() here)
+ * Logging format convention:
+ * - Message strings should be "key=value key=value" so pino-pretty output matches other subsystems
+ *   (avoid structured objects in logs unless explicitly needed).
  */
 const plugin: FastifyPluginAsync = async (app: FastifyInstance) => {
   // SAFETY: enforce shared buffer (logs must reach UI)
@@ -45,7 +45,7 @@ const plugin: FastifyPluginAsync = async (app: FastifyInstance) => {
 
   const { channel } = createLogger('orchestrator:sinks-plugin', app.clientBuf)
 
-  // Plugin lifecycle / config logs: keep as app
+  // Plugin lifecycle/config logs: keep as app
   const logApp = channel(LogChannel.app)
 
   // Google Sheets integration logs: dedicated channel (orange)
@@ -55,16 +55,19 @@ const plugin: FastifyPluginAsync = async (app: FastifyInstance) => {
   const sheetsCfg = buildSheetsConfigFromEnv(env)
 
   // SAFETY: log only presence flags + tuning values; never log secrets.
-  logApp.info('sinks-plugin config loaded', {
-    sheetsEnabled: sheetsCfg.enabled,
-    sheetsDryRun: sheetsCfg.dryRun,
-    sheetsLockMode: sheetsCfg.lockMode,
-    workersBlocking: sheetsCfg.workersBlocking,
-    workersBackground: sheetsCfg.workersBackground,
-    spreadsheetIdPresent: Boolean(sheetsCfg.spreadsheetId),
-    serviceAccountEmailPresent: Boolean(sheetsCfg.serviceAccountEmail),
-    privateKeyPresent: Boolean(sheetsCfg.privateKey),
-  })
+  logApp.info(
+    [
+      'kind=sinks-plugin-config-loaded',
+      `sheetsEnabled=${sheetsCfg.enabled}`,
+      `sheetsDryRun=${sheetsCfg.dryRun}`,
+      `sheetsLockMode=${sheetsCfg.lockMode}`,
+      `workersBlocking=${sheetsCfg.workersBlocking}`,
+      `workersBackground=${sheetsCfg.workersBackground}`,
+      `spreadsheetIdPresent=${Boolean(sheetsCfg.spreadsheetId)}`,
+      `serviceAccountEmailPresent=${Boolean(sheetsCfg.serviceAccountEmail)}`,
+      `privateKeyPresent=${Boolean(sheetsCfg.privateKey)}`,
+    ].join(' ')
+  )
 
   // SheetsSink should log on its own dedicated channel.
   const sheetsSink = new SheetsSink({
@@ -82,13 +85,15 @@ const plugin: FastifyPluginAsync = async (app: FastifyInstance) => {
   app.decorate('sinkManager', sinkManager)
 
   app.addHook('onReady', async () => {
-    logApp.info('initializing sinks')
+    logApp.info('kind=sinks-plugin-onReady action=initAll')
     await sinkManager.initAll()
+    logApp.info('kind=sinks-plugin-initAll-complete')
   })
 
   app.addHook('onClose', async () => {
-    logApp.info('shutting down sinks')
+    logApp.info('kind=sinks-plugin-onClose action=shutdownAll')
     await sinkManager.shutdownAll()
+    logApp.info('kind=sinks-plugin-shutdownAll-complete')
   })
 }
 

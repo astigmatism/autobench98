@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/sinks/sink-manager.ts
 import type {
   ArtifactRefs,
   MetricMap,
@@ -19,12 +20,15 @@ const noopLogger: LoggerLike = {
 }
 
 /**
- * SinkManager (scaffold)
+ * SinkManager
  *
  * Responsibilities:
  * - Own a set of ResultSink implementations
  * - Initialize and shutdown sinks
  * - Publish results to all sinks (best-effort; one sink failing should not break others)
+ *
+ * Logging format convention:
+ * - Message strings should be "key=value key=value" to match other subsystems.
  */
 export class SinkManager {
   private readonly sinks: ResultSink[]
@@ -46,12 +50,13 @@ export class SinkManager {
   async initAll(): Promise<void> {
     for (const sink of this.sinks) {
       try {
-        this.log.info(`sink.init start id=${sink.id}`)
+        this.log.info(`kind=sink-init-start id=${sink.id}`)
         await sink.init()
-        this.log.info(`sink.init ok id=${sink.id}`)
+        this.log.info(`kind=sink-init-ok id=${sink.id}`)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        this.log.error(`sink.init failed id=${sink.id} err=${msg}`)
+        // Keep err as a single token (quoted) since it may contain spaces.
+        this.log.error(`kind=sink-init-failed id=${sink.id} err=${JSON.stringify(msg)}`)
       }
     }
   }
@@ -60,12 +65,12 @@ export class SinkManager {
     for (const sink of this.sinks) {
       if (!sink.shutdown) continue
       try {
-        this.log.info(`sink.shutdown start id=${sink.id}`)
+        this.log.info(`kind=sink-shutdown-start id=${sink.id}`)
         await sink.shutdown()
-        this.log.info(`sink.shutdown ok id=${sink.id}`)
+        this.log.info(`kind=sink-shutdown-ok id=${sink.id}`)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        this.log.error(`sink.shutdown failed id=${sink.id} err=${msg}`)
+        this.log.error(`kind=sink-shutdown-failed id=${sink.id} err=${JSON.stringify(msg)}`)
       }
     }
   }
@@ -96,7 +101,9 @@ export class SinkManager {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        this.log.error(`sink.publish failed id=${sink.id} runId=${run.runId} err=${msg}`)
+        this.log.error(
+          `kind=sink-publish-failed id=${sink.id} runId=${run.runId} err=${JSON.stringify(msg)}`
+        )
         receipts.push({
           sinkId: sink.id,
           runId: run.runId,
