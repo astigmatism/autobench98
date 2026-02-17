@@ -1,3 +1,5 @@
+// packages/logging/src/types.ts
+
 export enum LogChannel {
     orchestrator = 'orchestrator',
     sidecar = 'sidecar',
@@ -16,6 +18,9 @@ export enum LogChannel {
     atlona_controller = 'atlona-controller',
     cf_imager = 'cf-imager',
     frontpanel = 'frontpanel',
+
+    // ✅ Google Sheets integration (result sink)
+    google_sheets = 'google-sheets',
 }
 
 export type ChannelColor =
@@ -27,6 +32,7 @@ export type ChannelColor =
     | 'red'
     | 'white'
     | 'purple'
+    | 'orange'
 
 export type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal'
 

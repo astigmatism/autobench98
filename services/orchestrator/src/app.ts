@@ -36,11 +36,18 @@ import streamProxyPlugin from './plugins/streamProxy.js'
 import ps2KeyboardPlugin from './plugins/ps2Keyboard.js'
 import ps2MousePlugin from './plugins/ps2Mouse.js'
 import frontPanelPlugin from './plugins/frontPanel.js'
+import sinksPlugin from './plugins/sinks.js'
+import type { SinkManager } from './core/sinks/sink-manager.js'
+import type { SheetsSink } from './core/sinks/sheets/sheets.sink.js'
 
 declare module 'fastify' {
     interface FastifyInstance {
         clientBuf: ClientLogBuffer
         getDeviceStatus?: () => DeviceStatusSummary
+
+        // Result sinks
+        sinkManager?: SinkManager
+        sheetsSink?: SheetsSink
     }
 }
 
@@ -117,6 +124,34 @@ function shouldSkipRequestLog(req: FastifyRequest): boolean {
     return false
 }
 
+type PublicSheetsStatus = {
+    enabled: boolean
+    dryRun: boolean
+    lockMode: string | null
+    workersBlocking: number | null
+    workersBackground: number | null
+    spreadsheetIdPresent: boolean
+    serviceAccountEmailPresent: boolean
+    privateKeyPresent: boolean
+}
+
+function getPublicSheetsStatus(app: FastifyInstance): PublicSheetsStatus {
+    const sink = app.sheetsSink
+    const cfg = sink?.getConfig() ?? null
+
+    // SAFETY: never return secrets (private key), and avoid returning raw spreadsheet IDs by default.
+    return {
+        enabled: cfg?.enabled ?? false,
+        dryRun: cfg?.dryRun ?? true,
+        lockMode: (cfg?.lockMode ?? null) as any,
+        workersBlocking: cfg?.workersBlocking ?? null,
+        workersBackground: cfg?.workersBackground ?? null,
+        spreadsheetIdPresent: Boolean(cfg?.spreadsheetId),
+        serviceAccountEmailPresent: Boolean(cfg?.serviceAccountEmail),
+        privateKeyPresent: Boolean(cfg?.privateKey)
+    }
+}
+
 export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const { channel } = createLogger('orchestrator', clientBuf)
     const logApp = channel(LogChannel.app)
@@ -146,6 +181,10 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
 
+    // ✅ Result sinks (Google Sheets, etc.)
+    // NOTE: This plugin does NOT register HTTP routes; it decorates app with sinkManager/sheetsSink.
+    void app.register(sinksPlugin)
+
     // 🔹 Device / adapter plugins
     void app.register(atlonaControllerPlugin)
     void app.register(powerMeterPlugin)
@@ -158,199 +197,217 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(streamProxyPlugin)
 
     // ---------- Request/Response logging hooks ----------
-    app.addHook('onRequest', async (req: FastifyRequest) => {
-        if (shouldSkipRequestLog(req)) return
+  app.addHook('onRequest', async (req: FastifyRequest) => {
+    if (shouldSkipRequestLog(req)) return
 
-        if (WS_DEBUG && req.url === '/ws') {
-            const headers = req.headers as Record<string, unknown>
-            const upgrade = headers['upgrade']
-            const connection = headers['connection']
-            const ua = (headers['user-agent'] as string) ?? ''
-            logReq.info('WS debug /ws headers', { upgrade, connection, ua })
-        }
-
-        const shouldLog = ++reqCounter % REQUEST_SAMPLE === 0
-        if (!shouldLog) return
-
-        sampledIds.add(req.id)
-        startedAt.set(req.id, Date.now())
-        logReq.info(`${req.method} ${req.url}`)
-
-        if (REQUEST_VERBOSE) {
-            const detail: Record<string, unknown> = { id: req.id, ip: req.ip }
-            if (REQUEST_LOG_HEADERS) {
-                const { host, 'user-agent': ua, accept, referer } = req.headers as Record<string, unknown>
-                detail.headers = { host, 'user-agent': ua, accept, referer }
-            }
-            logReq.debug('request detail', detail)
-        }
-    })
-
-    app.addHook('onResponse', async (req: FastifyRequest, reply: FastifyReply) => {
-        if (shouldSkipRequestLog(req)) return
-
-        if (!sampledIds.has(req.id)) return
-        sampledIds.delete(req.id)
-
-        const start = startedAt.get(req.id)
-        if (start !== undefined) startedAt.delete(req.id)
-        const ms = start !== undefined ? Date.now() - start : undefined
-
-        logReq.info(
-            `${req.method} ${req.url} → ${reply.statusCode}${ms !== undefined ? ` (${ms} ms)` : ''}`
-        )
-
-        if (REQUEST_VERBOSE) {
-            const outLen = reply.getHeader('content-length') ?? null
-            logReq.debug('response detail', { id: req.id, bytesOut: outLen, ms })
-        }
-    })
-    // ---------------------------------------------------
-
-    // -----------------------------
-    // Log ingestion (PNO/sidecar)  |
-    // -----------------------------
-    const LEVEL_STYLE: Record<ClientLogLevel, { emoji: string; color: ChannelColor }> = {
-        debug: { emoji: '🐛', color: 'green' },
-        info: { emoji: 'ℹ️', color: 'cyan' },
-        warn: { emoji: '⚠️', color: 'yellow' },
-        error: { emoji: '❌', color: 'red' },
-        fatal: { emoji: '💥', color: 'purple' }
+    if (WS_DEBUG && req.url === '/ws') {
+      const headers = req.headers as Record<string, unknown>
+      const upgrade = headers['upgrade']
+      const connection = headers['connection']
+      const ua = (headers['user-agent'] as string) ?? ''
+      logReq.info('WS debug /ws headers', { upgrade, connection, ua })
     }
 
-    function normalizeEntry(input: any): ClientLog | null {
-        if (!input || typeof input.message !== 'string' || input.message.length === 0) return null
+    const shouldLog = ++reqCounter % REQUEST_SAMPLE === 0
+    if (!shouldLog) return
 
-        const ts = typeof input.ts === 'number' ? input.ts : Date.now()
-        const level = String(input.level ?? 'info').toLowerCase() as any
-        const style = LEVEL_STYLE[level as ClientLogLevel] ?? LEVEL_STYLE.info
+    sampledIds.add(req.id)
+    startedAt.set(req.id, Date.now())
+    logReq.info(`${req.method} ${req.url}`)
 
-        const rawChannel = String(input.channel ?? 'sidecar')
-        const channelName = INGEST_ALLOWED.includes(rawChannel) ? rawChannel : 'sidecar'
+    if (REQUEST_VERBOSE) {
+      const detail: Record<string, unknown> = { id: req.id, ip: req.ip }
+      if (REQUEST_LOG_HEADERS) {
+        const { host, 'user-agent': ua, accept, referer } = req.headers as Record<string, unknown>
+        detail.headers = { host, 'user-agent': ua, accept, referer }
+      }
+      logReq.debug('request detail', detail)
+    }
+  })
 
-        const emoji = typeof input.emoji === 'string' && input.emoji.length ? input.emoji : style.emoji
-        const color = (typeof input.color === 'string' ? input.color : style.color) as ChannelColor
-        const message = input.message
+  app.addHook('onResponse', async (req: FastifyRequest, reply: FastifyReply) => {
+    if (shouldSkipRequestLog(req)) return
 
-        return { ts, channel: channelName as any, emoji, color, level, message } as ClientLog
+    if (!sampledIds.has(req.id)) return
+    sampledIds.delete(req.id)
+
+    const start = startedAt.get(req.id)
+    if (start !== undefined) startedAt.delete(req.id)
+    const ms = start !== undefined ? Date.now() - start : undefined
+
+    logReq.info(`${req.method} ${req.url} → ${reply.statusCode}${ms !== undefined ? ` (${ms} ms)` : ''}`)
+
+    if (REQUEST_VERBOSE) {
+      const outLen = reply.getHeader('content-length') ?? null
+      logReq.debug('response detail', { id: req.id, bytesOut: outLen, ms })
+    }
+  })
+  // ---------------------------------------------------
+
+  // -----------------------------
+  // Log ingestion (PNO/sidecar)  |
+  // -----------------------------
+  const LEVEL_STYLE: Record<ClientLogLevel, { emoji: string; color: ChannelColor }> = {
+    debug: { emoji: '🐛', color: 'green' },
+    info: { emoji: 'ℹ️', color: 'cyan' },
+    warn: { emoji: '⚠️', color: 'yellow' },
+    error: { emoji: '❌', color: 'red' },
+    fatal: { emoji: '💥', color: 'purple' },
+  }
+
+  function normalizeEntry(input: any): ClientLog | null {
+    if (!input || typeof input.message !== 'string' || input.message.length === 0) return null
+
+    const ts = typeof input.ts === 'number' ? input.ts : Date.now()
+    const level = String(input.level ?? 'info').toLowerCase() as any
+    const style = LEVEL_STYLE[level as ClientLogLevel] ?? LEVEL_STYLE.info
+
+    const rawChannel = String(input.channel ?? 'sidecar')
+    const channelName = INGEST_ALLOWED.includes(rawChannel) ? rawChannel : 'sidecar'
+
+    const emoji = typeof input.emoji === 'string' && input.emoji.length ? input.emoji : style.emoji
+    const color = (typeof input.color === 'string' ? input.color : style.color) as ChannelColor
+    const message = input.message
+
+    return { ts, channel: channelName as any, emoji, color, level, message } as ClientLog
+  }
+
+  app.post('/api/logs/ingest', async (req, reply) => {
+    if (INGEST_TOKEN) {
+      const auth = String((req.headers?.authorization ?? '')).trim()
+      const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+      if (token !== INGEST_TOKEN) {
+        reply.code(401)
+        return { ok: false, error: 'unauthorized' }
+      }
     }
 
-    app.post('/api/logs/ingest', async (req, reply) => {
-        if (INGEST_TOKEN) {
-            const auth = String((req.headers?.authorization ?? '')).trim()
-            const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-            if (token !== INGEST_TOKEN) {
-                reply.code(401)
-                return { ok: false, error: 'unauthorized' }
-            }
-        }
+    try {
+      const body = (req.body ?? {}) as any
+      const rawEntries = Array.isArray(body) ? body : Array.isArray(body.entries) ? body.entries : [body]
 
-        try {
-            const body = (req.body ?? {}) as any
-            const rawEntries = Array.isArray(body)
-                ? body
-                : Array.isArray(body.entries)
-                  ? body.entries
-                  : [body]
+      let accepted = 0
+      for (const raw of rawEntries) {
+        const e = normalizeEntry(raw)
+        if (!e) continue
+        clientBuf.push(e)
+        accepted++
+      }
+      return { ok: true, accepted }
+    } catch (err) {
+      reply.code(400)
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+  // -----------------------------
 
-            let accepted = 0
-            for (const raw of rawEntries) {
-                const e = normalizeEntry(raw)
-                if (!e) continue
-                clientBuf.push(e)
-                accepted++
-            }
-            return { ok: true, accepted }
-        } catch (err) {
-            reply.code(400)
-            return { ok: false, error: (err as Error).message }
-        }
-    })
-    // -----------------------------
+  // Health / ready
+  app.get('/health', { config: { skipRequestLog: true } }, async () => ({ status: 'ok' }))
 
-    // Health / ready
-    app.get('/health', async () => ({ status: 'ok' }))
+  app.get('/ready', { config: { skipRequestLog: true } }, async () => {
+    const statusFn = app.getDeviceStatus
+    if (!statusFn) {
+      // If the plugin isn't loaded for some reason, surface "ready"
+      // so this doesn't become a hard dependency.
+      return { ready: true }
+    }
+    const status = statusFn()
+    return {
+      ready: status.ready,
+      missing: status.missing,
+      byStatus: status.byStatus,
+      devices: status.devices.map((d) => ({
+        id: d.id,
+        kind: d.kind,
+        path: d.path,
+        status: d.status,
+        vid: d.vid,
+        pid: d.pid,
+        baudRate: d.baudRate,
+        idToken: d.idToken,
+      })),
+    }
+  })
 
-    app.get('/ready', async () => {
-        const statusFn = app.getDeviceStatus
-        if (!statusFn) {
-            // If the plugin isn't loaded for some reason, surface "ready"
-            // so this doesn't become a hard dependency.
-            return { ready: true }
-        }
-        const status = statusFn()
-        return {
-            ready: status.ready,
-            missing: status.missing,
-            byStatus: status.byStatus,
-            devices: status.devices.map((d) => ({
-                id: d.id,
-                kind: d.kind,
-                path: d.path,
-                status: d.status,
-                vid: d.vid,
-                pid: d.pid,
-                baudRate: d.baudRate,
-                idToken: d.idToken
-            }))
-        }
-    })
+  // ✅ Sinks status (routes kept in app.ts by design)
+  app.get('/api/sinks', async (_req, reply) => {
+    const sinkManager = app.sinkManager
+    if (!sinkManager) {
+      reply.code(503)
+      return { ok: false, error: 'sinkManager not available (plugin not registered?)' }
+    }
 
-    app.get('/', async (_req, reply) => {
-        reply.status(301)
-        reply.redirect('/studio/')
-    })
+    const health = await sinkManager.healthySnapshot()
+    const sheets = getPublicSheetsStatus(app)
 
-    app.get('/version', async () => ({ name: 'autobench98-orchestrator', version: '0.1.0' }))
+    return { ok: true, health, sheets }
+  })
 
-    app.post('/api/state/message', async (req, reply) => {
-        try {
-            const body = (req.body ?? {}) as { message?: string }
-            if (typeof body.message === 'string') {
-                setMessage(body.message)
-                return { ok: true }
-            }
-            reply.code(400)
-            return { ok: false, error: 'message (string) required' }
-        } catch (err) {
-            reply.code(500)
-            return { ok: false, error: (err as Error).message }
-        }
-    })
+  app.post('/api/sinks/sheets/healthcheck', async (_req, reply) => {
+    const sink = app.sheetsSink
+    if (!sink) {
+      reply.code(503)
+      return { ok: false, error: 'sheetsSink not available (plugin not registered?)' }
+    }
+    const ok = await sink.healthy()
+    return { ok }
+  })
 
-    app.post('/api/state/layout', async (req, reply) => {
-        try {
-            const b = (req.body ?? {}) as { rows?: number; cols?: number }
-            if (typeof b.rows === 'number' && typeof b.cols === 'number') {
-                setLayout(b.rows, b.cols)
-                return { ok: true }
-            }
-            reply.code(400)
-            return { ok: false, error: 'rows (number) and cols (number) required' }
-        } catch (err) {
-            reply.code(500)
-            return { ok: false, error: (err as Error).message }
-        }
-    })
+  app.get('/', async (_req, reply) => {
+    reply.status(301)
+    reply.redirect('/studio/')
+  })
 
-    // Static last so SPA handles /studio/* deep links
-    void app.register(fastifyStatic, {
-        root: WEB_DIST,
-        prefix: '/studio/',
-        index: ['index.html']
-    })
+  app.get('/version', async () => ({ name: 'autobench98-orchestrator', version: '0.1.0' }))
 
-    app.get('/studio', async (_req, reply) => {
-        reply.status(301)
-        reply.redirect('/studio/')
-    })
+  app.post('/api/state/message', async (req, reply) => {
+    try {
+      const body = (req.body ?? {}) as { message?: string }
+      if (typeof body.message === 'string') {
+        setMessage(body.message)
+        return { ok: true }
+      }
+      reply.code(400)
+      return { ok: false, error: 'message (string) required' }
+    } catch (err) {
+      reply.code(500)
+      return { ok: false, error: (err as Error).message }
+    }
+  })
 
-    app.setNotFoundHandler((req, reply) => {
-        const url = req.raw.url ?? ''
-        if (url.startsWith('/studio/')) return reply.sendFile('index.html')
-        reply.status(404).send({ error: 'Not found' })
-    })
+  app.post('/api/state/layout', async (req, reply) => {
+    try {
+      const b = (req.body ?? {}) as { rows?: number; cols?: number }
+      if (typeof b.rows === 'number' && typeof b.cols === 'number') {
+        setLayout(b.rows, b.cols)
+        return { ok: true }
+      }
+      reply.code(400)
+      return { ok: false, error: 'rows (number) and cols (number) required' }
+    } catch (err) {
+      reply.code(500)
+      return { ok: false, error: (err as Error).message }
+    }
+  })
 
+  // Static last so SPA handles /studio/* deep links
+  void app.register(fastifyStatic, {
+    root: WEB_DIST,
+    prefix: '/studio/',
+    index: ['index.html'],
+  })
+
+  app.get('/studio', async (_req, reply) => {
+    reply.status(301)
+    reply.redirect('/studio/')
+  })
+
+  app.setNotFoundHandler((req, reply) => {
+    const url = req.raw.url ?? ''
+    if (url.startsWith('/studio/')) return reply.sendFile('index.html')
+    reply.status(404).send({ error: 'Not found' })
+  })
+  
     logApp.info('orchestrator app built')
     return app
 }

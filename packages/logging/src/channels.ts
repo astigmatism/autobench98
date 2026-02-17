@@ -1,3 +1,4 @@
+// packages/logging/src/channels.ts
 import { type ChannelColor, LogChannel } from './types.js'
 
 export const CHANNEL_AS_LEVEL = true as const
@@ -34,6 +35,9 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
 
     [LogChannel.cf_imager]:       { emoji: '💾', color: 'cyan' },
     [LogChannel.frontpanel]:      { emoji: '⏻', color: 'red' },
+
+    // ✅ Google Sheets integration (result sink) — stands out in orange
+    [LogChannel.google_sheets]:   { emoji: '📊', color: 'orange' },
 }
 
 export const ANSI: Record<ChannelColor, string> = {
@@ -44,7 +48,10 @@ export const ANSI: Record<ChannelColor, string> = {
     cyan: '\x1b[36m',
     red: '\x1b[31m',
     white: '\x1b[37m',
-    purple: '\x1b[95m', // bright magenta (purple-ish)
+    purple: '\x1b[95m',        // bright magenta (purple-ish)
+
+    // 256-color "orange" (works in most modern terminals; falls back gracefully in others)
+    orange: '\x1b[38;5;208m',
 }
 
 export const RESET = '\x1b[0m'
@@ -67,4 +74,7 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
     [LogChannel.atlona_controller]: 30,
     [LogChannel.cf_imager]:       30,
     [LogChannel.frontpanel]:      30,
+
+    // ✅ Google Sheets integration
+    [LogChannel.google_sheets]:   30,
 }
