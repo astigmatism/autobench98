@@ -1,100 +1,92 @@
 // services/orchestrator/src/plugins/sinks-plugin.ts
-import type { FastifyInstance, FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
+import type { FastifyInstance } from 'fastify'
 
-import {
-  createLogger,
-  LogChannel,
-  type ClientLogBuffer,
-} from '@autobench98/logging'
+import { createLogger, LogChannel } from '@autobench98/logging'
 
 import { SinkManager } from '../core/sinks/sink-manager.js'
 import { SheetsSink } from '../core/sinks/sheets/sheets.sink.js'
 import { buildSheetsConfigFromEnv } from '../core/sinks/sheets/sheets.config.js'
 
+import { SheetsHost } from '../core/sheets/sheets.host.js'
+import { SheetsGateway } from '../core/sheets/sheets.gateway.js'
+
 declare module 'fastify' {
   interface FastifyInstance {
-    // logging (shared buffer for UI)
-    clientBuf: ClientLogBuffer
-
-    // sinks
     sinkManager?: SinkManager
-    sheetsSink?: SheetsSink
+    sheetsGateway?: SheetsGateway
   }
 }
 
-/**
- * sinks-plugin
- *
- * Purpose:
- * - Instantiate result sinks (Google Sheets, etc.)
- * - Decorate app with { sinkManager, sheetsSink }
- * - Manage sink lifecycle via onReady/onClose
- *
- * Logging format convention:
- * - Message strings should be "key=value key=value" so pino-pretty output matches other subsystems
- *   (avoid structured objects in logs unless explicitly needed).
- */
-const plugin: FastifyPluginAsync = async (app: FastifyInstance) => {
-  // SAFETY: enforce shared buffer (logs must reach UI)
-  if (!app.clientBuf) {
-    throw new Error(
-      'sinks-plugin: app.clientBuf missing. app.ts must decorate app.clientBuf with makeClientBuffer() before registering sinks-plugin.'
+const sinksPlugin = fp(
+  async (app: FastifyInstance) => {
+    // SAFETY: All subsystems must log into the shared client buffer so Studio can see them.
+    // Do NOT call makeClientBuffer() in plugins.
+    const anyApp = app as any
+    if (!anyApp.clientBuf) {
+      throw new Error(
+        'sinks-plugin: app.clientBuf is missing. Ensure app decorates clientBuf before registering sinks-plugin.'
+      )
+    }
+
+    const { channel } = createLogger('orchestrator:sinks', anyApp.clientBuf)
+    const logApp = channel(LogChannel.app)
+    const logGoogleSheets = channel(LogChannel.google_sheets)
+
+    const sheetsCfg = buildSheetsConfigFromEnv()
+
+    // key=value style to match the rest of your console output
+    logApp.info(
+      `kind=sinks-plugin-config ` +
+        `sheetsEnabled=${sheetsCfg.enabled} ` +
+        `sheetsDryRun=${sheetsCfg.dryRun} ` +
+        `sheetsLockMode=${sheetsCfg.lockMode} ` +
+        `workersBlocking=${sheetsCfg.workersBlocking} ` +
+        `workersBackground=${sheetsCfg.workersBackground} ` +
+        `spreadsheetIdPresent=${Boolean(sheetsCfg.spreadsheetId)} ` +
+        `serviceAccountEmailPresent=${Boolean(sheetsCfg.serviceAccountEmail)} ` +
+        `privateKeyPresent=${Boolean(sheetsCfg.privateKey)} ` +
+        `authStrategy=${sheetsCfg.auth.strategy} ` +
+        `cacheEnabled=${sheetsCfg.cache.enabled} ` +
+        `cacheMaxEntries=${sheetsCfg.cache.maxEntries} ` +
+        `cacheSheetMetaTtlMs=${sheetsCfg.cache.sheetMetaTtlMs} ` +
+        `cacheKeyMapTtlMs=${sheetsCfg.cache.keyMapTtlMs} ` +
+        `cacheRangeTtlMs=${sheetsCfg.cache.rangeTtlMs}`
     )
+
+    // Shared host: one set of worker pools for BOTH sink publishing and gateway reads/writes
+    const sheetsHost = new SheetsHost({ config: sheetsCfg, logger: logGoogleSheets })
+
+    // Gateway: general-purpose Sheets "database" API for reads/lookups + template ops
+    const sheetsGateway = new SheetsGateway({ host: sheetsHost, logger: logGoogleSheets })
+
+    const sinkManager = new SinkManager({
+      logger: logApp,
+      sinks: [
+        new SheetsSink({
+          config: sheetsCfg,
+          logger: logGoogleSheets,
+          host: sheetsHost,
+        }),
+      ],
+    })
+
+    // Decorate Fastify instance
+    app.decorate('sinkManager', sinkManager)
+    app.decorate('sheetsGateway', sheetsGateway)
+
+    app.addHook('onReady', async () => {
+      await sinkManager.initAll()
+    })
+
+    app.addHook('onClose', async () => {
+      await sinkManager.shutdownAll()
+    })
+  },
+  {
+    name: 'sinks-plugin',
   }
+)
 
-  const { channel } = createLogger('orchestrator:sinks-plugin', app.clientBuf)
-
-  // Plugin lifecycle/config logs: keep as app
-  const logApp = channel(LogChannel.app)
-
-  // Google Sheets integration logs: dedicated channel (orange)
-  const logGoogleSheets = channel(LogChannel.google_sheets)
-
-  const env = process.env
-  const sheetsCfg = buildSheetsConfigFromEnv(env)
-
-  // SAFETY: log only presence flags + tuning values; never log secrets.
-  logApp.info(
-    [
-      'kind=sinks-plugin-config-loaded',
-      `sheetsEnabled=${sheetsCfg.enabled}`,
-      `sheetsDryRun=${sheetsCfg.dryRun}`,
-      `sheetsLockMode=${sheetsCfg.lockMode}`,
-      `workersBlocking=${sheetsCfg.workersBlocking}`,
-      `workersBackground=${sheetsCfg.workersBackground}`,
-      `spreadsheetIdPresent=${Boolean(sheetsCfg.spreadsheetId)}`,
-      `serviceAccountEmailPresent=${Boolean(sheetsCfg.serviceAccountEmail)}`,
-      `privateKeyPresent=${Boolean(sheetsCfg.privateKey)}`,
-    ].join(' ')
-  )
-
-  // SheetsSink should log on its own dedicated channel.
-  const sheetsSink = new SheetsSink({
-    config: sheetsCfg,
-    logger: logGoogleSheets,
-  })
-
-  // SinkManager is generic; keep its logs on app unless/until you want a dedicated "sinks" channel.
-  const sinkManager = new SinkManager({
-    sinks: [sheetsSink],
-    logger: logApp,
-  })
-
-  app.decorate('sheetsSink', sheetsSink)
-  app.decorate('sinkManager', sinkManager)
-
-  app.addHook('onReady', async () => {
-    logApp.info('kind=sinks-plugin-onReady action=initAll')
-    await sinkManager.initAll()
-    logApp.info('kind=sinks-plugin-initAll-complete')
-  })
-
-  app.addHook('onClose', async () => {
-    logApp.info('kind=sinks-plugin-onClose action=shutdownAll')
-    await sinkManager.shutdownAll()
-    logApp.info('kind=sinks-plugin-shutdownAll-complete')
-  })
-}
-
-export default fp(plugin, { name: 'sinks-plugin' })
+export default sinksPlugin
+export { sinksPlugin }

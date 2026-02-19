@@ -1,56 +1,13 @@
+// services/orchestrator/src/core/sinks/sheets/sheets.lock.ts
 /**
- * Async primitives for Sheets publish scheduling.
+ * A simple barrier + mutex used to enforce the "blocking publish waits for background" policy.
  *
- * Purpose:
- * - Provide a "barrier" so blocking publishes can run exclusively
- *   (and optionally wait for background work to drain).
+ * This is intentionally minimal; consider replacing with a proper async RW lock later.
  */
 
-export class Mutex {
-  private locked = false
-  private readonly waiters: Array<(release: () => void) => void> = []
-
-  async acquire(): Promise<() => void> {
-    if (!this.locked) {
-      this.locked = true
-      return () => this.release()
-    }
-
-    return await new Promise<() => void>((resolve) => {
-      this.waiters.push(resolve)
-    })
-  }
-
-  private release() {
-    const next = this.waiters.shift()
-    if (next) {
-      // still locked, transfer ownership
-      next(() => this.release())
-      return
-    }
-    this.locked = false
-  }
-
-  async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-    const release = await this.acquire()
-    try {
-      return await fn()
-    } finally {
-      release()
-    }
-  }
-}
-
-/**
- * Barrier used to pause background dispatch while a blocking task is active.
- */
 export class Barrier {
   private active = false
-  private readonly waiters: Array<() => void> = []
-
-  isActive(): boolean {
-    return this.active
-  }
+  private waiters: Array<() => void> = []
 
   activate(): void {
     this.active = true
@@ -58,14 +15,44 @@ export class Barrier {
 
   deactivate(): void {
     this.active = false
-    while (this.waiters.length) {
-      const w = this.waiters.shift()
-      if (w) w()
-    }
+    const w = this.waiters
+    this.waiters = []
+    for (const fn of w) fn()
   }
 
   async waitIfActive(): Promise<void> {
     if (!this.active) return
-    await new Promise<void>((resolve) => this.waiters.push(resolve))
+    await new Promise<void>((resolve) => {
+      this.waiters.push(resolve)
+    })
+  }
+}
+
+export class Mutex {
+  private locked = false
+  private q: Array<() => void> = []
+
+  async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    await this.lock()
+    try {
+      return await fn()
+    } finally {
+      this.unlock()
+    }
+  }
+
+  private async lock(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true
+      return
+    }
+    await new Promise<void>((resolve) => this.q.push(resolve))
+    this.locked = true
+  }
+
+  private unlock(): void {
+    this.locked = false
+    const next = this.q.shift()
+    if (next) next()
   }
 }

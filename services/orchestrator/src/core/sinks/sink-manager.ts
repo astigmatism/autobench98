@@ -27,8 +27,8 @@ const noopLogger: LoggerLike = {
  * - Initialize and shutdown sinks
  * - Publish results to all sinks (best-effort; one sink failing should not break others)
  *
- * Logging format convention:
- * - Message strings should be "key=value key=value" to match other subsystems.
+ * Logging format:
+ * - Prefer a single message string in "key=value key=value" format.
  */
 export class SinkManager {
   private readonly sinks: ResultSink[]
@@ -55,7 +55,6 @@ export class SinkManager {
         this.log.info(`kind=sink-init-ok id=${sink.id}`)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        // Keep err as a single token (quoted) since it may contain spaces.
         this.log.error(`kind=sink-init-failed id=${sink.id} err=${JSON.stringify(msg)}`)
       }
     }

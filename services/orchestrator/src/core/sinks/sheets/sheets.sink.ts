@@ -8,10 +8,16 @@ import type {
   RunSummary,
 } from '../result-sink.js'
 
-import { buildSheetsConfigFromEnv, validateSheetsConfigForWrites, type SheetsConfig } from './sheets.config.js'
+import {
+  buildSheetsConfigFromEnv,
+  validateSheetsConfigForWrites,
+  type SheetsConfig,
+  type SheetsAuthStrategy,
+} from './sheets.config.js'
 import { buildEnvelopeFromInputs } from './sheets.envelope.js'
-import { Barrier, Mutex } from './sheets.lock.js'
-import { WorkerPool, healthcheckPool, publishRunInPool } from './sheets.worker-pool.js'
+import type { PublishReceiptWorker } from './sheets.protocol.js'
+
+import { SheetsHost } from '../../sheets/sheets.host.js'
 
 export type SheetsSinkLogger = {
   debug(msg: string, extra?: Record<string, unknown>): void
@@ -28,31 +34,33 @@ const noopLog: SheetsSinkLogger = {
 }
 
 /**
- * SheetsSink (scaffold)
+ * SheetsSink
  *
- * - All Google Sheets I/O must occur in worker threads.
- * - Supports two pools: blocking + background.
- * - Supports a "barrier" mode that drains background work, then runs blocking publishes exclusively.
+ * ResultSink adapter that publishes benchmark results to Google Sheets.
  *
- * Logging format convention:
- * - Prefer message strings in "key=value key=value" format to match other subsystems.
- * - Avoid structured objects in logs unless explicitly needed.
+ * IMPORTANT: This sink does NOT talk to Google directly.
+ * It delegates all work to SheetsHost worker threads.
  */
 export class SheetsSink implements ResultSink {
   public readonly id = 'sheets'
 
   private readonly log: SheetsSinkLogger
   private cfg: SheetsConfig | null = null
+  private readonly host: SheetsHost
 
-  private blockingPool: WorkerPool | null = null
-  private backgroundPool: WorkerPool | null = null
-
-  private readonly barrier = new Barrier()
-  private readonly blockingMutex = new Mutex()
-
-  constructor(opts?: { logger?: SheetsSinkLogger; config?: SheetsConfig }) {
+  constructor(opts?: { logger?: SheetsSinkLogger; config?: SheetsConfig; host?: SheetsHost }) {
     this.log = opts?.logger ?? noopLog
     this.cfg = opts?.config ?? null
+
+    // If no shared host is provided, create a private host (works, but duplicates workers).
+    const cfg = this.cfg ?? buildSheetsConfigFromEnv()
+    this.cfg = cfg
+    this.host =
+      opts?.host ??
+      new SheetsHost({
+        config: cfg,
+        logger: (opts?.logger as any) ?? (noopLog as any),
+      })
   }
 
   getConfig(): SheetsConfig | null {
@@ -68,99 +76,61 @@ export class SheetsSink implements ResultSink {
       return
     }
 
+    const authStrategy: SheetsAuthStrategy = cfg.auth.strategy
+
+    // Validate config for non-dry-run writes.
+    // If invalid:
+    // - strict: fail init
+    // - warmup/lazy: force dry-run (safety) and continue (read ops may still work)
     const v = validateSheetsConfigForWrites(cfg)
     if (!v.ok) {
-      // Safety gate: refuse to start in write mode when required config is missing.
-      // Dry-run still allowed.
-      this.log.error(`kind=sheets-sink-config-invalid-for-writes errorsCount=${v.errors.length}`)
+      this.log.error(
+        `kind=sheets-config-invalid-for-writes strategy=${authStrategy} errorsCount=${v.errors.length}`
+      )
       for (let i = 0; i < v.errors.length; i++) {
-        this.log.error(`kind=sheets-sink-config-error idx=${i} msg=${JSON.stringify(v.errors[i])}`)
+        this.log.error(`kind=sheets-config-error idx=${i} msg=${JSON.stringify(v.errors[i])}`)
       }
 
-      // Keep running, but in dry-run to avoid unsafe/undefined behavior.
+      if (authStrategy === 'strict') {
+        throw new Error('SheetsSink strict mode: invalid config for writes')
+      }
+
+      // Safety fallback: avoid unsafe/undefined writes
       cfg.dryRun = true
-      this.log.warn('kind=sheets-sink-forced-dry-run dryRun=true reason=config-invalid')
+      this.log.warn('kind=sheets-config-forced-dry-run dryRun=true reason=invalid-config-for-writes')
     }
 
-    // Worker entrypoint (compiled .js under NodeNext)
-    const workerUrl = new URL('./worker/sheets.worker.js', import.meta.url)
-
-    this.blockingPool = new WorkerPool({
-      name: 'sheets:blocking',
-      size: cfg.workersBlocking,
-      workerUrl,
-      maxPending: cfg.maxPendingBlocking,
-      timeoutMs: cfg.blockingTimeoutMs,
-    })
-
-    // serializeAll routes background work through blocking pool
-    const bgSize = cfg.lockMode === 'serializeAll' ? 0 : cfg.workersBackground
-    this.backgroundPool = new WorkerPool({
-      name: 'sheets:background',
-      size: bgSize,
-      workerUrl,
-      maxPending: cfg.maxPendingBackground,
-      timeoutMs: cfg.backgroundTimeoutMs,
-    })
-
-    await this.blockingPool.start()
-    await this.backgroundPool.start()
-
-    // Initialize workers with config (including auth).
-    // NOTE: This may include secrets; worker must not log these.
-    await this.initWorkers(cfg)
-
-    this.log.info(
-      [
-        'kind=sheets-sink-initialized',
-        `dryRun=${cfg.dryRun}`,
-        `lockMode=${cfg.lockMode}`,
-        `workersBlocking=${cfg.workersBlocking}`,
-        `workersBackground=${bgSize}`,
-      ].join(' ')
-    )
-  }
-
-  private async initWorkers(cfg: SheetsConfig): Promise<void> {
-    if (!this.blockingPool) throw new Error('Blocking pool not created')
-
-    // SAFETY: each worker thread must receive init/config before it can handle publish requests.
-    await this.blockingPool.broadcast((taskId) => ({ kind: 'init', taskId, config: cfg }))
-
-    if (this.backgroundPool && this.backgroundPool.stats().size > 0) {
-      await this.backgroundPool.broadcast((taskId) => ({ kind: 'init', taskId, config: cfg }))
-    }
+    await this.host.init()
   }
 
   async healthy(): Promise<boolean> {
-    const cfg = this.cfg
-    if (!cfg || !cfg.enabled) return true
-
-    const pool = this.blockingPool
-    if (!pool) return false
+    const cfg = this.cfg ?? buildSheetsConfigFromEnv()
+    this.cfg = cfg
+    if (!cfg.enabled) return true
 
     try {
-      const res = await healthcheckPool(pool)
-      return res.status === 'ok'
+      const snap = await this.host.healthySnapshot()
+      const hb = snap.blocking
+      if (hb.status !== 'ok') return false
+
+      const auth = hb.details?.authWarmup
+      if (cfg.auth.strategy === 'strict') return auth?.status === 'ok'
+      if (cfg.auth.strategy === 'warmup') {
+        if (auth && auth.status === 'error') return false
+        return true
+      }
+      return true
     } catch {
       return false
     }
   }
 
-  /**
-   * Default publish behavior required by ResultSink.
-   *
-   * Use SHEETS_DEFAULT_PUBLISH_MODE to choose blocking vs background.
-   * For explicit workflow barriers, call publishBlocking(...) directly.
-   */
   async publish(run: RunSummary, metrics: MetricMap, artifacts: ArtifactRefs): Promise<PublishReceipt> {
     const cfg = this.cfg ?? buildSheetsConfigFromEnv()
     this.cfg = cfg
 
     const mode: PublishMode = cfg.publish.defaultMode
-    if (mode === 'blocking') {
-      return await this.publishBlocking(run, metrics, artifacts)
-    }
+    if (mode === 'blocking') return await this.publishBlocking(run, metrics, artifacts)
     return await this.publishBackground(run, metrics, artifacts)
   }
 
@@ -178,8 +148,10 @@ export class SheetsSink implements ResultSink {
     metrics: MetricMap,
     artifacts: ArtifactRefs
   ): Promise<PublishReceipt> {
-    const cfg = this.cfg
-    if (!cfg || !cfg.enabled) {
+    const cfg = this.cfg ?? buildSheetsConfigFromEnv()
+    this.cfg = cfg
+
+    if (!cfg.enabled) {
       return {
         sinkId: this.id,
         runId: run.runId,
@@ -189,6 +161,9 @@ export class SheetsSink implements ResultSink {
       }
     }
 
+    // Ensure host is available (idempotent)
+    await this.host.init()
+
     const envelope = buildEnvelopeFromInputs({
       schemaVersion: cfg.schema.version,
       run,
@@ -196,62 +171,24 @@ export class SheetsSink implements ResultSink {
       artifacts,
     })
 
-    const blockingPool = this.blockingPool
-    if (!blockingPool) throw new Error('SheetsSink not initialized (blocking pool missing)')
+    const execMode = mode === 'blocking' ? 'blocking' : 'background'
+    const receipt = await this.host.exec<PublishReceiptWorker>(execMode, (taskId) => ({
+      kind: 'publishRun',
+      taskId,
+      envelope,
+    }))
 
-    const backgroundPool = this.backgroundPool
-
-    const doPublish = async () => {
-      const receipt = await publishRunInPool(
-        // In serializeAll, background pool is size 0 -> always use blocking pool
-        mode === 'background' && cfg.lockMode !== 'serializeAll' && backgroundPool ? backgroundPool : blockingPool,
-        envelope
-      )
-
-      return {
-        sinkId: this.id,
-        runId: run.runId,
-        publishedAt: receipt.publishedAt,
-        ok: receipt.ok,
-        details: receipt.details,
-        warnings: receipt.warnings,
-      } satisfies PublishReceipt
-    }
-
-    if (cfg.lockMode === 'none') {
-      return await doPublish()
-    }
-
-    if (cfg.lockMode === 'serializeAll') {
-      // All tasks run on blocking pool, but still allow parallelism if workersBlocking > 1.
-      return await this.blockingMutex.runExclusive(doPublish)
-    }
-
-    // exclusiveBarrier:
-    // - blocking publishes wait for background to drain, then run exclusively
-    // - background publishes wait while barrier active
-    if (mode === 'background') {
-      await this.barrier.waitIfActive()
-      return await doPublish()
-    }
-
-    // blocking
-    return await this.blockingMutex.runExclusive(async () => {
-      // ensure no background work is running before barrier activates
-      if (backgroundPool) await backgroundPool.drain()
-      this.barrier.activate()
-      try {
-        return await doPublish()
-      } finally {
-        this.barrier.deactivate()
-      }
-    })
+    return {
+      sinkId: this.id,
+      runId: run.runId,
+      publishedAt: receipt.publishedAt,
+      ok: receipt.ok,
+      details: receipt.details,
+      warnings: receipt.warnings,
+    } satisfies PublishReceipt
   }
 
   async shutdown(): Promise<void> {
-    if (this.backgroundPool) await this.backgroundPool.close()
-    if (this.blockingPool) await this.blockingPool.close()
-    this.backgroundPool = null
-    this.blockingPool = null
+    await this.host.shutdown()
   }
 }

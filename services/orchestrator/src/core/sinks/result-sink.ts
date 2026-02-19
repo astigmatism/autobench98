@@ -1,9 +1,6 @@
+// services/orchestrator/src/core/sinks/result-sink.ts
 /**
  * Result sink interface (scaffold).
- *
- * Source of truth:
- * - Refactor plan describes a ResultSink interface and lists Google Sheets as a primary sink.
- *   (See: "16.4) Pluggable Result Sinks (Google Sheets as primary)")
  *
  * NOTE: Domain types (RunSummary/MetricMap/ArtifactRefs) are deliberately minimal here.
  * Replace these with your orchestrator's real domain types once available.

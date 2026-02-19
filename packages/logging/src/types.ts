@@ -18,8 +18,6 @@ export enum LogChannel {
     atlona_controller = 'atlona-controller',
     cf_imager = 'cf-imager',
     frontpanel = 'frontpanel',
-
-    // ✅ Google Sheets integration (result sink)
     google_sheets = 'google-sheets',
 }
 

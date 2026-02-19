@@ -1,6 +1,24 @@
+// services/orchestrator/src/core/sinks/sheets/sheets.config.ts
 import type { PublishMode } from '../result-sink.js'
 
 export type SheetsLockMode = 'exclusiveBarrier' | 'none' | 'serializeAll'
+
+/**
+ * When to authenticate / preflight against Google.
+ *
+ * - lazy:     do not preflight at init; first Sheets operation triggers auth/network.
+ * - warmup:   preflight in the background at init (does not block init).
+ * - strict:   preflight during init and FAIL init if preflight fails.
+ */
+export type SheetsAuthStrategy = 'lazy' | 'warmup' | 'strict'
+
+export type SheetsCacheConfig = {
+  enabled: boolean
+  maxEntries: number
+  sheetMetaTtlMs: number
+  keyMapTtlMs: number
+  rangeTtlMs: number
+}
 
 export type SheetsConfig = {
   enabled: boolean
@@ -9,6 +27,10 @@ export type SheetsConfig = {
   spreadsheetId: string | null
   serviceAccountEmail: string | null
   privateKey: string | null
+
+  auth: {
+    strategy: SheetsAuthStrategy
+  }
 
   workersBlocking: number
   workersBackground: number
@@ -24,6 +46,8 @@ export type SheetsConfig = {
     baseDelayMs: number
     maxDelayMs: number
   }
+
+  cache: SheetsCacheConfig
 
   schema: {
     version: number
@@ -69,6 +93,11 @@ function parseLockMode(v: string | undefined, def: SheetsLockMode): SheetsLockMo
   return def
 }
 
+function parseAuthStrategy(v: string | undefined, def: SheetsAuthStrategy): SheetsAuthStrategy {
+  if (v === 'lazy' || v === 'warmup' || v === 'strict') return v
+  return def
+}
+
 /**
  * Build SheetsConfig from environment.
  *
@@ -79,9 +108,25 @@ export function buildSheetsConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const enabled = parseBool(env.SHEETS_ENABLED, false)
   const dryRun = parseBool(env.SHEETS_DRY_RUN, true)
 
-  const spreadsheetId = (env.GOOGLE_SHEETS_SPREADSHEET_ID ?? env.GOOGLE_SHEETS_DOC_ID ?? '').trim() || null
-  const serviceAccountEmail = (env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? '').trim() || null
-  const privateKey = (env.GOOGLE_PRIVATE_KEY ?? '').trim() || null
+  // Accept either naming convention:
+  // - GOOGLE_SHEETS_SPREADSHEET_ID (Google's API term: spreadsheetId)
+  // - GOOGLE_SHEETS_DOC_ID (legacy/"document id" alias used in some codebases)
+  // - SHEETS_SPREADSHEET_ID / SHEETS_DOCUMENT_ID (alternate prefix used in some repos)
+  const spreadsheetId =
+    (
+      env.GOOGLE_SHEETS_SPREADSHEET_ID ??
+      env.GOOGLE_SHEETS_DOC_ID ??
+      env.SHEETS_SPREADSHEET_ID ??
+      env.SHEETS_DOCUMENT_ID ??
+      ''
+    ).trim() || null
+
+  const serviceAccountEmail =
+    (env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? env.SHEETS_SERVICE_ACCOUNT_EMAIL ?? '').trim() || null
+
+  const privateKey = (env.GOOGLE_PRIVATE_KEY ?? env.SHEETS_PRIVATE_KEY ?? '').trim() || null
+
+  const authStrategy = parseAuthStrategy(env.SHEETS_AUTH_STRATEGY, 'lazy')
 
   const workersBlocking = clampInt(parseIntSafe(env.SHEETS_WORKERS_BLOCKING, 1), 1, 32)
   const workersBackground = clampInt(parseIntSafe(env.SHEETS_WORKERS_BACKGROUND, 4), 0, 64)
@@ -97,6 +142,13 @@ export function buildSheetsConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const retryBaseDelayMs = clampInt(parseIntSafe(env.SHEETS_RETRY_BASE_DELAY_MS, 1_000), 0, 600_000)
   const retryMaxDelayMs = clampInt(parseIntSafe(env.SHEETS_RETRY_MAX_DELAY_MS, 30_000), 0, 3_600_000)
 
+  // Caching (main-thread; safe defaults)
+  const cacheEnabled = parseBool(env.SHEETS_CACHE_ENABLED, true)
+  const cacheMaxEntries = clampInt(parseIntSafe(env.SHEETS_CACHE_MAX_ENTRIES, 500), 0, 100_000)
+  const cacheSheetMetaTtlMs = clampInt(parseIntSafe(env.SHEETS_CACHE_SHEET_META_TTL_MS, 300_000), 0, 3_600_000)
+  const cacheKeyMapTtlMs = clampInt(parseIntSafe(env.SHEETS_CACHE_KEYMAP_TTL_MS, 3_600_000), 0, 86_400_000)
+  const cacheRangeTtlMs = clampInt(parseIntSafe(env.SHEETS_CACHE_RANGE_TTL_MS, 30_000), 0, 3_600_000)
+
   const schemaVersion = clampInt(parseIntSafe(env.SHEETS_SCHEMA_VERSION, 1), 1, 1_000)
   const tabRuns = (env.SHEETS_TAB_RUNS ?? 'Runs').trim() || 'Runs'
   const tabMetrics = (env.SHEETS_TAB_METRICS ?? 'Metrics').trim() || 'Metrics'
@@ -111,6 +163,9 @@ export function buildSheetsConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
     spreadsheetId,
     serviceAccountEmail,
     privateKey,
+    auth: {
+      strategy: authStrategy,
+    },
     workersBlocking,
     workersBackground,
     lockMode,
@@ -122,6 +177,13 @@ export function buildSheetsConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
       maxAttempts: retryMaxAttempts,
       baseDelayMs: retryBaseDelayMs,
       maxDelayMs: retryMaxDelayMs,
+    },
+    cache: {
+      enabled: cacheEnabled,
+      maxEntries: cacheMaxEntries,
+      sheetMetaTtlMs: cacheSheetMetaTtlMs,
+      keyMapTtlMs: cacheKeyMapTtlMs,
+      rangeTtlMs: cacheRangeTtlMs,
     },
     schema: {
       version: schemaVersion,
@@ -148,9 +210,19 @@ export function validateSheetsConfigForWrites(cfg: SheetsConfig): SheetsConfigVa
   if (!cfg.enabled) return { ok: true } // disabled is always "valid" (no-op)
   if (cfg.dryRun) return { ok: true } // dry-run avoids writes
 
-  if (!cfg.spreadsheetId) errors.push('GOOGLE_SHEETS_SPREADSHEET_ID is required when SHEETS_ENABLED=true and SHEETS_DRY_RUN=false')
-  if (!cfg.serviceAccountEmail) errors.push('GOOGLE_SERVICE_ACCOUNT_EMAIL is required when SHEETS_ENABLED=true and SHEETS_DRY_RUN=false')
-  if (!cfg.privateKey) errors.push('GOOGLE_PRIVATE_KEY is required when SHEETS_ENABLED=true and SHEETS_DRY_RUN=false')
+  if (!cfg.spreadsheetId) {
+    errors.push(
+      'GOOGLE_SHEETS_SPREADSHEET_ID (or GOOGLE_SHEETS_DOC_ID) is required when SHEETS_ENABLED=true and SHEETS_DRY_RUN=false'
+    )
+  }
+  if (!cfg.serviceAccountEmail) {
+    errors.push(
+      'GOOGLE_SERVICE_ACCOUNT_EMAIL is required when SHEETS_ENABLED=true and SHEETS_DRY_RUN=false'
+    )
+  }
+  if (!cfg.privateKey) {
+    errors.push('GOOGLE_PRIVATE_KEY is required when SHEETS_ENABLED=true and SHEETS_DRY_RUN=false')
+  }
 
   // lock mode sanity
   if (cfg.lockMode === 'serializeAll' && cfg.workersBlocking < 1) {

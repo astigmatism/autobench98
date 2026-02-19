@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/sinks/sheets/worker/sheets.errors.ts
 export type SheetsWorkerErrorShape = {
   message: string
   code?: string

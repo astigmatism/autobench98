@@ -1,3 +1,4 @@
+// services/orchestrator/src/core/sinks/sheets/sheets.worker-pool.ts
 import { Worker } from 'node:worker_threads'
 import { randomUUID } from 'node:crypto'
 
@@ -7,6 +8,7 @@ import type {
   TaskId,
   WorkerHealth,
   PublishReceiptWorker,
+  AuthWarmupStatus,
 } from './sheets.protocol.js'
 
 export type WorkerPoolStats = {
@@ -99,7 +101,8 @@ export class WorkerPool {
     slot.worker = worker
 
     worker.on('message', (msg: SheetsWorkerResponse) => {
-      // Worker log messages are emitted with kind='log' and no taskId
+      // Worker log messages are emitted with kind='log' and no taskId.
+      // (Scaffold: ignored here; integrate with orchestrator logging later.)
       if (msg && (msg as any).kind === 'log') return
 
       const taskId = (msg as any).taskId as string | undefined
@@ -355,6 +358,10 @@ export type SheetsPools = {
 
 export async function healthcheckPool(pool: WorkerPool): Promise<WorkerHealth> {
   return await pool.exec<WorkerHealth>((taskId) => ({ kind: 'healthcheck', taskId }))
+}
+
+export async function authWarmupPool(pool: WorkerPool): Promise<AuthWarmupStatus> {
+  return await pool.exec<AuthWarmupStatus>((taskId) => ({ kind: 'authWarmup', taskId }))
 }
 
 export async function publishRunInPool(
