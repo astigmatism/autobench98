@@ -90,7 +90,6 @@ export function stopRealtime(): void {
     wsInstance = null
 }
 
-// NEW: Allow panes to access the existing WS client.
 export function getRealtimeClient(): WSClient | null {
     return wsInstance
 }

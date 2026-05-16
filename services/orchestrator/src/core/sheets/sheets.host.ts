@@ -1,6 +1,7 @@
 // services/orchestrator/src/core/sheets/sheets.host.ts
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
+import { existsSync } from 'node:fs'
 
 import type { ChannelLogger } from '@autobench98/logging'
 
@@ -38,6 +39,7 @@ export class SheetsHost {
   private readonly cfg: SheetsConfig
   private readonly log: ChannelLogger
   private readonly workerUrl: URL
+  private readonly workerExecArgv: string[] | undefined
 
   private blockingPool: WorkerPool | null = null
   private backgroundPool: WorkerPool | null = null
@@ -52,17 +54,61 @@ export class SheetsHost {
     this.cfg = opts.config
     this.log = opts.logger
 
-    this.workerUrl = opts.workerUrl ?? SheetsHost.defaultWorkerUrl()
+    const resolved = SheetsHost.resolveWorkerTarget()
+    this.workerUrl = opts.workerUrl ?? resolved.workerUrl
+    this.workerExecArgv = resolved.execArgv
   }
 
-  static defaultWorkerUrl(): URL {
-    // Resolve worker module relative to this file at runtime
+  /**
+   * Determine whether we should launch a TS worker (dev/tsx) or JS worker (built dist).
+   *
+   * Rule (verification-first, filesystem-backed):
+   * - Prefer the .js worker if it exists next to this file at runtime (dist build).
+   * - Otherwise, fall back to the .ts worker (dev).
+   *
+   * If using .ts, we must provide execArgv that enables TS execution in worker threads.
+   */
+  static resolveWorkerTarget(): { workerUrl: URL; execArgv?: string[] } {
     const __filename = fileURLToPath(import.meta.url)
     const __dirname = path.dirname(__filename)
 
-    // core/sheets/sheets.host.ts -> core/sinks/sheets/worker/sheets.worker.js
-    const workerPath = path.resolve(__dirname, '../sinks/sheets/worker/sheets.worker.js')
-    return pathToFileURL(workerPath)
+    const jsPath = path.resolve(__dirname, '../sinks/sheets/worker/sheets.worker.js')
+    const tsPath = path.resolve(__dirname, '../sinks/sheets/worker/sheets.worker.ts')
+
+    if (existsSync(jsPath)) {
+      return { workerUrl: pathToFileURL(jsPath) }
+    }
+
+    // Dev fallback: TS worker
+    const execArgv = SheetsHost.computeTsWorkerExecArgv()
+    return { workerUrl: pathToFileURL(tsPath), execArgv }
+  }
+
+  /**
+   * Compute execArgv for TS workers.
+   *
+   * Preference order:
+   * 1) If the current process already has a tsx loader configured in execArgv, reuse it.
+   * 2) Otherwise, default to `['--import', 'tsx']` (Node ESM loader hook).
+   */
+  static computeTsWorkerExecArgv(): string[] {
+    const argv = Array.isArray(process.execArgv) ? process.execArgv.slice() : []
+
+    // Detect tsx loader usage in the parent process.
+    // Examples we want to preserve:
+    // - ["--import", "tsx"]
+    // - ["--loader", "tsx"]
+    const hasImportTsx =
+      argv.some((a) => a === '--import') && argv.some((a) => a.toLowerCase() === 'tsx')
+    const hasLoaderTsx =
+      argv.some((a) => a === '--loader') && argv.some((a) => a.toLowerCase() === 'tsx')
+
+    if (hasImportTsx || hasLoaderTsx) {
+      return argv
+    }
+
+    // Safe default for TS workers (tsx is in devDependencies of services/orchestrator).
+    return ['--import', 'tsx']
   }
 
   getConfig(): SheetsConfig {
@@ -105,6 +151,7 @@ export class SheetsHost {
         workerUrl: this.workerUrl,
         maxPending: this.cfg.maxPendingBlocking,
         timeoutMs: this.cfg.blockingTimeoutMs,
+        execArgv: this.workerExecArgv,
       })
 
       const background = new WorkerPool({
@@ -113,6 +160,7 @@ export class SheetsHost {
         workerUrl: this.workerUrl,
         maxPending: this.cfg.maxPendingBackground,
         timeoutMs: this.cfg.backgroundTimeoutMs,
+        execArgv: this.workerExecArgv,
       })
 
       await blocking.start()

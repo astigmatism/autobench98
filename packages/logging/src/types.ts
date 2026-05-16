@@ -19,6 +19,9 @@ export enum LogChannel {
     cf_imager = 'cf-imager',
     frontpanel = 'frontpanel',
     google_sheets = 'google-sheets',
+
+    // ✅ Tips & Information panel
+    tips = 'tips',
 }
 
 export type ChannelColor =

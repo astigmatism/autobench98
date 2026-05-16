@@ -12,6 +12,7 @@ import {
     type ClientLog
 } from '@autobench98/logging'
 import { getSnapshot, stateEvents } from '../core/state.js'
+import type { TipsPanelCurrent } from '../core/state.js'
 import {
     attachClientBuffer,
     getHistory as getLogHistory,
@@ -21,6 +22,24 @@ import type { AtlonaControllerService } from '../devices/atlona-controller/Atlon
 import type { CfImagerService } from '../devices/cf-imager/CfImagerService.js'
 import type { ClientKeyboardEvent } from '../devices/ps2-keyboard/types.js'
 import type { ClientMouseCommand, MouseButton } from '../devices/ps2-mouse/types.js'
+
+/**
+ * Tips-only per-client session hook.
+ *
+ * IMPORTANT:
+ * - This is intentionally tips-scoped and does NOT affect global state.snapshot/state.patch broadcast.
+ * - tipsPanelService is expected to be decorated by the tipsPanel plugin.
+ *
+ * SAFETY:
+ * - This type MUST match the augmentation in plugins/tipsPanel.ts exactly.
+ */
+declare module 'fastify' {
+    interface FastifyInstance {
+        tipsPanelService?: {
+            nextForClient: (clientId: string) => Promise<TipsPanelCurrent | null>
+        }
+    }
+}
 
 // ---------------------------
 // Log filtering configuration
@@ -39,9 +58,9 @@ const CHANNEL_ALLOWLIST = envAllow
     ? new Set(
           envAllow
               .split(',')
-              .map(s => s.trim().toLowerCase())
+              .map((s) => s.trim().toLowerCase())
               .filter(Boolean)
-              .map(s => s.split(':')[0]) // allow "device:serial" by matching top-level token
+              .map((s) => s.split(':')[0]) // allow "device:serial" by matching top-level token
       )
     : null // null => no channel filter (allow all channels, subject to level)
 
@@ -136,6 +155,52 @@ function parseMouseButtonAction(v: unknown): 'down' | 'up' | 'click' | null {
     return null
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Tips-only client recognition (server-side, in-memory)                     */
+/* -------------------------------------------------------------------------- */
+
+type TipsClientSession = {
+    clientId: string
+    socket: WSSocket
+    createdAt: number
+    lastSeenAt: number
+    totalRequests: number
+}
+
+function safeClientId(v: unknown): string {
+    if (typeof v !== 'string') return ''
+    const s = v.trim()
+    if (!s) return ''
+    // fence: keep ids bounded; avoid huge memory keys or log spam
+    if (s.length > 128) return ''
+    return s
+}
+
+// Inactivity threshold: if no tips traffic from a clientId for this duration, evict.
+const TIPS_CLIENT_TTL_MS = Math.max(
+    5_000,
+    Number.isFinite(Number(process.env.TIPS_CLIENT_TTL_MS))
+        ? Math.trunc(Number(process.env.TIPS_CLIENT_TTL_MS))
+        : 60_000
+)
+
+// Sweep cadence: how often we evict idle tips clients.
+const TIPS_CLIENT_SWEEP_MS = Math.max(
+    2_000,
+    Number.isFinite(Number(process.env.TIPS_CLIENT_SWEEP_MS))
+        ? Math.trunc(Number(process.env.TIPS_CLIENT_SWEEP_MS))
+        : 10_000
+)
+
+// NEW (tips safety): bound outbound tips payload size (bytes, approx via string length).
+// Additive only; if unset, defaults to 64 KiB.
+const TIPS_MAX_TIP_PAYLOAD_BYTES = Math.max(
+    4_096,
+    Number.isFinite(Number(process.env.TIPS_MAX_TIP_PAYLOAD_BYTES))
+        ? Math.trunc(Number(process.env.TIPS_MAX_TIP_PAYLOAD_BYTES))
+        : 65_536
+)
+
 export default fp(async function wsPlugin(app: FastifyInstance) {
     /**
      * CRITICAL: keep ONE shared client log buffer across the app.
@@ -161,6 +226,12 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
     const { channel } = createLogger('orchestrator:ws', clientBuf)
     const logWs = channel(LogChannel.websocket)
 
+    // Prefer tips channel if it exists; otherwise fall back to websocket logger.
+    const logTips =
+        (LogChannel as any)?.tips !== undefined
+            ? (channel((LogChannel as any).tips) as any)
+            : logWs
+
     // Make the buffer available to the adapter used by this plugin
     attachClientBuffer(clientBuf)
 
@@ -172,6 +243,33 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
     })
 
     const sockets = new Set<WSSocket>()
+
+    // Tips-only session registry (clientId -> session)
+    const tipsClients = new Map<string, TipsClientSession>()
+
+    const evictTipsClient = (clientId: string, reason: string) => {
+        const s = tipsClients.get(clientId)
+        if (!s) return
+        tipsClients.delete(clientId)
+        logTips.info(
+            `tips kind=tips-client-evicted clientId=${clientId} reason=${reason} ageMs=${Date.now() - s.createdAt} idleMs=${Date.now() - s.lastSeenAt}`
+        )
+    }
+
+    const sweepTimer = setInterval(() => {
+        const now = Date.now()
+        let evicted = 0
+        for (const [id, sess] of tipsClients.entries()) {
+            const idle = now - sess.lastSeenAt
+            if (idle >= TIPS_CLIENT_TTL_MS) {
+                tipsClients.delete(id)
+                evicted += 1
+            }
+        }
+        if (evicted > 0) {
+            logTips.info(`tips kind=tips-client-sweep evicted=${evicted} ttlMs=${TIPS_CLIENT_TTL_MS}`)
+        }
+    }, TIPS_CLIENT_SWEEP_MS)
 
     // Live logs -> filter/transform -> broadcast
     const unsubscribeLogs = onLogSubscribe((entry: ClientLog) => {
@@ -613,7 +711,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     code: code || undefined,
                     key: key || undefined,
                     requestedBy,
-                    overrides: payload.overrides ?? undefined,
+                    overrides: payload.overrides ?? undefined
                 } as any
 
                 kb.enqueueKeyEvent(evt)
@@ -621,8 +719,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }
 
             if (kind === 'power') {
-                // DEPRECATED: keyboard-side power is now derived from host power sense (frontPanel/AppState).
-                // Keep handler for backwards compatibility but ignore the command to prevent divergence.
                 const state =
                     typeof payload.state === 'string' ? payload.state.trim().toLowerCase() : ''
                 if (state !== 'on' && state !== 'off') {
@@ -676,7 +772,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 : 'ws-client'
 
         try {
-            // Compatibility: older shape => { kind: 'mouse.button', action: 'down'|'up'|'click'|'press'|'release', button: ... }
             if (kind === 'mouse.button') {
                 const button = parseMouseButton(payload.button)
                 const action = parseMouseButtonAction(payload.action)
@@ -723,7 +818,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 return
             }
 
-            // Absolute move
             if (kind === 'mouse.move.absolute') {
                 const xNormRaw = payload.xNorm ?? payload.x
                 const yNormRaw = payload.yNorm ?? payload.y
@@ -735,13 +829,12 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     kind: 'mouse.move.absolute',
                     xNorm,
                     yNorm,
-                    requestedBy,
+                    requestedBy
                 }
                 mouse.handleClientCommand(cmd)
                 return
             }
 
-            // Relative move (NO multiplier/gain here; that’s config)
             if (kind === 'mouse.move.relative') {
                 const dxRaw = payload.dx
                 const dyRaw = payload.dy
@@ -753,13 +846,12 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     kind: 'mouse.move.relative',
                     dx,
                     dy,
-                    requestedBy,
+                    requestedBy
                 }
                 mouse.handleClientCommand(cmd)
                 return
             }
 
-            // Buttons
             if (kind === 'mouse.button.down' || kind === 'mouse.button.up') {
                 const button = parseMouseButton(payload.button)
                 if (!button) {
@@ -785,21 +877,18 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
 
                 const holdMsRaw = payload.holdMs
                 const holdMs =
-                    isFiniteNumber(holdMsRaw) && holdMsRaw >= 0
-                        ? holdMsRaw
-                        : undefined
+                    isFiniteNumber(holdMsRaw) && holdMsRaw >= 0 ? holdMsRaw : undefined
 
                 const cmd: ClientMouseCommand = {
                     kind: 'mouse.button.click',
                     button,
                     requestedBy,
-                    holdMs,
+                    holdMs
                 }
                 mouse.handleClientCommand(cmd)
                 return
             }
 
-            // Wheel (vertical only) — spec uses dy
             if (kind === 'mouse.wheel') {
                 const dyRaw = payload.dy ?? payload.delta
                 const dy = isFiniteNumber(dyRaw) ? dyRaw : 0
@@ -807,26 +896,24 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const cmd: ClientMouseCommand = {
                     kind: 'mouse.wheel',
                     dy,
-                    requestedBy,
+                    requestedBy
                 }
                 mouse.handleClientCommand(cmd)
                 return
             }
 
-            // Config (NO requestedBy in the type)
             if (kind === 'mouse.config') {
                 const cmd: ClientMouseCommand = {
                     kind: 'mouse.config',
                     mode: payload.mode,
                     gain: payload.gain,
                     accel: payload.accel,
-                    absoluteGrid: payload.absoluteGrid,
+                    absoluteGrid: payload.absoluteGrid
                 }
                 mouse.handleClientCommand(cmd)
                 return
             }
 
-            // Cancel all
             if (kind === 'mouse.cancelAll') {
                 const reason =
                     typeof payload.reason === 'string' && payload.reason.trim()
@@ -836,7 +923,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 const cmd: ClientMouseCommand = {
                     kind: 'mouse.cancelAll',
                     reason,
-                    requestedBy,
+                    requestedBy
                 }
                 mouse.handleClientCommand(cmd)
                 return
@@ -881,10 +968,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             }
             if (kind === 'powerPress') {
                 const durationMs = payload.durationMs
-                const ms =
-                    isFiniteNumber(durationMs)
-                        ? durationMs
-                        : undefined
+                const ms = isFiniteNumber(durationMs) ? durationMs : undefined
                 const h = svc.powerPress?.(ms, requestedBy)
                 h?.done?.catch?.(() => {})
                 return
@@ -895,7 +979,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     const h = svc.resetHold(requestedBy)
                     h?.done?.catch?.(() => {})
                 } else if (typeof svc.resetPress === 'function') {
-                    // fallback if service doesn't implement resetHold
                     const h = svc.resetPress(requestedBy)
                     h?.done?.catch?.(() => {})
                 } else {
@@ -909,7 +992,6 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     const h = svc.resetRelease(requestedBy)
                     h?.done?.catch?.(() => {})
                 } else {
-                    // No safe fallback here; release should exist if you support holds.
                     logWs.warn('frontpanel.command resetRelease: service missing resetRelease')
                 }
                 return
@@ -936,6 +1018,156 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                 kind,
                 err: (e as Error).message
             })
+        }
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Tips WS handlers                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    // NEW: serialize + size-fence so tips failures are observable (not silent).
+    function trySerializeForSend(obj: any): { ok: true; json: string; bytes: number } | { ok: false; error: string } {
+        try {
+            const json = JSON.stringify(obj)
+            // Approx bytes (UTF-16 in JS), but good enough as a conservative fence.
+            const bytes = typeof json === 'string' ? json.length : 0
+            return { ok: true, json, bytes }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            return { ok: false, error: msg }
+        }
+    }
+
+    function sendJson(socket: WSSocket, obj: any) {
+        try {
+            if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(obj))
+        } catch {
+            // ignore
+        }
+    }
+
+    function ensureTipsClient(socket: WSSocket, clientIdRaw: unknown): TipsClientSession | null {
+        const clientId = safeClientId(clientIdRaw)
+        if (!clientId) return null
+
+        const now = Date.now()
+        const existing = tipsClients.get(clientId)
+        if (existing) {
+            // If the same clientId reconnects on a new socket, rebind it.
+            existing.socket = socket
+            existing.lastSeenAt = now
+            return existing
+        }
+
+        const sess: TipsClientSession = {
+            clientId,
+            socket,
+            createdAt: now,
+            lastSeenAt: now,
+            totalRequests: 0
+        }
+        tipsClients.set(clientId, sess)
+
+        logTips.info(`tips kind=tips-client-registered clientId=${clientId} ttlMs=${TIPS_CLIENT_TTL_MS}`)
+        return sess
+    }
+
+    async function handleTipsHello(socket: WSSocket, msg: any) {
+        const clientId = msg?.payload?.clientId
+        const sess = ensureTipsClient(socket, clientId)
+        if (!sess) {
+            sendJson(socket, {
+                type: 'tips.error',
+                payload: { error: 'invalid clientId' }
+            })
+            logTips.warn('tips kind=tips-client-hello-invalid reason=bad-clientId')
+            return
+        }
+
+        sendJson(socket, {
+            type: 'tips.ack',
+            payload: { ok: true, clientId: sess.clientId }
+        })
+    }
+
+    async function handleTipsNext(socket: WSSocket, msg: any) {
+        const clientId = msg?.payload?.clientId
+        const sess = ensureTipsClient(socket, clientId)
+        if (!sess) {
+            sendJson(socket, {
+                type: 'tips.error',
+                payload: { error: 'invalid clientId' }
+            })
+            logTips.warn('tips kind=tips-next-invalid reason=bad-clientId')
+            return
+        }
+
+        sess.lastSeenAt = Date.now()
+        sess.totalRequests += 1
+
+        const svc = (app as any)?.tipsPanelService
+        if (!svc || typeof svc.nextForClient !== 'function') {
+            sendJson(socket, {
+                type: 'tips.error',
+                payload: { error: 'tips service not available' }
+            })
+            logTips.error(
+                `tips kind=tips-next-failed clientId=${sess.clientId} reason=service-missing`
+            )
+            return
+        }
+
+        try {
+            const tip = await svc.nextForClient(sess.clientId)
+
+            // Build message and ensure it is serializable + bounded.
+            const msgOut = {
+                type: 'tips.tip',
+                payload: { clientId: sess.clientId, tip }
+            }
+
+            const ser = trySerializeForSend(msgOut)
+            if (!ser.ok) {
+                const errMsg = `tips payload not serializable: ${ser.error}`
+                sendJson(socket, {
+                    type: 'tips.error',
+                    payload: { clientId: sess.clientId, error: errMsg }
+                })
+                logTips.error(`tips kind=tips-next-failed clientId=${sess.clientId} error=${errMsg}`)
+                return
+            }
+
+            if (ser.bytes > TIPS_MAX_TIP_PAYLOAD_BYTES) {
+                const errMsg = `tips payload too large bytes=${ser.bytes} maxBytes=${TIPS_MAX_TIP_PAYLOAD_BYTES}`
+                sendJson(socket, {
+                    type: 'tips.error',
+                    payload: { clientId: sess.clientId, error: errMsg }
+                })
+                logTips.error(
+                    `tips kind=tips-next-failed clientId=${sess.clientId} error=${errMsg}`
+                )
+                return
+            }
+
+            // Safe send (already serialized once).
+            try {
+                if (socket.readyState === socket.OPEN) socket.send(ser.json)
+            } catch {
+                // keep behavior consistent with prior sendJson (best-effort)
+            }
+
+            logTips.debug(
+                `tips kind=tips-next-ok clientId=${sess.clientId} req=${sess.totalRequests} bytes=${ser.bytes}`
+            )
+        } catch (e) {
+            const msgErr = e instanceof Error ? e.message : String(e)
+            sendJson(socket, {
+                type: 'tips.error',
+                payload: { clientId: sess.clientId, error: msgErr }
+            })
+            logTips.error(
+                `tips kind=tips-next-failed clientId=${sess.clientId} error=${msgErr}`
+            )
         }
     }
 
@@ -1073,6 +1305,16 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     return
                 }
 
+                // Tips-only messages (client recognition + next tip request)
+                if (msg?.type === 'tips.hello') {
+                    void handleTipsHello(socket, msg)
+                    return
+                }
+                if (msg?.type === 'tips.next') {
+                    void handleTipsNext(socket, msg)
+                    return
+                }
+
                 if (msg?.type === 'atlona.command') {
                     void handleAtlonaCommand(msg)
                     return
@@ -1092,6 +1334,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
                     void handlePs2MouseCommand(msg)
                     return
                 }
+
                 // Front panel commands
                 if (msg?.type === 'frontpanel.command') {
                     void handleFrontPanelCommand(msg)
@@ -1105,12 +1348,26 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
         socket.on('close', () => {
             sockets.delete(socket)
             stopSnapshotTimer()
+
+            // Tips cleanup: evict any clientIds bound to this socket
+            for (const [id, sess] of tipsClients.entries()) {
+                if (sess.socket === socket) {
+                    evictTipsClient(id, 'socket-closed')
+                }
+            }
+
             logWs.info('client disconnected')
         })
 
         socket.on('error', () => {
             sockets.delete(socket)
             stopSnapshotTimer()
+
+            for (const [id, sess] of tipsClients.entries()) {
+                if (sess.socket === socket) {
+                    evictTipsClient(id, 'socket-error')
+                }
+            }
         })
     })
 
@@ -1134,20 +1391,14 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
     }
 
     const onPatch = (evt: { from: number; to: number; patch: unknown[] }) => {
-        const hasPowerMeter = Array.isArray(evt.patch)
+        // NOTE: intentionally computed for potential future routing/optimization;
+        // keep explicit "unused" marker to avoid lint/build failures.
+        const _hasPowerMeter = Array.isArray(evt.patch)
             ? (evt.patch as any[]).some(
                   (op: any) => typeof op?.path === 'string' && op.path.startsWith('/powerMeter')
               )
             : false
-
-        // too much noise
-        /*
-        logWs.debug('broadcasting state.patch', {
-            from: evt.from,
-            to: evt.to,
-            hasPowerMeter
-        })
-        */
+        void _hasPowerMeter
 
         const payload = JSON.stringify({
             type: 'state.patch',
@@ -1170,6 +1421,10 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
     stateEvents.on('patch', onPatch)
 
     app.addHook('onClose', (_app, done) => {
+        try {
+            clearInterval(sweepTimer)
+        } catch {}
+
         stateEvents.off('snapshot', onSnapshot)
         stateEvents.off('patch', onPatch)
         for (const ws of sockets) {
@@ -1178,6 +1433,7 @@ export default fp(async function wsPlugin(app: FastifyInstance) {
             } catch {}
         }
         sockets.clear()
+        tipsClients.clear()
         try {
             unsubscribeLogs()
         } catch {}

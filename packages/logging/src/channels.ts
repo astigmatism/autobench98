@@ -38,6 +38,9 @@ export const CHANNELS: Record<LogChannel, { emoji: string, color: ChannelColor }
 
     // ✅ Google Sheets integration (result sink) — stands out in orange
     [LogChannel.google_sheets]:   { emoji: '📊', color: 'orange' },
+
+    // ✅ Tips & Information panel
+    [LogChannel.tips]:            { emoji: '💡', color: 'yellow' },
 }
 
 export const ANSI: Record<ChannelColor, string> = {
@@ -77,4 +80,7 @@ export const CUSTOM_LEVELS: Record<LogChannel, number> = {
 
     // ✅ Google Sheets integration
     [LogChannel.google_sheets]:   30,
+
+    // ✅ Tips & Information panel
+    [LogChannel.tips]:            30,
 }

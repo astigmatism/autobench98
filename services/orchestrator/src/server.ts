@@ -15,13 +15,13 @@ import {
  *   3) .env.local
  * Later files override earlier ones.
  */
-(function loadEnv() {
+;(function loadEnv() {
     const cwd = process.cwd()
     const env = String(process.env.NODE_ENV || 'development')
     const files = [
         path.resolve(cwd, '.env'),
         path.resolve(cwd, `.env.${env}`),
-        path.resolve(cwd, '.env.local')
+        path.resolve(cwd, '.env.local'),
     ]
 
     for (const file of files) {
@@ -38,12 +38,14 @@ function parseIntEnv(name: string): number | undefined {
     const n = Number(v)
     return Number.isFinite(n) ? n : undefined
 }
+
 function unescapeLineEnding(s: string | undefined): string | undefined {
     if (!s) return undefined
     if (s === '\\n') return '\n'
     if (s === '\\r\\n') return '\r\n'
     return s
 }
+
 function summarizeSerialEnv() {
     let matchersCount: number | null = null
     let matchersError: string | null = null
@@ -73,7 +75,15 @@ function summarizeSerialEnv() {
         logPrefix: process.env.SERIAL_LOG_PREFIX ?? 'serial',
         matchersSource: raw ? 'env(JSON)' : 'code(default)',
         matchersCount,
-        matchersError
+        matchersError,
+    }
+}
+
+function jsonOneLine(value: unknown): string {
+    try {
+        return JSON.stringify(value)
+    } catch {
+        return '"unserializable"'
     }
 }
 
@@ -109,19 +119,20 @@ async function start() {
         }
         logOrch.info(
             `serial env source=${serial.matchersSource} matchers=${serial.matchersCount ?? 0} ` +
-            `rescanMs=${serial.rescanMs ?? 0} summaryMs=${serial.summaryMs ?? 0} defaultBaud=${serial.defaultBaud}`
+                `rescanMs=${serial.rescanMs ?? 0} summaryMs=${serial.summaryMs ?? 0} defaultBaud=${serial.defaultBaud}`
         )
 
         // Graceful shutdown
         const shutdown = async (signal: NodeJS.Signals) => {
             if (!app) process.exit(0)
             try {
-                logOrch.info(`received ${signal}, shutting down`)
+                logOrch.info(`received signal=${signal} action=shutdown-start`)
                 await app.close()
-                logOrch.info('orchestrator closed')
+                logOrch.info('action=shutdown-complete component=orchestrator')
                 process.exit(0)
             } catch (err) {
-                logOrch.error('error during shutdown', { err: (err as Error).message })
+                const msg = (err as Error).message
+                logOrch.error(`action=shutdown-failed err="${msg}"`)
                 process.exit(1)
             }
         }
@@ -132,17 +143,21 @@ async function start() {
         const msg = (err as Error)?.message ?? String(err)
         logOrch.error(`failed to start err="${msg}"`)
 
-        // If we *do* have device status, surface it once for easier diagnosis.
+        // Best-effort diagnostic snapshot only. This is not the root-cause classification.
         if (app && (app as any).getDeviceStatus) {
             try {
                 const status = (app as any).getDeviceStatus()
-                logOrch.error('device readiness at failure', {
-                    ready: status.ready,
-                    missing: status.missing,
-                    byStatus: status.byStatus,
-                })
-            } catch {
-                // best-effort only
+                logOrch.error(
+                    'startup failure diagnostic ' +
+                        `kind=device-readiness-snapshot ready=${status.ready ? 'true' : 'false'} ` +
+                        `missing=${jsonOneLine(status.missing)} byStatus=${jsonOneLine(status.byStatus)}`
+                )
+            } catch (snapshotErr) {
+                const snapshotMsg =
+                    snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)
+                logOrch.warn(
+                    `startup failure diagnostic kind=device-readiness-snapshot-unavailable err="${snapshotMsg}"`
+                )
             }
         }
 

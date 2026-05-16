@@ -23,6 +23,11 @@ export type WorkerPoolOptions = {
   workerUrl: URL
   maxPending: number
   timeoutMs: number
+  /**
+   * Optional Node execArgv to pass into worker threads.
+   * Needed for TS workers (tsx loader) in dev mode.
+   */
+  execArgv?: string[]
 }
 
 type PendingTask = {
@@ -63,6 +68,7 @@ export class WorkerPool {
   private readonly workerUrl: URL
   private readonly maxPending: number
   private readonly timeoutMs: number
+  private readonly execArgv: string[] | undefined
 
   private readonly slots: WorkerSlot[] = []
   private readonly queue: PendingTask[] = []
@@ -74,6 +80,8 @@ export class WorkerPool {
     this.workerUrl = opts.workerUrl
     this.maxPending = opts.maxPending
     this.timeoutMs = opts.timeoutMs
+    this.execArgv =
+      Array.isArray(opts.execArgv) && opts.execArgv.length > 0 ? opts.execArgv.slice() : undefined
   }
 
   async start(): Promise<void> {
@@ -88,7 +96,9 @@ export class WorkerPool {
     const id = `${this.name}:${randomUUID()}`
     const slot: WorkerSlot = {
       id,
-      worker: new Worker(this.workerUrl, { type: 'module' }),
+      // NOTE: Do not pass { type: 'module' } — WorkerOptions (Node typings) does not support it here.
+      // ESM vs TS execution is handled by workerUrl + execArgv (tsx loader) and package/module settings.
+      worker: new Worker(this.workerUrl, { execArgv: this.execArgv }),
       busy: false,
       currentTaskId: null,
       restarting: false,
@@ -174,7 +184,8 @@ export class WorkerPool {
       } catch {
         // ignore
       }
-      const next = new Worker(this.workerUrl, { type: 'module' })
+      // NOTE: Do not pass { type: 'module' } — see spawnSlot() note above.
+      const next = new Worker(this.workerUrl, { execArgv: this.execArgv })
       this.attachWorker(slot, next)
     } finally {
       slot.restarting = false
@@ -364,10 +375,7 @@ export async function authWarmupPool(pool: WorkerPool): Promise<AuthWarmupStatus
   return await pool.exec<AuthWarmupStatus>((taskId) => ({ kind: 'authWarmup', taskId }))
 }
 
-export async function publishRunInPool(
-  pool: WorkerPool,
-  envelope: any
-): Promise<PublishReceiptWorker> {
+export async function publishRunInPool(pool: WorkerPool, envelope: any): Promise<PublishReceiptWorker> {
   return await pool.exec<PublishReceiptWorker>((taskId) => ({
     kind: 'publishRun',
     taskId,
