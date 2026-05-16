@@ -1,33 +1,58 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { config as dotenvConfig } from 'dotenv'
 import type { FastifyInstance } from 'fastify'
-import { buildApp } from './app'
 import {
     createLogger,
     LogChannel
 } from '@autobench98/logging'
 
 /**
- * Load environment variables with a clear precedence:
+ * Load environment variables before importing modules that read process.env at
+ * module scope, especially core/state.ts. The repository keeps .env files at
+ * the repo root, while npm workspace scripts commonly run with cwd set to
+ * services/orchestrator, so check both locations.
+ *
+ * Precedence within each env directory:
  *   1) .env
  *   2) .env.{NODE_ENV}
  *   3) .env.local
- * Later files override earlier ones.
+ * Later files override earlier ones. Service-local files override repo-root
+ * files when both are present.
  */
 ;(function loadEnv() {
     const cwd = process.cwd()
-    const env = String(process.env.NODE_ENV || 'development')
-    const files = [
-        path.resolve(cwd, '.env'),
-        path.resolve(cwd, `.env.${env}`),
-        path.resolve(cwd, '.env.local'),
-    ]
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url))
+    const repoRoot = path.resolve(moduleDir, '../../..')
 
-    for (const file of files) {
-        if (fs.existsSync(file)) {
-            dotenvConfig({ path: file, override: true })
+    const envDirs = Array.from(new Set([repoRoot, cwd]))
+    const explicitNodeEnv = String(process.env.NODE_ENV ?? '').trim()
+
+    const loadForMode = (mode: string) => {
+        for (const dir of envDirs) {
+            const files = [
+                path.resolve(dir, '.env'),
+                path.resolve(dir, `.env.${mode}`),
+                path.resolve(dir, '.env.local'),
+            ]
+
+            for (const file of files) {
+                if (fs.existsSync(file)) {
+                    dotenvConfig({ path: file, override: true })
+                }
+            }
         }
+    }
+
+    const initialMode = explicitNodeEnv || 'development'
+    loadForMode(initialMode)
+
+    // If NODE_ENV came from .env itself, honor it by loading that mode's file too.
+    // A real process env NODE_ENV remains authoritative for selecting the mode.
+    const discoveredMode = String(process.env.NODE_ENV ?? '').trim()
+    if (!explicitNodeEnv && discoveredMode && discoveredMode !== initialMode) {
+        loadForMode(discoveredMode)
     }
 })()
 
@@ -97,6 +122,7 @@ async function start() {
     let app: FastifyInstance | null = null
 
     try {
+        const { buildApp } = await import('./app.js')
         app = buildApp()
 
         // Standard Fastify ready cycle (will run plugin onReady hooks).
