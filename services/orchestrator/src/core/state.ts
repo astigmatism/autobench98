@@ -8,6 +8,8 @@ import type {
 import type { KeyboardStateSlice as PS2KeyboardSnapshot } from '../devices/ps2-keyboard/types.js'
 import type { PS2MouseStateSlice as PS2MouseSnapshot } from '../devices/ps2-mouse/types.js'
 import type { FrontPanelStateSlice as FrontPanelSnapshot } from '../devices/front-panel/types.js'
+import type { BenchmarkRunnerSnapshot } from './benchmarks/types.js'
+import { createIdleBenchmarkRunnerSnapshot } from './benchmarks/types.js'
 
 /**
  * fast-json-patch interop normalization:
@@ -271,6 +273,7 @@ export type AppState = {
     frontPanel: FrontPanelSnapshot
     cfImager: CfImagerSnapshot
     sidecar: SidecarSnapshot
+    benchmarkRunner: BenchmarkRunnerSnapshot
 }
 
 /* -------------------------------------------------------------------------- */
@@ -655,6 +658,13 @@ const initialSidecar: SidecarSnapshot = {
     lastError: undefined,
 }
 
+
+/* -------------------------------------------------------------------------- */
+/*  Initial benchmark runner slice                                            */
+/* -------------------------------------------------------------------------- */
+
+const initialBenchmarkRunner: BenchmarkRunnerSnapshot = createIdleBenchmarkRunnerSnapshot()
+
 /* -------------------------------------------------------------------------- */
 /*  Initial full state                                                        */
 /* -------------------------------------------------------------------------- */
@@ -706,6 +716,7 @@ let state: AppState = {
     frontPanel: initialFrontPanel,
     cfImager: initialCfImager,
     sidecar: initialSidecar,
+    benchmarkRunner: initialBenchmarkRunner,
 }
 
 // Freeze the initial authoritative state.
@@ -1073,4 +1084,28 @@ export function updateSidecarSnapshot(partial: Partial<SidecarSnapshot>) {
         ...partial,
     }
     set('sidecar', merged)
+}
+
+
+/* -------------------------------------------------------------------------- */
+/*  Benchmark runner update helpers                                           */
+/* -------------------------------------------------------------------------- */
+
+export function setBenchmarkRunnerSnapshot(next: BenchmarkRunnerSnapshot) {
+    set('benchmarkRunner', next)
+}
+
+export function updateBenchmarkRunnerSnapshot(partial: Partial<BenchmarkRunnerSnapshot>) {
+    const prev = state.benchmarkRunner
+
+    const merged: BenchmarkRunnerSnapshot = {
+        ...prev,
+        ...clone(partial),
+        updatedAt:
+            (partial as any).updatedAt !== undefined
+                ? (partial as any).updatedAt
+                : Date.now(),
+    }
+
+    set('benchmarkRunner', merged)
 }

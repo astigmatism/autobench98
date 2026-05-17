@@ -18,7 +18,9 @@
     "@serialport/parser-readline": "^13.0.0",
     "fastify": "^5.0.0",
     "googleapis": "^171.4.0",
-    "serialport": "^13.0.0"
+    "serialport": "^13.0.0",
+    "sharp": "^0.34.5",
+    "ssim.js": "^3.5.0"
   },
   "devDependencies": {
     "@types/busboy": "^1.5.4",

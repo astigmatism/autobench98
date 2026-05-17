@@ -38,6 +38,7 @@ import ps2MousePlugin from './plugins/ps2Mouse.js'
 import frontPanelPlugin from './plugins/frontPanel.js'
 import sinksPlugin from './plugins/sinks.js'
 import tipsPanelPlugin from './plugins/tipsPanel.js'
+import benchmarksPlugin from './plugins/benchmarks.js'
 import type { SinkManager } from './core/sinks/sink-manager.js'
 import type { SheetsSink } from './core/sinks/sheets/sheets.sink.js'
 
@@ -199,6 +200,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(cfImagerPlugin)
 
     void app.register(streamProxyPlugin)
+
+    // Benchmark runner scaffold (uses device services + sidecar screenshot readback)
+    void app.register(benchmarksPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {

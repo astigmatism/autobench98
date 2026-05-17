@@ -29,6 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SOURCE_DIRS=(
   "apps"
+  "docs"
   "arduino"
   "packages"
   "services"
