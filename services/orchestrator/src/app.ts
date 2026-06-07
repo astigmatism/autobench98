@@ -2,6 +2,7 @@
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
+    type FastifyHttpsOptions,
     type FastifyRequest,
     type FastifyReply
 } from 'fastify'
@@ -11,6 +12,7 @@ import fastifyMultipart from '@fastify/multipart'
 // ✨ static hosting imports
 import fastifyStatic from '@fastify/static'
 import path from 'node:path'
+import type { Server as HttpsServer } from 'node:https'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -55,6 +57,18 @@ declare module 'fastify' {
 
 interface LogsQuery {
     n?: string
+}
+
+type BuildAppOptions = FastifyServerOptions | FastifyHttpsOptions<HttpsServer>
+
+function createFastifyApp(opts: BuildAppOptions): FastifyInstance {
+    const fastifyOptions = { logger: false as const, ...opts }
+
+    if ('https' in fastifyOptions) {
+        return Fastify(fastifyOptions as FastifyHttpsOptions<HttpsServer>) as unknown as FastifyInstance
+    }
+
+    return Fastify(fastifyOptions as FastifyServerOptions)
 }
 
 // ---- Request logging config (env) ----
@@ -154,7 +168,7 @@ function getPublicSheetsStatus(app: FastifyInstance): PublicSheetsStatus {
     }
 }
 
-export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
+export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
     const { channel } = createLogger('orchestrator', clientBuf)
     const logApp = channel(LogChannel.app)
     const logReq = channel(LogChannel.request)
@@ -162,7 +176,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const startedAt = new Map<string, number>()
     const sampledIds = new Set<string>()
 
-    const app = Fastify({ logger: false, ...opts })
+    const app = createFastifyApp(opts)
     app.decorate('clientBuf', clientBuf)
 
     // CORS

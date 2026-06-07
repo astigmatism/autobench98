@@ -3,10 +3,14 @@ set -euo pipefail
 
 # Creates a zip of selected project source trees and root files for AI review.
 # Usage:
-#   ./package-source-for-ai.sh /path/to/source-for-ai.zip
+#   ./package-source-for-ai.sh /path/to/output-directory
+#
+# Output:
+#   /path/to/output-directory/autobench98-YYYYMMDD-HHMMSS.zip
 #
 # Included source directories:
 #   apps/
+#   docs/
 #   arduino/
 #   packages/
 #   services/
@@ -66,16 +70,14 @@ EXCLUDE_PATTERNS=(
 )
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 /path/to/output.zip"
+  echo "Usage: $0 /path/to/output-directory"
   exit 1
 fi
 
-OUTPUT_FILE="$1"
+OUTPUT_DIR="$1"
 
-if [[ "$OUTPUT_FILE" != *.zip ]]; then
-  echo "Error: output file must end with .zip"
-  exit 1
-fi
+TIMESTAMP="$(date +"%Y%m%d-%H%M%S")"
+OUTPUT_FILE="$OUTPUT_DIR/autobench98-$TIMESTAMP.zip"
 
 cd "$SCRIPT_DIR"
 
@@ -102,7 +104,6 @@ if [[ ${#INCLUDE_PATHS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-OUTPUT_DIR="$(dirname "$OUTPUT_FILE")"
 mkdir -p "$OUTPUT_DIR"
 
 rm -f "$OUTPUT_FILE"
