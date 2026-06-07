@@ -354,7 +354,7 @@ async function loadReferences(): Promise<void> {
         if (data.items.length === 0) {
             selectedReference.value = ''
         } else if (!data.items.some((item) => item.name === selectedReference.value) && !referenceInput.value) {
-            selectedReference.value = data.items[0].name
+            selectedReference.value = data.items[0]?.name ?? ''
         }
     } catch (err) {
         referenceError.value = err instanceof Error ? err.message : String(err)
