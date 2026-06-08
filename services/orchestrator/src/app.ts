@@ -2,7 +2,6 @@
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
-    type FastifyHttpsOptions,
     type FastifyRequest,
     type FastifyReply
 } from 'fastify'
@@ -12,7 +11,6 @@ import fastifyMultipart from '@fastify/multipart'
 // ✨ static hosting imports
 import fastifyStatic from '@fastify/static'
 import path from 'node:path'
-import type { Server as HttpsServer } from 'node:https'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -59,16 +57,16 @@ interface LogsQuery {
     n?: string
 }
 
-type BuildAppOptions = FastifyServerOptions | FastifyHttpsOptions<HttpsServer>
+type BuildAppOptions = FastifyServerOptions
 
 function createFastifyApp(opts: BuildAppOptions): FastifyInstance {
-    const fastifyOptions = { logger: false as const, ...opts }
-
-    if ('https' in fastifyOptions) {
-        return Fastify(fastifyOptions as FastifyHttpsOptions<HttpsServer>) as unknown as FastifyInstance
+    const fastifyOptions: FastifyServerOptions = {
+        logger: false,
+        trustProxy: parseOptionalBoolEnv('API_TRUST_PROXY', 'TRUST_PROXY') ?? true,
+        ...opts
     }
 
-    return Fastify(fastifyOptions as FastifyServerOptions)
+    return Fastify(fastifyOptions)
 }
 
 // ---- Request logging config (env) ----
@@ -103,6 +101,99 @@ let reqCounter = 0
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const WEB_DIST = path.resolve(__dirname, '../../../apps/web/dist')
+
+
+function parseBooleanValue(name: string, value: string): boolean {
+    const normalized = value.trim().toLowerCase()
+    if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true
+    if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false
+    throw new Error(`${name} must be a boolean value (true/false), got "${value}"`)
+}
+
+function parseOptionalBoolEnv(...names: string[]): boolean | undefined {
+    for (const name of names) {
+        const value = process.env[name]
+        if (value !== undefined && value.trim() !== '') return parseBooleanValue(name, value)
+    }
+    return undefined
+}
+
+function splitHeaderValue(value: string | string[] | undefined): string | undefined {
+    const raw = Array.isArray(value) ? value[0] : value
+    return raw?.split(',')[0]?.trim()
+}
+
+function isSecureRequest(req: FastifyRequest): boolean {
+    const forwardedProto = splitHeaderValue(req.headers['x-forwarded-proto'])?.toLowerCase()
+    if (forwardedProto === 'https' || forwardedProto === 'wss') return true
+
+    const forwardedSsl = splitHeaderValue(req.headers['x-forwarded-ssl'])?.toLowerCase()
+    if (forwardedSsl === 'on') return true
+
+    const forwardedScheme = splitHeaderValue(req.headers['x-forwarded-scheme'])?.toLowerCase()
+    if (forwardedScheme === 'https') return true
+
+    const encrypted = (req.raw.socket as unknown as { encrypted?: boolean }).encrypted === true
+    return encrypted
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+    if (!address) return false
+    return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+}
+
+function shouldBypassHttpsRedirect(req: FastifyRequest): boolean {
+    if (isLoopbackAddress(req.ip)) return true
+    if (isHealthRequestUrl(req.url)) return true
+    if (req.url === '/ready') return true
+    return false
+}
+
+function stripPortFromHost(hostHeader: string): string {
+    const host = hostHeader.trim()
+    if (!host) return 'localhost'
+
+    if (host.startsWith('[')) {
+        const end = host.indexOf(']')
+        if (end !== -1) return host.slice(0, end + 1)
+        return host
+    }
+
+    const firstColon = host.indexOf(':')
+    const lastColon = host.lastIndexOf(':')
+    if (firstColon !== -1 && firstColon === lastColon) return host.slice(0, lastColon)
+
+    return host
+}
+
+function hostWithOptionalPort(host: string, port: number): string {
+    const bareHost = stripPortFromHost(host)
+    const normalizedHost = bareHost.includes(':') && !bareHost.startsWith('[')
+        ? `[${bareHost}]`
+        : bareHost
+
+    return port === 443 ? normalizedHost : `${normalizedHost}:${port}`
+}
+
+function parsePublicHttpsPort(): number {
+    const raw = process.env.API_PUBLIC_HTTPS_PORT?.trim()
+    if (!raw) return 443
+
+    const port = Number(raw)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error(`API_PUBLIC_HTTPS_PORT must be an integer TCP port from 1 to 65535, got "${raw}"`)
+    }
+    return port
+}
+
+function buildHttpsRedirectLocation(req: FastifyRequest): string {
+    const hostHeader = String(req.headers.host ?? 'localhost')
+    const publicHost = process.env.API_PUBLIC_HTTPS_HOST?.trim() || hostHeader
+    const publicPort = parsePublicHttpsPort()
+    const requestUrl = req.raw.url && req.raw.url.startsWith('/') ? req.raw.url : '/'
+
+    return `https://${hostWithOptionalPort(publicHost, publicPort)}${requestUrl}`
+}
 
 function isHealthRequestUrl(url: string): boolean {
     // Fastify's req.url may include querystring
@@ -178,6 +269,34 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
 
     const app = createFastifyApp(opts)
     app.decorate('clientBuf', clientBuf)
+
+
+    const forceHttpsRedirect = parseOptionalBoolEnv(
+        'API_FORCE_HTTPS_REDIRECT',
+        'FORCE_HTTPS_REDIRECT'
+    ) ?? (process.env.NODE_ENV === 'production')
+
+    app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
+        if (!forceHttpsRedirect) return
+        if (isSecureRequest(req)) return
+        if (shouldBypassHttpsRedirect(req)) return
+
+        if (req.method === 'GET' || req.method === 'HEAD') {
+            const location = buildHttpsRedirectLocation(req)
+            reply
+                .code(308)
+                .header('Location', location)
+                .header('Content-Type', 'text/plain; charset=utf-8')
+                .send(req.method === 'HEAD' ? undefined : `Permanent Redirect: ${location}\n`)
+            return reply
+        }
+
+        reply
+            .code(426)
+            .header('Upgrade', 'TLS/1.2, HTTP/1.1')
+            .send({ ok: false, error: 'https_required' })
+        return reply
+    })
 
     // CORS
     void app.register(cors, { origin: true })
