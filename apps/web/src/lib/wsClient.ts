@@ -1,3 +1,5 @@
+// apps/web/src/lib/wsClient.ts
+
 type Handler = (msg: any) => void
 
 type ReconnectOptions = {
@@ -16,6 +18,35 @@ type HeartbeatOptions = {
 type WSClientOptions = {
     heartbeat?: HeartbeatOptions
     reconnect?: ReconnectOptions
+}
+
+// ----------------------------
+// Tips WS message types (tips-only; does not affect global snapshot/patch/logs)
+// ----------------------------
+
+export type TipsHelloMessage = {
+    type: 'tips.hello'
+    payload: { clientId: string }
+}
+
+export type TipsNextMessage = {
+    type: 'tips.next'
+    payload: { clientId: string }
+}
+
+export type TipsAckMessage = {
+    type: 'tips.ack'
+    payload?: { ok?: boolean; clientId?: string }
+}
+
+export type TipsTipMessage = {
+    type: 'tips.tip'
+    payload?: { clientId?: string; tip?: any }
+}
+
+export type TipsErrorMessage = {
+    type: 'tips.error'
+    payload?: { clientId?: string; error?: string }
 }
 
 // ----------------------------
@@ -143,8 +174,46 @@ const V_RC_MAX = Number(ENV.VITE_WS_RECONNECT_MAX_MS ?? 15000)
 const V_RC_FACTOR = Number(ENV.VITE_WS_RECONNECT_FACTOR ?? 1.8)
 const V_RC_JITTER = Number(ENV.VITE_WS_RECONNECT_JITTER ?? 0.2)
 
-type WSStatusState = 'connected' | 'reconnecting' | 'disconnected'
+export type WSStatusState = 'connected' | 'reconnecting' | 'disconnected'
 type CloseIntent = 'none' | 'reopen' | 'shutdown'
+
+export type WSStatusSnapshot = {
+    state: WSStatusState
+    attempts?: number
+    delayMs?: number
+    lastChangeTs: number
+}
+
+function safeTipsClientId(v: unknown): string {
+    if (typeof v !== 'string') return ''
+    const s = v.trim()
+    if (!s) return ''
+    if (s.length > 128) return ''
+    return s
+}
+
+function genTipsClientId(): string {
+    // Bounded random id; no PII. Prefer crypto if available.
+    try {
+        const cryptoAny = (globalThis as any).crypto
+        if (cryptoAny?.getRandomValues) {
+            const buf = new Uint8Array(16)
+            cryptoAny.getRandomValues(buf)
+            return Array.from(buf)
+                .map((b) => b.toString(16).padStart(2, '0'))
+                .join('')
+        }
+    } catch {
+        // ignore
+    }
+    return (
+        Math.random().toString(16).slice(2) +
+        Math.random().toString(16).slice(2) +
+        Math.random().toString(16).slice(2)
+    ).slice(0, 32)
+}
+
+const TIPS_CLIENT_ID_LS_KEY = 'ab98:tips:clientId'
 
 export class WSClient {
     private ws?: WebSocket
@@ -170,6 +239,19 @@ export class WSClient {
     // internal close intent guard (prevents reconnect/status flicker on intentional close)
     private closeIntent: CloseIntent = 'none'
 
+    // tips-only client identifier (persisted, bounded)
+    private tipsClientId: string | null = null
+
+    // ------------------------------------------------------------------
+    // NEW: persisted last status (for immediate reads by UI)
+    // ------------------------------------------------------------------
+    private lastStatus: WSStatusSnapshot = {
+        state: 'disconnected',
+        attempts: 0,
+        delayMs: 0,
+        lastChangeTs: Date.now()
+    }
+
     constructor(opts: WSClientOptions = {}) {
         const hb = opts.heartbeat ?? {}
         const rc = opts.reconnect ?? {}
@@ -184,6 +266,15 @@ export class WSClient {
         this.backoffJitter = rc.jitter ?? V_RC_JITTER
     }
 
+    /**
+     * NEW: return last known WS status immediately, without waiting for an event.
+     * This is purely observational and does not mutate behavior.
+     */
+    getStatus(): WSStatusSnapshot {
+        // Return a shallow clone so consumers can’t mutate internal state.
+        return { ...this.lastStatus }
+    }
+
     connect(url: string) {
         this.url = url
         this.shouldReconnect = true
@@ -194,6 +285,70 @@ export class WSClient {
         if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(obj))
         }
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Tips-only helpers                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    /**
+     * Returns a stable, bounded tips client id.
+     * - persisted in localStorage (best-effort)
+     * - does NOT affect any non-tips protocols
+     */
+    getTipsClientId(): string {
+        if (this.tipsClientId) return this.tipsClientId
+
+        // Try localStorage (best-effort)
+        try {
+            const raw = localStorage.getItem(TIPS_CLIENT_ID_LS_KEY)
+            const v = safeTipsClientId(raw)
+            if (v) {
+                this.tipsClientId = v
+                return v
+            }
+        } catch {
+            // ignore
+        }
+
+        // Generate + persist (best-effort)
+        const id = genTipsClientId()
+        this.tipsClientId = id
+        try {
+            localStorage.setItem(TIPS_CLIENT_ID_LS_KEY, id)
+        } catch {
+            // ignore
+        }
+        return id
+    }
+
+    /**
+     * Explicitly set the tips client id (e.g. for testing).
+     * If invalid, no-op.
+     */
+    setTipsClientId(clientId: string): void {
+        const id = safeTipsClientId(clientId)
+        if (!id) return
+        this.tipsClientId = id
+        try {
+            localStorage.setItem(TIPS_CLIENT_ID_LS_KEY, id)
+        } catch {
+            // ignore
+        }
+    }
+
+    /** Tips handshake (tips-only). */
+    sendTipsHello(clientId?: string) {
+        const id = safeTipsClientId(clientId) || this.getTipsClientId()
+        const msg: TipsHelloMessage = { type: 'tips.hello', payload: { clientId: id } }
+        this.send(msg)
+    }
+
+    /** Request next tip for this client (tips-only). */
+    sendTipsNext(clientId?: string) {
+        const id = safeTipsClientId(clientId) || this.getTipsClientId()
+        const msg: TipsNextMessage = { type: 'tips.next', payload: { clientId: id } }
+        this.send(msg)
     }
 
     // ----------------------------
@@ -404,6 +559,9 @@ export class WSClient {
             // handle pong for our heartbeat
             if (msg?.type === 'pong') {
                 this.clearPongTimeout()
+                // IMPORTANT (verified gap fix): still surface pong to listeners (e.g. WsStatusBadge pulse),
+                // while preserving heartbeat semantics.
+                this.emit('message', msg)
                 return
             }
 
@@ -433,7 +591,10 @@ export class WSClient {
 
     private scheduleHeartbeat() {
         this.clearHeartbeat()
-        this.hbTimer = window.setTimeout(() => this.doHeartbeat(), Math.min(1000, this.hbIntervalMs)) as unknown as number
+        this.hbTimer = window.setTimeout(
+            () => this.doHeartbeat(),
+            Math.min(1000, this.hbIntervalMs)
+        ) as unknown as number
     }
 
     private doHeartbeat() {
@@ -522,6 +683,23 @@ export class WSClient {
     }
 
     private emitStatus(state: WSStatusState, extra: any = {}) {
+        // NEW: persist last status *before* emitting so observers can call getStatus() immediately.
+        const now = Date.now()
+        const attempts =
+            typeof extra?.attempts === 'number'
+                ? extra.attempts
+                : typeof this.lastStatus.attempts === 'number'
+                  ? this.lastStatus.attempts
+                  : 0
+        const delayMs = typeof extra?.delayMs === 'number' ? extra.delayMs : 0
+
+        this.lastStatus = {
+            state,
+            attempts,
+            delayMs,
+            lastChangeTs: now
+        }
+
         this.emit('status', { state, ...extra })
     }
 }

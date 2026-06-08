@@ -2,6 +2,7 @@
 import Fastify, {
     type FastifyInstance,
     type FastifyServerOptions,
+    type FastifyHttpsOptions,
     type FastifyRequest,
     type FastifyReply
 } from 'fastify'
@@ -11,6 +12,7 @@ import fastifyMultipart from '@fastify/multipart'
 // ✨ static hosting imports
 import fastifyStatic from '@fastify/static'
 import path from 'node:path'
+import type { Server as HttpsServer } from 'node:https'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -36,16 +38,37 @@ import streamProxyPlugin from './plugins/streamProxy.js'
 import ps2KeyboardPlugin from './plugins/ps2Keyboard.js'
 import ps2MousePlugin from './plugins/ps2Mouse.js'
 import frontPanelPlugin from './plugins/frontPanel.js'
+import sinksPlugin from './plugins/sinks.js'
+import tipsPanelPlugin from './plugins/tipsPanel.js'
+import benchmarksPlugin from './plugins/benchmarks.js'
+import type { SinkManager } from './core/sinks/sink-manager.js'
+import type { SheetsSink } from './core/sinks/sheets/sheets.sink.js'
 
 declare module 'fastify' {
     interface FastifyInstance {
         clientBuf: ClientLogBuffer
         getDeviceStatus?: () => DeviceStatusSummary
+
+        // Result sinks
+        sinkManager?: SinkManager
+        sheetsSink?: SheetsSink
     }
 }
 
 interface LogsQuery {
     n?: string
+}
+
+type BuildAppOptions = FastifyServerOptions | FastifyHttpsOptions<HttpsServer>
+
+function createFastifyApp(opts: BuildAppOptions): FastifyInstance {
+    const fastifyOptions = { logger: false as const, ...opts }
+
+    if ('https' in fastifyOptions) {
+        return Fastify(fastifyOptions as FastifyHttpsOptions<HttpsServer>) as unknown as FastifyInstance
+    }
+
+    return Fastify(fastifyOptions as FastifyServerOptions)
 }
 
 // ---- Request logging config (env) ----
@@ -117,7 +140,35 @@ function shouldSkipRequestLog(req: FastifyRequest): boolean {
     return false
 }
 
-export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
+type PublicSheetsStatus = {
+    enabled: boolean
+    dryRun: boolean
+    lockMode: string | null
+    workersBlocking: number | null
+    workersBackground: number | null
+    spreadsheetIdPresent: boolean
+    serviceAccountEmailPresent: boolean
+    privateKeyPresent: boolean
+}
+
+function getPublicSheetsStatus(app: FastifyInstance): PublicSheetsStatus {
+    const sink = app.sheetsSink
+    const cfg = sink?.getConfig() ?? null
+
+    // SAFETY: never return secrets (private key), and avoid returning raw spreadsheet IDs by default.
+    return {
+        enabled: cfg?.enabled ?? false,
+        dryRun: cfg?.dryRun ?? true,
+        lockMode: (cfg?.lockMode ?? null) as any,
+        workersBlocking: cfg?.workersBlocking ?? null,
+        workersBackground: cfg?.workersBackground ?? null,
+        spreadsheetIdPresent: Boolean(cfg?.spreadsheetId),
+        serviceAccountEmailPresent: Boolean(cfg?.serviceAccountEmail),
+        privateKeyPresent: Boolean(cfg?.privateKey)
+    }
+}
+
+export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
     const { channel } = createLogger('orchestrator', clientBuf)
     const logApp = channel(LogChannel.app)
     const logReq = channel(LogChannel.request)
@@ -125,7 +176,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     const startedAt = new Map<string, number>()
     const sampledIds = new Set<string>()
 
-    const app = Fastify({ logger: false, ...opts })
+    const app = createFastifyApp(opts)
     app.decorate('clientBuf', clientBuf)
 
     // CORS
@@ -142,6 +193,13 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
         limits: { files: 1, fileSize: 2 * 1024 * 1024 }
     })
 
+    // ✅ Result sinks (Google Sheets, etc.)
+    // NOTE: This plugin does NOT register HTTP routes; it decorates app with sinkManager/sheetsSink.
+    void app.register(sinksPlugin)
+
+    // ✅ Tips & Information Panel (provides app.tipsPanelService for ws tips-only messages)
+    void app.register(tipsPanelPlugin)
+
     // WebSocket + layouts routes
     void app.register(wsPlugin)
     void app.register(layoutsRoutes)
@@ -156,6 +214,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(cfImagerPlugin)
 
     void app.register(streamProxyPlugin)
+
+    // Benchmark runner scaffold (uses device services + sidecar screenshot readback)
+    void app.register(benchmarksPlugin)
 
     // ---------- Request/Response logging hooks ----------
     app.addHook('onRequest', async (req: FastifyRequest) => {
@@ -196,9 +257,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
         if (start !== undefined) startedAt.delete(req.id)
         const ms = start !== undefined ? Date.now() - start : undefined
 
-        logReq.info(
-            `${req.method} ${req.url} → ${reply.statusCode}${ms !== undefined ? ` (${ms} ms)` : ''}`
-        )
+        logReq.info(`${req.method} ${req.url} → ${reply.statusCode}${ms !== undefined ? ` (${ms} ms)` : ''}`)
 
         if (REQUEST_VERBOSE) {
             const outLen = reply.getHeader('content-length') ?? null
@@ -215,7 +274,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
         info: { emoji: 'ℹ️', color: 'cyan' },
         warn: { emoji: '⚠️', color: 'yellow' },
         error: { emoji: '❌', color: 'red' },
-        fatal: { emoji: '💥', color: 'purple' }
+        fatal: { emoji: '💥', color: 'purple' },
     }
 
     function normalizeEntry(input: any): ClientLog | null {
@@ -247,11 +306,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
 
         try {
             const body = (req.body ?? {}) as any
-            const rawEntries = Array.isArray(body)
-                ? body
-                : Array.isArray(body.entries)
-                  ? body.entries
-                  : [body]
+            const rawEntries = Array.isArray(body) ? body : Array.isArray(body.entries) ? body.entries : [body]
 
             let accepted = 0
             for (const raw of rawEntries) {
@@ -269,9 +324,9 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     // -----------------------------
 
     // Health / ready
-    app.get('/health', async () => ({ status: 'ok' }))
+    app.get('/health', { config: { skipRequestLog: true } }, async () => ({ status: 'ok' }))
 
-    app.get('/ready', async () => {
+    app.get('/ready', { config: { skipRequestLog: true } }, async () => {
         const statusFn = app.getDeviceStatus
         if (!statusFn) {
             // If the plugin isn't loaded for some reason, surface "ready"
@@ -291,9 +346,33 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
                 vid: d.vid,
                 pid: d.pid,
                 baudRate: d.baudRate,
-                idToken: d.idToken
-            }))
+                idToken: d.idToken,
+            })),
         }
+    })
+
+    // ✅ Sinks status (routes kept in app.ts by design)
+    app.get('/api/sinks', async (_req, reply) => {
+        const sinkManager = app.sinkManager
+        if (!sinkManager) {
+            reply.code(503)
+            return { ok: false, error: 'sinkManager not available (plugin not registered?)' }
+        }
+
+        const health = await sinkManager.healthySnapshot()
+        const sheets = getPublicSheetsStatus(app)
+
+        return { ok: true, health, sheets }
+    })
+
+    app.post('/api/sinks/sheets/healthcheck', async (_req, reply) => {
+        const sink = app.sheetsSink
+        if (!sink) {
+            reply.code(503)
+            return { ok: false, error: 'sheetsSink not available (plugin not registered?)' }
+        }
+        const ok = await sink.healthy()
+        return { ok }
     })
 
     app.get('/', async (_req, reply) => {
@@ -337,7 +416,7 @@ export function buildApp(opts: FastifyServerOptions = {}): FastifyInstance {
     void app.register(fastifyStatic, {
         root: WEB_DIST,
         prefix: '/studio/',
-        index: ['index.html']
+        index: ['index.html'],
     })
 
     app.get('/studio', async (_req, reply) => {

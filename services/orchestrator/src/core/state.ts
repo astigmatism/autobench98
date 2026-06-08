@@ -8,6 +8,8 @@ import type {
 import type { KeyboardStateSlice as PS2KeyboardSnapshot } from '../devices/ps2-keyboard/types.js'
 import type { PS2MouseStateSlice as PS2MouseSnapshot } from '../devices/ps2-mouse/types.js'
 import type { FrontPanelStateSlice as FrontPanelSnapshot } from '../devices/front-panel/types.js'
+import type { BenchmarkRunnerSnapshot } from './benchmarks/types.js'
+import { createIdleBenchmarkRunnerSnapshot } from './benchmarks/types.js'
 
 /**
  * fast-json-patch interop normalization:
@@ -40,6 +42,43 @@ const compareFn: (a: unknown, b: unknown) => jsonpatchNS.Operation[] = (() => {
  * Client-consumable server configuration shipped inside the state snapshot.
  * Frontend should adopt these, avoiding client-side .env for these knobs.
  */
+export type TipsServerConfig = {
+    enabled: boolean
+    intervalMs: number
+    pageDelim: string
+    tab: string
+    cacheTtlMs: number
+    strict: boolean
+    defaultCategories: string[]
+    maxTextChars: number
+    maxPagesPerTip: number
+
+    /**
+     * 1-based sheet row that contains the category headers.
+     * (Used for discovery only; no full tip prefetch.)
+     */
+    categoryHeaderRow: number
+
+    /**
+     * 1-based sheet row where tips begin (inclusive). Tips are read downward from here.
+     */
+    tipsStartRow: number
+
+    /**
+     * OPTIONAL: 1-based sheet row that contains per-category properties (JSON) aligned to the header columns.
+     *
+     * - 0 => disabled (no category properties row)
+     * - >0 => sheet row number to read for properties
+     *
+     * Intended use:
+     * - Provide human-friendly category title (vs internal key)
+     * - Provide color / styling / future per-category settings
+     *
+     * NOTE: This is client-consumable config only. It does NOT include any sensitive sheet identifiers/keys.
+     */
+    categoryPropsRow: number
+}
+
 export type ServerConfig = {
     logs: {
         snapshot: number
@@ -56,6 +95,7 @@ export type ServerConfig = {
         reconnectFactor: number
         reconnectJitter: number
     }
+    tips: TipsServerConfig
 }
 
 /* -------------------------------------------------------------------------- */
@@ -154,6 +194,37 @@ export type AtlonaControllerSnapshot = {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Tips panel snapshot                                                        */
+/* -------------------------------------------------------------------------- */
+
+export type TipsPanelPhase = 'disabled' | 'loading' | 'ready' | 'error'
+
+export type TipsPanelCurrent = {
+    category: string
+    tipId: string
+    pageIndex: number
+    pageCount: number
+    text: string
+    imageUrl: string | null
+    shownAt: number
+}
+
+export type TipsPanelSnapshot = {
+    phase: TipsPanelPhase
+    message?: string
+    stats: {
+        totalEvents: number
+        lastEventAt: number | null
+        lastErrorAt: number | null
+        lastRefreshAt: number | null
+        totalTips: number
+        totalCategories: number
+    }
+    current: TipsPanelCurrent | null
+    eligibleCategories: string[]
+}
+
+/* -------------------------------------------------------------------------- */
 /*  CF Imager snapshot (alias of CfImagerState)                               */
 /* -------------------------------------------------------------------------- */
 
@@ -196,11 +267,13 @@ export type AppState = {
     powerMeter: PowerMeterSnapshot
     serialPrinter: SerialPrinterSnapshot
     atlonaController: AtlonaControllerSnapshot
+    tipsPanel: TipsPanelSnapshot
     ps2Keyboard: PS2KeyboardSnapshot
     ps2Mouse: PS2MouseSnapshot
     frontPanel: FrontPanelSnapshot
     cfImager: CfImagerSnapshot
     sidecar: SidecarSnapshot
+    benchmarkRunner: BenchmarkRunnerSnapshot
 }
 
 /* -------------------------------------------------------------------------- */
@@ -213,16 +286,6 @@ export type PatchEvent = {
     patch: jsonpatchNS.Operation[]
 }
 
-/**
- * Returns true if any operation in a JSON Patch touches (or sources from) a JSON pointer prefix.
- *
- * Examples:
- * - prefix "/frontPanel" will match "/frontPanel/powerSense"
- * - prefix "frontPanel" is normalized to "/frontPanel"
- *
- * Note:
- * - For move/copy operations, both `path` and `from` are considered.
- */
 export function patchTouches(
     patch: jsonpatchNS.Operation[],
     pointerPrefix: string
@@ -242,9 +305,6 @@ export function patchTouches(
     return false
 }
 
-/**
- * Convenience subscription: notify when a single top-level slice changes.
- */
 export function subscribeSlice<K extends keyof AppState>(
     key: K,
     onChange: (slice: Readonly<AppState[K]>, evt: PatchEvent) => void,
@@ -295,6 +355,22 @@ function csv(v: unknown): string[] {
         .filter(Boolean)
 }
 
+function clampInt(n: number, min: number): number {
+    if (!Number.isFinite(n)) return min
+    const i = Math.trunc(n)
+    return i < min ? min : i
+}
+
+/**
+ * Like clampInt, but allows 0 as a valid value (used as "disabled").
+ */
+function clampIntAllow0(n: number, min: number): number {
+    if (!Number.isFinite(n)) return min
+    const i = Math.trunc(n)
+    if (i === 0) return 0
+    return i < min ? min : i
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Immutability helpers                                                      */
 /* -------------------------------------------------------------------------- */
@@ -337,6 +413,27 @@ const WS_RECONNECT_MIN_MS = num(process.env.VITE_WS_RECONNECT_MIN_MS, 1_000)
 const WS_RECONNECT_MAX_MS = num(process.env.VITE_WS_RECONNECT_MAX_MS, 15_000)
 const WS_RECONNECT_FACTOR = num(process.env.VITE_WS_RECONNECT_FACTOR, 1.8)
 const WS_RECONNECT_JITTER = num(process.env.VITE_WS_RECONNECT_JITTER, 0.2)
+
+// ---- Tips panel server-owned config (env -> serverConfig.tips) ----
+// SAFETY: Do NOT include sheets credentials, ids, or private keys here.
+// This object is client-consumable and is shipped in AppState snapshots.
+const TIPS_ENABLED = bool(process.env.TIPS_ENABLED, false)
+const TIPS_INTERVAL_MS = num(process.env.TIPS_INTERVAL_MS, 10_000)
+const TIPS_PAGE_DELIM = String(process.env.TIPS_PAGE_DELIM ?? '---')
+const TIPS_SHEETS_TAB = String(process.env.TIPS_SHEETS_TAB ?? 'TIPS')
+const TIPS_CACHE_TTL_MS = num(process.env.TIPS_CACHE_TTL_MS, 30_000)
+const TIPS_STRICT = bool(process.env.TIPS_STRICT, false)
+const TIPS_DEFAULT_CATEGORIES = csv(process.env.TIPS_DEFAULT_CATEGORIES)
+const TIPS_MAX_TEXT_CHARS = num(process.env.TIPS_MAX_TEXT_CHARS, 4_000)
+const TIPS_MAX_PAGES_PER_TIP = num(process.env.TIPS_MAX_PAGES_PER_TIP, 10)
+
+// NEW: row controls (1-based)
+const TIPS_CATEGORY_HEADER_ROW = clampInt(num(process.env.TIPS_CATEGORY_HEADER_ROW, 1), 1)
+const TIPS_TIPS_START_ROW = clampInt(num(process.env.TIPS_TIPS_START_ROW, 2), 1)
+
+// NEW: optional category properties row (0 disables; otherwise 1-based row index)
+const TIPS_CATEGORY_PROPS_ROW = clampIntAllow0(num(process.env.TIPS_CATEGORY_PROPS_ROW, 0), 1)
+// ---------------------------------------------------------------
 
 // How many full-text jobs to keep in memory/server snapshots
 const SERIAL_PRINTER_HISTORY_LIMIT = num(process.env.SERIAL_PRINTER_HISTORY_LIMIT, 10)
@@ -401,6 +498,25 @@ const initialAtlonaController: AtlonaControllerSnapshot = {
         2: { name: 'minus', isHeld: false },
         3: { name: 'plus', isHeld: false },
     },
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Initial tips panel slice                                                  */
+/* -------------------------------------------------------------------------- */
+
+const initialTipsPanel: TipsPanelSnapshot = {
+    phase: TIPS_ENABLED ? 'loading' : 'disabled',
+    message: undefined,
+    stats: {
+        totalEvents: 0,
+        lastEventAt: null,
+        lastErrorAt: null,
+        lastRefreshAt: null,
+        totalTips: 0,
+        totalCategories: 0,
+    },
+    current: null,
+    eligibleCategories: [],
 }
 
 /* -------------------------------------------------------------------------- */
@@ -542,6 +658,13 @@ const initialSidecar: SidecarSnapshot = {
     lastError: undefined,
 }
 
+
+/* -------------------------------------------------------------------------- */
+/*  Initial benchmark runner slice                                            */
+/* -------------------------------------------------------------------------- */
+
+const initialBenchmarkRunner: BenchmarkRunnerSnapshot = createIdleBenchmarkRunnerSnapshot()
+
 /* -------------------------------------------------------------------------- */
 /*  Initial full state                                                        */
 /* -------------------------------------------------------------------------- */
@@ -567,15 +690,33 @@ let state: AppState = {
             reconnectFactor: WS_RECONNECT_FACTOR,
             reconnectJitter: WS_RECONNECT_JITTER,
         },
+        tips: {
+            enabled: TIPS_ENABLED,
+            intervalMs: TIPS_INTERVAL_MS,
+            pageDelim: TIPS_PAGE_DELIM,
+            tab: TIPS_SHEETS_TAB,
+            cacheTtlMs: TIPS_CACHE_TTL_MS,
+            strict: TIPS_STRICT,
+            defaultCategories: TIPS_DEFAULT_CATEGORIES,
+            maxTextChars: TIPS_MAX_TEXT_CHARS,
+            maxPagesPerTip: TIPS_MAX_PAGES_PER_TIP,
+
+            categoryHeaderRow: TIPS_CATEGORY_HEADER_ROW,
+            tipsStartRow: TIPS_TIPS_START_ROW,
+
+            categoryPropsRow: TIPS_CATEGORY_PROPS_ROW,
+        },
     },
     powerMeter: initialPowerMeter,
     serialPrinter: initialSerialPrinter,
     atlonaController: initialAtlonaController,
+    tipsPanel: initialTipsPanel,
     ps2Keyboard: initialPs2Keyboard,
     ps2Mouse: initialPs2Mouse,
     frontPanel: initialFrontPanel,
     cfImager: initialCfImager,
     sidecar: initialSidecar,
+    benchmarkRunner: initialBenchmarkRunner,
 }
 
 // Freeze the initial authoritative state.
@@ -779,6 +920,45 @@ export function updateAtlonaControllerSnapshot(partial: {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Tips panel update helpers                                                 */
+/* -------------------------------------------------------------------------- */
+
+export function setTipsPanelSnapshot(next: TipsPanelSnapshot) {
+    set('tipsPanel', next)
+}
+
+export function updateTipsPanelSnapshot(partial: {
+    phase?: TipsPanelSnapshot['phase']
+    message?: string
+    current?: TipsPanelSnapshot['current'] | null
+    eligibleCategories?: TipsPanelSnapshot['eligibleCategories']
+    stats?: Partial<TipsPanelSnapshot['stats']>
+}) {
+    const prev = state.tipsPanel
+
+    const mergedStats: TipsPanelSnapshot['stats'] = {
+        ...prev.stats,
+        ...(partial.stats ?? {}),
+    }
+
+    const merged: TipsPanelSnapshot = {
+        phase: partial.phase ?? prev.phase,
+        message: partial.message ?? prev.message,
+        current:
+            partial.current !== undefined
+                ? partial.current
+                : prev.current,
+        eligibleCategories:
+            partial.eligibleCategories !== undefined
+                ? partial.eligibleCategories
+                : prev.eligibleCategories,
+        stats: mergedStats,
+    }
+
+    set('tipsPanel', merged)
+}
+
+/* -------------------------------------------------------------------------- */
 /*  PS2 keyboard update helpers                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -904,4 +1084,28 @@ export function updateSidecarSnapshot(partial: Partial<SidecarSnapshot>) {
         ...partial,
     }
     set('sidecar', merged)
+}
+
+
+/* -------------------------------------------------------------------------- */
+/*  Benchmark runner update helpers                                           */
+/* -------------------------------------------------------------------------- */
+
+export function setBenchmarkRunnerSnapshot(next: BenchmarkRunnerSnapshot) {
+    set('benchmarkRunner', next)
+}
+
+export function updateBenchmarkRunnerSnapshot(partial: Partial<BenchmarkRunnerSnapshot>) {
+    const prev = state.benchmarkRunner
+
+    const merged: BenchmarkRunnerSnapshot = {
+        ...prev,
+        ...clone(partial),
+        updatedAt:
+            (partial as any).updatedAt !== undefined
+                ? (partial as any).updatedAt
+                : Date.now(),
+    }
+
+    set('benchmarkRunner', merged)
 }
